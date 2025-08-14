@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Spartan Nutrition | Energy Teas in Bixby</title>
+    <!-- Primary SEO tags -->
+    <meta
+      name="description"
+      content="Discover tasty and healthy energy at Spartan Nutrition in Bixby. Grab your first‑drink coupon and join us for energy teas, shakes and a friendly hangout."
+    />
+    <!-- Open Graph / Facebook -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Spartan Nutrition – Tasty. Healthy. Energy." />
+    <meta
+      property="og:description"
+      content="Visit Spartan Nutrition in Bixby for energizing teas, shakes and a welcoming hangout. Claim your 50% off first‑drink coupon today."
+    />
+    <meta
+      property="og:image"
+      content="social-card.jpg"
+    />
+    <meta
+      property="og:url"
+      content="https://your-domain.com"
+    />
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Spartan Nutrition – Tasty. Healthy. Energy." />
+    <meta
+      name="twitter:description"
+      content="Visit Spartan Nutrition in Bixby for energizing teas, shakes and a welcoming hangout. Claim your 50% off first‑drink coupon today."
+    />
+    <meta
+      name="twitter:image"
+      content="social-card.jpg"
+    />
+    <!-- Local business schema (update address and phone) -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "LocalBusiness",
+        "name": "Spartan Nutrition",
+        "image": [
+          "/social-card.jpg"
+        ],
+        "@id": "https://your-domain.com",
+        "url": "https://your-domain.com",
+        "telephone": "9189289755",
+        "address": {
+          "@type": "PostalAddress",
+          "streetAddress": "15020 S Memorial Dr STE C",
+          "addressLocality": "Bixby",
+          "addressRegion": "OK",
+          "postalCode": "74008",
+          "addressCountry": "US"
+        },
+        "geo": {
+          "@type": "GeoCoordinates",
+          "latitude": "",
+          "longitude": ""
+        },
+        "openingHoursSpecification": []
+      }
+    </script>
+    <link rel="icon" type="image/x-icon" href="favicon.ico" />
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Flowbite for components -->
+    <script src="https://unpkg.com/@headlessui/react@latest/dist/headlessui.umd.js"></script>
+  </head>
+  <body class="bg-gray-50 text-gray-900 font-sans">
+    <header class="bg-white shadow">
+      <div class="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between">
+        <div class="flex items-center space-x-3">
+          <!-- Use the brand logo instead of the favicon in the header -->
+          <img src="Spartan logo.png" alt="Spartan Nutrition logo" class="h-10 w-10" />
+          <span class="font-bold text-lg">Spartan Nutrition</span>
+        </div>
+        <nav class="hidden sm:flex space-x-6 text-sm font-medium">
+          <a href="#menu" class="hover:text-green-600">Menu</a>
+          <a href="#visit" class="hover:text-green-600">Visit</a>
+          <a href="#faq" class="hover:text-green-600">FAQ</a>
+        </nav>
+        <button
+          id="couponBtn"
+          class="sm:block hidden bg-green-600 hover:bg-green-500 text-white font-semibold px-5 py-2 rounded-lg focus:outline-none"
+        >
+          Get Your First Drink!
+        </button>
+        <div class="sm:hidden">
+          <!-- Mobile CTA icon -->
+          <button
+            id="couponBtnMobile"
+            class="bg-green-600 hover:bg-green-500 text-white font-semibold px-4 py-2 rounded-lg focus:outline-none"
+          >
+            Claim
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- Hero section -->
+    <section
+      class="relative bg-cover bg-center h-[70vh] flex items-center justify-center"
+      style="background-image: url('IMG_8231.jpeg');"
+    >
+      <div
+        class="absolute inset-0 bg-black bg-opacity-40 flex items-center justify-center"
+      ></div>
+      <div class="relative z-10 text-center text-white px-4">
+        <h1 class="text-4xl sm:text-5xl font-extrabold mb-4">
+          Tasty. Healthy. Energy.
+        </h1>
+        <p class="max-w-xl mx-auto text-lg sm:text-xl mb-6">
+          First-time guest? Grab your coupon and experience Bixby's favorite energy teas, shakes and more.
+        </p>
+        <button
+          id="couponBtnHero"
+          class="bg-green-600 hover:bg-green-500 text-white font-semibold px-8 py-3 rounded-lg text-lg focus:outline-none"
+        >
+          Get Your First Drink!
+        </button>
+      </div>
+    </section>
+
+    <!-- Menu Highlights -->
+    <section id="menu" class="py-16 bg-gray-50">
+      <div class="max-w-5xl mx-auto px-4 text-center">
+        <h2 class="text-3xl font-bold mb-8">What We Serve</h2>
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-8">
+          <div class="bg-white p-6 rounded-xl shadow-md hover:shadow-lg transition">
+            <h3 class="text-xl font-semibold mb-2">Energy Teas</h3>
+            <p class="text-sm text-gray-600">
+              Refreshing blends packed with vitamins and natural caffeine to boost your day.
+            </p>
+          </div>
+          <div class="bg-white p-6 rounded-xl shadow-md hover:shadow-lg transition">
+            <h3 class="text-xl font-semibold mb-2">Protein Shakes</h3>
+            <p class="text-sm text-gray-600">
+              Delicious meal-replacement shakes with 24g protein—stay full and satisfied.
+            </p>
+          </div>
+          <div class="bg-white p-6 rounded-xl shadow-md hover:shadow-lg transition">
+            <h3 class="text-xl font-semibold mb-2">Protein Coffee</h3>
+            <p class="text-sm text-gray-600">
+              Your daily coffee elevated with protein and low sugar. Kickstart your mornings!
+            </p>
+          </div>
+          <div class="bg-white p-6 rounded-xl shadow-md hover:shadow-lg transition">
+            <h3 class="text-xl font-semibold mb-2">Kid-Friendly Options</h3>
+            <p class="text-sm text-gray-600">
+              We have tasty and nutritious drinks the whole family will love.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Canisters / Take-home -->
+    <section class="py-16 bg-green-50">
+      <div class="max-w-5xl mx-auto px-4 text-center">
+        <h2 class="text-3xl font-bold mb-6">Take Home Your Favorites</h2>
+        <p class="max-w-2xl mx-auto text-gray-700 mb-8">
+          Love our energy teas? Ask about our full-size canisters to enjoy Spartan Nutrition at home.
+        </p>
+        <button
+          class="bg-green-600 hover:bg-green-500 text-white font-semibold px-6 py-3 rounded-lg focus:outline-none"
+          onclick="document.getElementById('couponBtn').click();"
+        >
+          Get Your First Drink!
+        </button>
+      </div>
+    </section>
+
+    <!-- Gallery section -->
+    <section class="py-16 bg-white">
+      <div class="max-w-5xl mx-auto px-4">
+        <h2 class="text-3xl font-bold mb-8 text-center">See Our Club</h2>
+        <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6">
+          <img src="IMG_6903.JPG" alt="Customer enjoying tea at Spartan Nutrition" class="w-full h-64 object-cover rounded-lg shadow-md" />
+          <img src="IMG_8719.jpeg" alt="Smiling team member holding energy teas" class="w-full h-64 object-cover rounded-lg shadow-md" />
+          <img src="August%20Menu.jpeg" alt="Monthly menu poster" class="w-full h-64 object-cover rounded-lg shadow-md" />
+        </div>
+      </div>
+    </section>
+
+    <!-- Visit section -->
+    <section id="visit" class="py-16 bg-gray-100">
+      <div class="max-w-5xl mx-auto px-4">
+        <h2 class="text-3xl font-bold mb-8 text-center">Visit Us</h2>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-8 text-center">
+          <div class="flex flex-col items-center">
+            <svg class="w-8 h-8 mb-2 text-green-600" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 8-9 13-9 13s-9-5-9-13a9 9 0 0118 0z" /><circle cx="12" cy="10" r="3" /></svg>
+            <p class="font-semibold">15020 S Memorial Dr, STE C<br />Bixby, OK 74008</p>
+            <a
+              href="https://www.google.com/maps/place/Spartan+Nutrition/@35.946942,-95.887996,17z/data=!3m1!4b1!4m6!3m5!1s0x87b68ff789945aa9:0xeb033d9dadcf6b2!8m2!3d35.946942!4d-95.887996!16s%2Fg%2F11bz__tcb0?entry=ttu&g_ep=EgoyMDI1MDgxMS4wIKXMDSoASAFQAw%3D%3D"
+              target="_blank"
+              class="text-green-600 hover:underline text-sm mt-1"
+              >Get Directions</a>
+          </div>
+          <div class="flex flex-col items-center">
+            <svg class="w-8 h-8 mb-2 text-green-600" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><path d="M22 4.92V19a2 2 0 01-2 2H4a2 2 0 01-2-2V4.92a2 2 0 011.06-1.76l8-4.27a2 2 0 011.88 0l8 4.27A2 2 0 0122 4.92z" /><path d="M6 9l6 3 6-3" /></svg>
+            <a href="mailto:info@your-domain.com" class="font-semibold">info@your-domain.com</a>
+            <p class="text-sm text-gray-600 mt-1">Email Us</p>
+          </div>
+          <div class="flex flex-col items-center">
+            <svg class="w-8 h-8 mb-2 text-green-600" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10a9 9 0 0118 0c0 2.21-.9 4.21-2.36 5.65L12 21l-6.64-5.35A8.963 8.963 0 013 10z" /></svg>
+            <a href="tel:9189289755" class="font-semibold">(918) 928‑9755</a>
+            <p class="text-sm text-gray-600 mt-1">Call Us</p>
+          </div>
+        </div>
+        <div class="text-center mt-8">
+          <a
+            href="https://www.google.com/search?q=Spartan+Nutrition+Bixby+OK"
+            target="_blank"
+            class="text-green-600 hover:underline"
+          >
+            Check our Google listing for most current hours
+          </a>
+        </div>
+      </div>
+    </section>
+
+    <!-- FAQ section -->
+    <section id="faq" class="py-16 bg-white">
+      <div class="max-w-5xl mx-auto px-4">
+        <h2 class="text-3xl font-bold mb-8 text-center">Frequently Asked Questions</h2>
+        <div class="space-y-4">
+          <div>
+            <button
+              type="button"
+              class="w-full flex justify-between items-center bg-gray-100 px-4 py-3 rounded-lg text-left focus:outline-none"
+              onclick="toggleFaq('faq1')"
+            >
+              <span class="font-medium">What is Spartan Nutrition?</span>
+              <svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M6 9l6 6 6-6"></path>
+              </svg>
+            </button>
+            <div id="faq1" class="hidden mt-2 px-4 text-gray-700">
+              Spartan Nutrition is a locally owned nutrition club in Bixby, OK, serving protein shakes, energizing teas, and other healthy, flavorful drinks. Owners Jon and Shana Henthorn are Bixby locals, and the club has been serving the community since 2016 as a Veteran‑Owned Small Business.
+            </div>
+          </div>
+          <div>
+            <button
+              type="button"
+              class="w-full flex justify-between items-center bg-gray-100 px-4 py-3 rounded-lg text-left focus:outline-none"
+              onclick="toggleFaq('faq2')"
+            >
+              <span class="font-medium">What makes your drinks “healthy”?</span>
+              <svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M6 9l6 6 6-6"></path>
+              </svg>
+            </button>
+            <div id="faq2" class="hidden mt-2 px-4 text-gray-700">
+              Our shakes are low in calories, high in protein, and packed with vitamins and minerals. Our teas are sugar‑free, low‑calorie, and provide clean, sustained energy without the crash.
+            </div>
+          </div>
+          <div>
+            <button
+              type="button"
+              class="w-full flex justify-between items-center bg-gray-100 px-4 py-3 rounded-lg text-left focus:outline-none"
+              onclick="toggleFaq('faq3')"
+            >
+              <span class="font-medium">Do you have products for specific health and fitness goals?</span>
+              <svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M6 9l6 6 6-6"></path>
+              </svg>
+            </button>
+            <div id="faq3" class="hidden mt-2 px-4 text-gray-700">
+              Yes. We offer 200+ products for energy, fitness, weight‑loss, weight‑gain and more. Let us know your goal and we’ll point you to the best options.
+            </div>
+          </div>
+          <div>
+            <button
+              type="button"
+              class="w-full flex justify-between items-center bg-gray-100 px-4 py-3 rounded-lg text-left focus:outline-none"
+              onclick="toggleFaq('faq4')"
+            >
+              <span class="font-medium">How much protein is in your shakes?</span>
+              <svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M6 9l6 6 6-6"></path>
+              </svg>
+            </button>
+            <div id="faq4" class="hidden mt-2 px-4 text-gray-700">
+              Most shakes contain 24–30g of protein depending on what you choose, and we can adjust protein up or down to fit your needs.
+            </div>
+          </div>
+          <div>
+            <button
+              type="button"
+              class="w-full flex justify-between items-center bg-gray-100 px-4 py-3 rounded-lg text-left focus:outline-none"
+              onclick="toggleFaq('faq5')"
+            >
+              <span class="font-medium">Are your teas caffeinated?</span>
+              <svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M6 9l6 6 6-6"></path>
+              </svg>
+            </button>
+            <div id="faq5" class="hidden mt-2 px-4 text-gray-700">
+              Most of our teas are caffeinated, but we can make low‑caffeine or caffeine‑free versions on request.
+            </div>
+          </div>
+          <div>
+            <button
+              type="button"
+              class="w-full flex justify-between items-center bg-gray-100 px-4 py-3 rounded-lg text-left focus:outline-none"
+              onclick="toggleFaq('faq6')"
+            >
+              <span class="font-medium">Can kids have your drinks?</span>
+              <svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M6 9l6 6 6-6"></path>
+              </svg>
+            </button>
+            <div id="faq6" class="hidden mt-2 px-4 text-gray-700">
+              Yes. We offer kid‑friendly teas (low/no caffeine) and smaller shakes with balanced nutrition so younger guests can enjoy too.
+            </div>
+          </div>
+          <div>
+            <button
+              type="button"
+              class="w-full flex justify-between items-center bg-gray-100 px-4 py-3 rounded-lg text-left focus:outline-none"
+              onclick="toggleFaq('faq7')"
+            >
+              <span class="font-medium">Do you have seasonal or limited‑time drinks?</span>
+              <svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M6 9l6 6 6-6"></path>
+              </svg>
+            </button>
+            <div id="faq7" class="hidden mt-2 px-4 text-gray-700">
+              Yes! We feature monthly themed menus and specials—follow us on Instagram and Facebook to see what’s new.
+            </div>
+          </div>
+          <div>
+            <button
+              type="button"
+              class="w-full flex justify-between items-center bg-gray-100 px-4 py-3 rounded-lg text-left focus:outline-none"
+              onclick="toggleFaq('faq8')"
+            >
+              <span class="font-medium">Do you take call‑in or online orders?</span>
+              <svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M6 9l6 6 6-6"></path>
+              </svg>
+            </button>
+            <div id="faq8" class="hidden mt-2 px-4 text-gray-700">
+              We accept in‑person orders and call‑ahead for pickup. Mobile ordering is on our roadmap.
+            </div>
+          </div>
+          <div>
+            <button
+              type="button"
+              class="w-full flex justify-between items-center bg-gray-100 px-4 py-3 rounded-lg text-left focus:outline-none"
+              onclick="toggleFaq('faq9')"
+            >
+              <span class="font-medium">Can you make custom drinks?</span>
+              <svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M6 9l6 6 6-6"></path>
+              </svg>
+            </button>
+            <div id="faq9" class="hidden mt-2 px-4 text-gray-700">
+              Absolutely. Tell us the flavors you like and we’ll create something you’ll love.
+            </div>
+          </div>
+          <div>
+            <button
+              type="button"
+              class="w-full flex justify-between items-center bg-gray-100 px-4 py-3 rounded-lg text-left focus:outline-none"
+              onclick="toggleFaq('faq10')"
+            >
+              <span class="font-medium">Do you sponsor local events or teams?</span>
+              <svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M6 9l6 6 6-6"></path>
+              </svg>
+            </button>
+            <div id="faq10" class="hidden mt-2 px-4 text-gray-700">
+              We don’t usually do paid sponsorships for banners or shirts. We help on a need basis—like chipping in for team uniforms—and offer special pricing for schools and sports teams.
+            </div>
+          </div>
+          <div>
+            <button
+              type="button"
+              class="w-full flex justify-between items-center bg-gray-100 px-4 py-3 rounded-lg text-left focus:outline-none"
+              onclick="toggleFaq('faq11')"
+            >
+              <span class="font-medium">Do you offer vegan, dairy‑free or gluten‑free options?</span>
+              <svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M6 9l6 6 6-6"></path>
+              </svg>
+            </button>
+            <div id="faq11" class="hidden mt-2 px-4 text-gray-700">
+              Yes. Many shakes can be made dairy‑free or vegan with plant‑based protein and non‑dairy ingredients, and most are naturally gluten‑free. Let us know your dietary preferences when ordering.
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="py-8 bg-gray-200">
+      <div class="max-w-5xl mx-auto px-4 flex flex-col sm:flex-row justify-between items-center">
+        <p class="text-sm text-gray-600 mb-4 sm:mb-0">
+          ©
+          <span id="currentYear"></span>
+          Spartan Nutrition. All rights reserved.
+        </p>
+        <div class="flex space-x-4 text-green-600">
+          <a href="https://www.facebook.com/bixbyspartannutrition" target="_blank" aria-label="Facebook" class="hover:text-green-800">
+            <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
+              <path
+                d="M22.675 0h-21.35C.59 0 0 .59 0 1.325v21.351C0 23.411.589 24 1.325 24h11.52v-9.294H9.691V11.58h3.154V9.124c0-3.123 1.906-4.823 4.694-4.823 1.335 0 2.485.099 2.818.144v3.27l-1.934.001c-1.515 0-1.808.72-1.808 1.775v2.329h3.616l-.471 3.126h-3.145V24h6.168C23.412 24 24 23.411 24 22.676V1.325C24 .59 23.411 0 22.675 0z"
+              ></path>
+            </svg>
+          </a>
+          <a href="https://www.instagram.com/bixbyspartannutrition/?hl=en" target="_blank" aria-label="Instagram" class="hover:text-green-800">
+            <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
+              <path
+                d="M12 2.163c3.204 0 3.584.012 4.849.07 1.366.062 2.633.338 3.608 1.313.975.975 1.251 2.242 1.313 3.608.058 1.265.069 1.645.069 4.849s-.012 3.584-.069 4.849c-.062 1.366-.338 2.633-1.313 3.608-.975.975-2.242 1.251-3.608 1.313-1.265.058-1.645.069-4.849.069s-3.584-.012-4.849-.069c-1.366-.062-2.633-.338-3.608-1.313-.975-.975-1.251-2.242-1.313-3.608C2.175 15.646 2.163 15.266 2.163 12s.012-3.584.07-4.849c.062-1.366.338-2.633 1.313-3.608C4.521 2.5 5.788 2.224 7.154 2.163 8.419 2.104 8.8 2.093 12 2.093m0-2.163C8.741 0 8.332.011 7.052.071 5.26.147 3.642.705 2.463 1.884 1.284 3.064.726 4.681.65 6.474.59 7.754.579 8.163.579 12s.011 4.246.071 5.526c.076 1.793.634 3.41 1.813 4.589 1.18 1.179 2.798 1.737 4.589 1.813 1.28.06 1.689.071 5.528.071s4.246-.011 5.526-.071c1.792-.076 3.41-.634 4.589-1.813 1.179-1.18 1.737-2.797 1.813-4.589.06-1.28.071-1.689.071-5.528s-.011-4.246-.071-5.526c-.076-1.792-.634-3.41-1.813-4.589C20.409.705 18.792.147 17 .071 15.72.011 15.31 0 12 0z"
+              />
+              <circle cx="12" cy="12" r="3.5" />
+            </svg>
+          </a>
+        </div>
+      </div>
+    </footer>
+
+    <!-- Coupon Modal -->
+    <div
+      id="couponModal"
+      class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50"
+    >
+      <div class="bg-white rounded-lg shadow-xl w-11/12 sm:w-96 p-6">
+        <div id="couponStepForm">
+          <h3 class="text-xl font-bold mb-4 text-center">Claim Your Coupon</h3>
+          <p class="text-sm text-gray-600 mb-4 text-center">
+            50% off ANY 1st drink!
+          </p>
+          <form id="claimForm" class="space-y-4">
+            <input
+              type="text"
+              id="firstName"
+              name="firstName"
+              placeholder="First Name"
+              required
+              class="w-full border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500"
+            />
+            <input
+              type="email"
+              id="email"
+              name="email"
+              placeholder="Email (optional)"
+              class="w-full border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500"
+            />
+            <button
+              type="submit"
+              class="w-full bg-green-600 hover:bg-green-500 text-white font-semibold px-4 py-3 rounded-lg"
+            >
+              Get Code
+            </button>
+          </form>
+        </div>
+        <div id="couponStepCode" class="hidden text-center">
+          <h3 class="text-xl font-bold mb-4">Your Coupon Code</h3>
+          <p class="text-2xl font-mono mb-2" id="couponCode"></p>
+          <p class="text-sm text-gray-600 mb-4">
+            Expires on <span id="expiryDate"></span>
+          </p>
+          <button
+            onclick="closeCouponModal()"
+            class="mt-2 bg-green-600 hover:bg-green-500 text-white font-semibold px-4 py-3 rounded-lg"
+          >
+            Done
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Scripts -->
+    <script>
+      // Set current year
+      document.getElementById("currentYear").textContent = new Date().getFullYear();
+
+      // FAQ accordion toggle
+      function toggleFaq(id) {
+        const el = document.getElementById(id);
+        if (el.classList.contains("hidden")) {
+          el.classList.remove("hidden");
+        } else {
+          el.classList.add("hidden");
+        }
+      }
+
+      // Coupon modal logic
+      const couponModal = document.getElementById("couponModal");
+      const couponButtons = [
+        document.getElementById("couponBtn"),
+        document.getElementById("couponBtnHero"),
+        document.getElementById("couponBtnMobile")
+      ].filter(Boolean);
+
+      couponButtons.forEach(btn => {
+        btn.addEventListener("click", () => {
+          openCouponModal();
+        });
+      });
+
+      function openCouponModal() {
+        couponModal.classList.remove("hidden");
+        document.body.classList.add("overflow-hidden");
+      }
+
+      function closeCouponModal() {
+        couponModal.classList.add("hidden");
+        document.body.classList.remove("overflow-hidden");
+      }
+
+      // Generate coupon code and handle form
+      const claimForm = document.getElementById("claimForm");
+      const couponCodeEl = document.getElementById("couponCode");
+      const expiryDateEl = document.getElementById("expiryDate");
+      const couponStepForm = document.getElementById("couponStepForm");
+      const couponStepCode = document.getElementById("couponStepCode");
+
+      // Check if coupon already claimed
+      const existingCoupon = localStorage.getItem("spartanCoupon");
+      if (existingCoupon) {
+        const data = JSON.parse(existingCoupon);
+        showCoupon(data.code, data.expires);
+      }
+
+      claimForm.addEventListener("submit", async function (e) {
+        e.preventDefault();
+        const firstName = document.getElementById("firstName").value.trim();
+        const email = document.getElementById("email").value.trim();
+        // Generate code
+        const code = "SPARTAN-" + Math.random().toString(36).substr(2, 6).toUpperCase();
+        // Expiry: 7 days from now
+        const expires = new Date();
+        expires.setDate(expires.getDate() + 7);
+        const expiryStr = expires.toLocaleDateString();
+        // Save to localStorage
+        localStorage.setItem(
+          "spartanCoupon",
+          JSON.stringify({ code, expires: expiryStr })
+        );
+        // TODO: Send to your backend
+        const payload = {
+          firstName,
+          email,
+          code,
+          expires: expiryStr,
+          utm: Object.fromEntries(new URLSearchParams(window.location.search).entries())
+        };
+        // Example integration (Formspree or your API)
+        /*
+        try {
+          await fetch("https://formspree.io/f/YOUR_ID", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+          });
+        } catch (err) {
+          console.error(err);
+        }
+        */
+        showCoupon(code, expiryStr);
+      });
+
+      function showCoupon(code, expiryStr) {
+        couponStepForm.classList.add("hidden");
+        couponStepCode.classList.remove("hidden");
+        couponCodeEl.textContent = code;
+        expiryDateEl.textContent = expiryStr;
+      }
+
+      // Close modal when clicking outside content
+      couponModal.addEventListener("click", function (e) {
+        if (e.target === couponModal) {
+          closeCouponModal();
+        }
+      });
+    </script>
+  </body>
+</html>
