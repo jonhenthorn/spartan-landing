@@ -18,7 +18,7 @@
     />
     <meta
       property="og:image"
-      content="/social-card.jpg"
+      content="social-card.jpg"
     />
     <meta
       property="og:url"
@@ -33,7 +33,7 @@
     />
     <meta
       name="twitter:image"
-      content="/social-card.jpg"
+      content="social-card.jpg"
     />
     <!-- Local business schema (update address and phone) -->
     <script type="application/ld+json">
@@ -63,7 +63,7 @@
         "openingHoursSpecification": []
       }
     </script>
-    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <link rel="icon" type="image/x-icon" href="favicon.ico" />
     <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Flowbite for components -->
@@ -73,7 +73,8 @@
     <header class="bg-white shadow">
       <div class="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between">
         <div class="flex items-center space-x-3">
-          <img src="/favicon.ico" alt="Spartan Nutrition logo" class="h-8 w-8" />
+          <!-- Use the brand logo instead of the favicon in the header -->
+          <img src="Spartan logo.png" alt="Spartan Nutrition logo" class="h-10 w-10" />
           <span class="font-bold text-lg">Spartan Nutrition</span>
         </div>
         <nav class="hidden sm:flex space-x-6 text-sm font-medium">
@@ -102,7 +103,7 @@
     <!-- Hero section -->
     <section
       class="relative bg-cover bg-center h-[70vh] flex items-center justify-center"
-      style="background-image: url('/hero-cup.jpg');"
+      style="background-image: url('IMG_8231.jpeg');"
     >
       <div
         class="absolute inset-0 bg-black bg-opacity-40 flex items-center justify-center"
@@ -172,6 +173,18 @@
       </div>
     </section>
 
+    <!-- Gallery section -->
+    <section class="py-16 bg-white">
+      <div class="max-w-5xl mx-auto px-4">
+        <h2 class="text-3xl font-bold mb-8 text-center">See Our Club</h2>
+        <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6">
+          <img src="IMG_6903.JPG" alt="Customer enjoying tea at Spartan Nutrition" class="w-full h-64 object-cover rounded-lg shadow-md" />
+          <img src="IMG_8719.jpeg" alt="Smiling team member holding energy teas" class="w-full h-64 object-cover rounded-lg shadow-md" />
+          <img src="August%20Menu.jpeg" alt="Monthly menu poster" class="w-full h-64 object-cover rounded-lg shadow-md" />
+        </div>
+      </div>
+    </section>
+
     <!-- Visit section -->
     <section id="visit" class="py-16 bg-gray-100">
       <div class="max-w-5xl mx-auto px-4">
@@ -181,11 +194,10 @@
             <svg class="w-8 h-8 mb-2 text-green-600" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 8-9 13-9 13s-9-5-9-13a9 9 0 0118 0z" /><circle cx="12" cy="10" r="3" /></svg>
             <p class="font-semibold">15020 S Memorial Dr, STE C<br />Bixby, OK 74008</p>
             <a
-              href="https://www.google.com/maps/search/?api=1&query=15020+S+Memorial+Dr+STE+C+Bixby+OK+74008"
+              href="https://www.google.com/maps/place/Spartan+Nutrition/@35.946942,-95.887996,17z/data=!3m1!4b1!4m6!3m5!1s0x87b68ff789945aa9:0xeb033d9dadcf6b2!8m2!3d35.946942!4d-95.887996!16s%2Fg%2F11bz__tcb0?entry=ttu&g_ep=EgoyMDI1MDgxMS4wIKXMDSoASAFQAw%3D%3D"
               target="_blank"
               class="text-green-600 hover:underline text-sm mt-1"
-              >Get Directions</a
-            >
+              >Get Directions</a>
           </div>
           <div class="flex flex-col items-center">
             <svg class="w-8 h-8 mb-2 text-green-600" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><path d="M22 4.92V19a2 2 0 01-2 2H4a2 2 0 01-2-2V4.92a2 2 0 011.06-1.76l8-4.27a2 2 0 011.88 0l8 4.27A2 2 0 0122 4.92z" /><path d="M6 9l6 3 6-3" /></svg>
@@ -221,21 +233,13 @@
               class="w-full flex justify-between items-center bg-gray-100 px-4 py-3 rounded-lg text-left focus:outline-none"
               onclick="toggleFaq('faq1')"
             >
-              <span class="font-medium">What makes your energy teas special?</span>
-              <svg
-                class="w-5 h-5 text-gray-600"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
+              <span class="font-medium">What is Spartan Nutrition?</span>
+              <svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M6 9l6 6 6-6"></path>
               </svg>
             </button>
             <div id="faq1" class="hidden mt-2 px-4 text-gray-700">
-              Our teas are crafted with premium Herbalife ingredients, delivering clean energy, vitamins and botanicals without the crash.
+              Spartan Nutrition is a locally owned nutrition club in Bixby, OK, serving protein shakes, energizing teas, and other healthy, flavorful drinks. Owners Jon and Shana Henthorn are Bixby locals, and the club has been serving the community since 2016 as a Veteran‑Owned Small Business.
             </div>
           </div>
           <div>
@@ -244,21 +248,13 @@
               class="w-full flex justify-between items-center bg-gray-100 px-4 py-3 rounded-lg text-left focus:outline-none"
               onclick="toggleFaq('faq2')"
             >
-              <span class="font-medium">Do you offer coaching or plans?</span>
-              <svg
-                class="w-5 h-5 text-gray-600"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
+              <span class="font-medium">What makes your drinks “healthy”?</span>
+              <svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M6 9l6 6 6-6"></path>
               </svg>
             </button>
             <div id="faq2" class="hidden mt-2 px-4 text-gray-700">
-              Yes! We offer personalized wellness guidance in a relaxed, no‑pressure environment. Ask us in‑store for details.
+              Our shakes are low in calories, high in protein, and packed with vitamins and minerals. Our teas are sugar‑free, low‑calorie, and provide clean, sustained energy without the crash.
             </div>
           </div>
           <div>
@@ -267,21 +263,133 @@
               class="w-full flex justify-between items-center bg-gray-100 px-4 py-3 rounded-lg text-left focus:outline-none"
               onclick="toggleFaq('faq3')"
             >
-              <span class="font-medium">Are there options for kids?</span>
-              <svg
-                class="w-5 h-5 text-gray-600"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
+              <span class="font-medium">Do you have products for specific health and fitness goals?</span>
+              <svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M6 9l6 6 6-6"></path>
               </svg>
             </button>
             <div id="faq3" class="hidden mt-2 px-4 text-gray-700">
-              Absolutely! We have smoothies and teas made with kid‑friendly ingredients so they can join the fun.
+              Yes. We offer 200+ products for energy, fitness, weight‑loss, weight‑gain and more. Let us know your goal and we’ll point you to the best options.
+            </div>
+          </div>
+          <div>
+            <button
+              type="button"
+              class="w-full flex justify-between items-center bg-gray-100 px-4 py-3 rounded-lg text-left focus:outline-none"
+              onclick="toggleFaq('faq4')"
+            >
+              <span class="font-medium">How much protein is in your shakes?</span>
+              <svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M6 9l6 6 6-6"></path>
+              </svg>
+            </button>
+            <div id="faq4" class="hidden mt-2 px-4 text-gray-700">
+              Most shakes contain 24–30g of protein depending on what you choose, and we can adjust protein up or down to fit your needs.
+            </div>
+          </div>
+          <div>
+            <button
+              type="button"
+              class="w-full flex justify-between items-center bg-gray-100 px-4 py-3 rounded-lg text-left focus:outline-none"
+              onclick="toggleFaq('faq5')"
+            >
+              <span class="font-medium">Are your teas caffeinated?</span>
+              <svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M6 9l6 6 6-6"></path>
+              </svg>
+            </button>
+            <div id="faq5" class="hidden mt-2 px-4 text-gray-700">
+              Most of our teas are caffeinated, but we can make low‑caffeine or caffeine‑free versions on request.
+            </div>
+          </div>
+          <div>
+            <button
+              type="button"
+              class="w-full flex justify-between items-center bg-gray-100 px-4 py-3 rounded-lg text-left focus:outline-none"
+              onclick="toggleFaq('faq6')"
+            >
+              <span class="font-medium">Can kids have your drinks?</span>
+              <svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M6 9l6 6 6-6"></path>
+              </svg>
+            </button>
+            <div id="faq6" class="hidden mt-2 px-4 text-gray-700">
+              Yes. We offer kid‑friendly teas (low/no caffeine) and smaller shakes with balanced nutrition so younger guests can enjoy too.
+            </div>
+          </div>
+          <div>
+            <button
+              type="button"
+              class="w-full flex justify-between items-center bg-gray-100 px-4 py-3 rounded-lg text-left focus:outline-none"
+              onclick="toggleFaq('faq7')"
+            >
+              <span class="font-medium">Do you have seasonal or limited‑time drinks?</span>
+              <svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M6 9l6 6 6-6"></path>
+              </svg>
+            </button>
+            <div id="faq7" class="hidden mt-2 px-4 text-gray-700">
+              Yes! We feature monthly themed menus and specials—follow us on Instagram and Facebook to see what’s new.
+            </div>
+          </div>
+          <div>
+            <button
+              type="button"
+              class="w-full flex justify-between items-center bg-gray-100 px-4 py-3 rounded-lg text-left focus:outline-none"
+              onclick="toggleFaq('faq8')"
+            >
+              <span class="font-medium">Do you take call‑in or online orders?</span>
+              <svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M6 9l6 6 6-6"></path>
+              </svg>
+            </button>
+            <div id="faq8" class="hidden mt-2 px-4 text-gray-700">
+              We accept in‑person orders and call‑ahead for pickup. Mobile ordering is on our roadmap.
+            </div>
+          </div>
+          <div>
+            <button
+              type="button"
+              class="w-full flex justify-between items-center bg-gray-100 px-4 py-3 rounded-lg text-left focus:outline-none"
+              onclick="toggleFaq('faq9')"
+            >
+              <span class="font-medium">Can you make custom drinks?</span>
+              <svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M6 9l6 6 6-6"></path>
+              </svg>
+            </button>
+            <div id="faq9" class="hidden mt-2 px-4 text-gray-700">
+              Absolutely. Tell us the flavors you like and we’ll create something you’ll love.
+            </div>
+          </div>
+          <div>
+            <button
+              type="button"
+              class="w-full flex justify-between items-center bg-gray-100 px-4 py-3 rounded-lg text-left focus:outline-none"
+              onclick="toggleFaq('faq10')"
+            >
+              <span class="font-medium">Do you sponsor local events or teams?</span>
+              <svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M6 9l6 6 6-6"></path>
+              </svg>
+            </button>
+            <div id="faq10" class="hidden mt-2 px-4 text-gray-700">
+              We don’t usually do paid sponsorships for banners or shirts. We help on a need basis—like chipping in for team uniforms—and offer special pricing for schools and sports teams.
+            </div>
+          </div>
+          <div>
+            <button
+              type="button"
+              class="w-full flex justify-between items-center bg-gray-100 px-4 py-3 rounded-lg text-left focus:outline-none"
+              onclick="toggleFaq('faq11')"
+            >
+              <span class="font-medium">Do you offer vegan, dairy‑free or gluten‑free options?</span>
+              <svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M6 9l6 6 6-6"></path>
+              </svg>
+            </button>
+            <div id="faq11" class="hidden mt-2 px-4 text-gray-700">
+              Yes. Many shakes can be made dairy‑free or vegan with plant‑based protein and non‑dairy ingredients, and most are naturally gluten‑free. Let us know your dietary preferences when ordering.
             </div>
           </div>
         </div>
