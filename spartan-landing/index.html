@@ -568,14 +568,22 @@
         localStorage.setItem('spartanCouponClaimed', 'true');
         msg.textContent = 'Submitting…';
         try {
-          // Send the lead data to Google Apps Script. Use no‑cors so the request
-          // isn’t blocked by the browser and we don’t depend on a JSON response.
-          await fetch(ENDPOINT, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-            mode: 'no-cors'
-          });
+          /*
+           * Send the lead data to Google Apps Script.
+           * Many Apps Script examples expect parameters via the query string rather
+           * than a JSON body. To maximize compatibility we append the fields to
+           * the URL and perform a GET request. We still use `mode: \"no-cors\"`
+           * to avoid the browser blocking the request because the endpoint does
+           * not return CORS headers. The Apps Script can read the parameters
+           * from e.parameter and append them to the sheet.  See:
+           * https://developers.google.com/apps-script/guides/web
+           */
+          const qs = new URLSearchParams({
+            name: payload.name,
+            phone: payload.phone,
+            email: payload.email
+          }).toString();
+          await fetch(`${ENDPOINT}?${qs}`, { method: 'GET', mode: 'no-cors' });
           // Treat the submission as successful regardless of response. The Apps
           // Script endpoint will store the record in your sheet. Inform the user
           // and reveal the coupon.
