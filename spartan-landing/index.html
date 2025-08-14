@@ -453,12 +453,13 @@
           <p class="text-sm text-gray-600 mb-4 text-center">
             50% off ANY 1st drink!
           </p>
-          <form id="claimForm" class="space-y-4">
+          <form id="leadForm" class="space-y-4">
             <input
               type="text"
-              id="firstName"
-              name="firstName"
-              placeholder="First Name"
+              id="name"
+              name="name"
+              placeholder="Full name"
+              autocomplete="name"
               required
               class="w-full border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500"
             />
@@ -466,7 +467,9 @@
               type="tel"
               id="phone"
               name="phone"
-              placeholder="Phone Number"
+              placeholder="Phone"
+              pattern="^[0-9+()\\-.\\s]{7,}$"
+              autocomplete="tel"
               required
               class="w-full border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500"
             />
@@ -482,8 +485,9 @@
               type="submit"
               class="w-full bg-green-600 hover:bg-green-500 text-white font-semibold px-4 py-3 rounded-lg"
             >
-              Get Coupon
+              Get 50% Off Coupon
             </button>
+            <p id="msg" role="status" aria-live="polite" class="text-center text-sm text-gray-600"></p>
           </form>
         </div>
         <div id="couponStepCode" class="hidden text-center">
@@ -540,9 +544,12 @@
       }
 
       // Coupon claim handling
-      const claimForm = document.getElementById("claimForm");
-      const couponStepForm = document.getElementById("couponStepForm");
-      const couponStepCode = document.getElementById("couponStepCode");
+      // Setup references for lead form and coupon steps
+      const form = document.getElementById('leadForm');
+      const couponStepForm = document.getElementById('couponStepForm');
+      const couponStepCode = document.getElementById('couponStepCode');
+      const msg = document.getElementById('msg');
+      const ENDPOINT = 'https://script.google.com/macros/s/AKfycbwXYHIKYTtNqaeb--9hV2_g96ab8JYw2i6vccnFa53c_V122CQcgJTRgaZ6K-iUZxzE8Q/exec';
 
       // If coupon was already claimed, immediately show it
       const alreadyClaimed = localStorage.getItem("spartanCouponClaimed");
@@ -550,34 +557,38 @@
         showCoupon();
       }
 
-      claimForm.addEventListener("submit", async function (e) {
+      form.addEventListener('submit', async function (e) {
         e.preventDefault();
-        const firstName = document.getElementById("firstName").value.trim();
-        const phone = document.getElementById("phone").value.trim();
-        const email = document.getElementById("email").value.trim();
-        // Save to localStorage so the coupon persists for this visitor
-        localStorage.setItem("spartanCouponClaimed", "true");
-        // Prepare payload for your backend
         const payload = {
-          firstName,
-          phone,
-          email,
-          utm: Object.fromEntries(new URLSearchParams(window.location.search).entries())
+          name: form.name.value.trim(),
+          phone: form.phone.value.trim(),
+          email: form.email.value.trim()
         };
-        // Example integration: send lead to Formspree or your own API
-        /*
+        // Save to localStorage so the coupon persists for this visitor
+        localStorage.setItem('spartanCouponClaimed', 'true');
+        msg.textContent = 'Submitting…';
         try {
-          await fetch("https://formspree.io/f/YOUR_FORM_ID", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
+          const res = await fetch(ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
           });
+          const text = await res.text();
+          const data = safeParse(text) || {};
+          if (data.ok) {
+            msg.textContent = 'Thanks! Your 50% off coupon is ready below.';
+            form.reset();
+            showCoupon();
+          } else {
+            msg.textContent = data.error || 'Something went wrong. Please try again.';
+          }
         } catch (err) {
-          console.error(err);
+          msg.textContent = 'Network error. Please try again.';
         }
-        */
-        showCoupon();
       });
+
+      // Parse JSON safely (Apps Script may not return valid JSON on HTTP error)
+      function safeParse(t) { try { return JSON.parse(t); } catch { return null; } }
 
       function showCoupon() {
         couponStepForm.classList.add("hidden");
