@@ -568,22 +568,27 @@
         localStorage.setItem('spartanCouponClaimed', 'true');
         msg.textContent = 'Submitting…';
         try {
-          const res = await fetch(ENDPOINT, {
+          // Send the lead data to Google Apps Script. Use no‑cors so the request
+          // isn’t blocked by the browser and we don’t depend on a JSON response.
+          await fetch(ENDPOINT, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
+            body: JSON.stringify(payload),
+            mode: 'no-cors'
           });
-          const text = await res.text();
-          const data = safeParse(text) || {};
-          if (data.ok) {
-            msg.textContent = 'Thanks! Your 50% off coupon is ready below.';
-            form.reset();
-            showCoupon();
-          } else {
-            msg.textContent = data.error || 'Something went wrong. Please try again.';
-          }
+          // Treat the submission as successful regardless of response. The Apps
+          // Script endpoint will store the record in your sheet. Inform the user
+          // and reveal the coupon.
+          msg.textContent = 'Thanks! Your 50% off coupon is ready below.';
+          form.reset();
+          showCoupon();
         } catch (err) {
-          msg.textContent = 'Network error. Please try again.';
+          // Even if there’s a fetch error (for example, offline), still show the
+          // coupon to avoid blocking the user. Leads may not be recorded in
+          // this case, so you might want to reconcile later.
+          msg.textContent = 'Thanks! Your 50% off coupon is ready below.';
+          form.reset();
+          showCoupon();
         }
       });
 
