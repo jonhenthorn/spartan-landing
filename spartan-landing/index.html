@@ -25,8 +25,6 @@
            property="og:url"
            content="https://spartandrink.com/"
          />
-         <!-- Specify the Facebook App ID so the Sharing Debugger doesn’t flag a missing fb:app_id -->
-         <meta property="fb:app_id" content="1104313194967645" />
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="Spartan Nutrition – Tasty. Healthy. Energy." />
@@ -224,7 +222,8 @@ fbq('track', 'PageView');
       <div class="max-w-5xl mx-auto px-4">
         <h2 class="text-3xl font-bold mb-8 text-center">See Our Club</h2>
         <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6">
-               <img src="IMG_6903.JPG" alt="Customer enjoying tea at Spartan Nutrition" class="w-full h-64 object-cover object-top rounded-lg shadow-md" />
+               <!-- Adjust crop so Jon’s head and drinks are fully visible -->
+               <img src="IMG_6903.JPG" alt="Customer enjoying tea at Spartan Nutrition" class="w-full h-64 object-cover rounded-lg shadow-md" style="object-position:50% 28%;" />
                <img src="IMG_8719.jpeg" alt="Smiling team member holding energy teas" class="w-full h-64 object-cover object-top rounded-lg shadow-md" />
                <!-- Show the full menu poster without cropping by using object-contain -->
                <img src="August%20Menu.jpeg" alt="Monthly menu poster" class="w-full h-64 object-contain rounded-lg shadow-md bg-white" />
@@ -607,12 +606,19 @@ fbq('track', 'PageView');
            * from e.parameter and append them to the sheet.  See:
            * https://developers.google.com/apps-script/guides/web
            */
-          const qs = new URLSearchParams({
-            name: payload.name,
-            phone: payload.phone,
-            email: payload.email
-          }).toString();
-          await fetch(`${ENDPOINT}?${qs}`, { method: 'GET', mode: 'no-cors' });
+          /*
+           * Send the lead data to Google Apps Script.
+           * We now send a POST request with a JSON body instead of appending
+           * query parameters. The Apps Script will parse the JSON and write
+           * the row to the sheet. Using the `cors` mode allows the browser
+           * to receive CORS headers returned from the script.
+           */
+          await fetch(ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+            mode: 'cors'
+          });
           // Treat the submission as successful regardless of response. The Apps
           // Script endpoint will store the record in your sheet. Inform the user
           // and reveal the coupon.
