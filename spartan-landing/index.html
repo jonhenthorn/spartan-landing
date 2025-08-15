@@ -21,10 +21,12 @@
       property="og:image"
       content="https://spartandrink.com/social-card.jpg"
     />
-    <meta
-      property="og:url"
-      content="https://spartandrink.com/"
-    />
+         <meta
+           property="og:url"
+           content="https://spartandrink.com/"
+         />
+         <!-- Specify the Facebook App ID so the Sharing Debugger doesn’t flag a missing fb:app_id -->
+         <meta property="fb:app_id" content="1104313194967645" />
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="Spartan Nutrition – Tasty. Healthy. Energy." />
@@ -148,9 +150,10 @@ fbq('track', 'PageView');
 <section
   id="hero"
   class="relative bg-cover bg-center flex items-center justify-center"
-  style="background-image: url('hero-cover.png'); background-position: 50% 15%;"
+      style="background-image: url('hero-new.png');"
 >
-      <div class="absolute inset-0 bg-black/35"></div>
+          <!-- Use a top‑to‑bottom gradient overlay for better text contrast on mobile -->
+          <div class="absolute inset-0 bg-gradient-to-b from-black/60 via-black/30 to-transparent"></div>
       <div class="relative z-10 text-center text-white px-4">
         <h1 class="hero-title text-white font-extrabold text-5xl md:text-6xl text-glow mb-4">
           Tasty. Healthy. Energy.
@@ -221,9 +224,10 @@ fbq('track', 'PageView');
       <div class="max-w-5xl mx-auto px-4">
         <h2 class="text-3xl font-bold mb-8 text-center">See Our Club</h2>
         <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6">
-          <img src="IMG_6903.JPG" alt="Customer enjoying tea at Spartan Nutrition" class="w-full h-64 object-cover rounded-lg shadow-md" />
-          <img src="IMG_8719.jpeg" alt="Smiling team member holding energy teas" class="w-full h-64 object-cover rounded-lg shadow-md" />
-          <img src="August%20Menu.jpeg" alt="Monthly menu poster" class="w-full h-64 object-cover rounded-lg shadow-md" />
+               <img src="IMG_6903.JPG" alt="Customer enjoying tea at Spartan Nutrition" class="w-full h-64 object-cover object-top rounded-lg shadow-md" />
+               <img src="IMG_8719.jpeg" alt="Smiling team member holding energy teas" class="w-full h-64 object-cover object-top rounded-lg shadow-md" />
+               <!-- Show the full menu poster without cropping by using object-contain -->
+               <img src="August%20Menu.jpeg" alt="Monthly menu poster" class="w-full h-64 object-contain rounded-lg shadow-md bg-white" />
         </div>
       </div>
     </section>
