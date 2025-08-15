@@ -4,17 +4,18 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Spartan Nutrition | Energy Teas in Bixby</title>
+    <link rel="canonical" href="https://spartandrink.com/" />
     <!-- Primary SEO tags -->
     <meta
       name="description"
-      content="Discover tasty and healthy energy at Spartan Nutrition in Bixby. Grab your first‑drink coupon and join us for energy teas, shakes and a friendly hangout."
+      content="First-time guest? Grab your coupon and experience Bixby's favorite energy teas, shakes and more."
     />
     <!-- Open Graph / Facebook -->
     <meta property="og:type" content="website" />
     <meta property="og:title" content="Spartan Nutrition – Tasty. Healthy. Energy." />
     <meta
       property="og:description"
-      content="Visit Spartan Nutrition in Bixby for energizing teas, shakes and a welcoming hangout. Claim your 50% off first‑drink coupon today."
+      content="First-time guest? Grab your coupon and experience Bixby's favorite energy teas, shakes and more."
     />
     <meta
       property="og:image"
@@ -29,7 +30,7 @@
     <meta name="twitter:title" content="Spartan Nutrition – Tasty. Healthy. Energy." />
     <meta
       name="twitter:description"
-      content="Visit Spartan Nutrition in Bixby for energizing teas, shakes and a welcoming hangout. Claim your 50% off first‑drink coupon today."
+      content="First-time guest? Grab your coupon and experience Bixby's favorite energy teas, shakes and more."
     />
     <meta
       name="twitter:image"
@@ -68,6 +69,31 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Flowbite for components -->
     <script src="https://unpkg.com/@headlessui/react@latest/dist/headlessui.umd.js"></script>
+    <!-- Meta Pixel Code -->
+    <script>
+!function(f,b,e,v,n,t,s)
+{if(f.fbq)return;n=f.fbq=function(){n.callMethod ?
+n.callMethod.apply(n,arguments):n.queue.push(arguments)};
+if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';
+n.queue=[];t=b.createElement(e);t.async=!0;
+t.src=v;s=b.getElementsByTagName(e)[0];
+s.parentNode.insertBefore(t,s)}(window, document,'script',
+'https://connect.facebook.net/en_US/fbevents.js');
+fbq('init', '1104313194967645');
+fbq('track', 'PageView');
+</script>
+    <noscript><img height="1" width="1" style="display:none" src="https://www.facebook.com/tr?id=1104313194967645&ev=PageView&noscript=1"/></noscript>
+    <!-- End Meta Pixel Code -->
+
+    <style>
+      #hero { min-height: 88vh; }
+      @media (max-width: 640px) {
+        #hero { min-height: 92vh; }
+        .hero-title { font-size: 2.25rem; line-height: 1.1; }
+        .hero-sub { font-size: 1.125rem; }
+      }
+      .text-glow { text-shadow: 0 3px 10px rgba(0,0,0,.55); }
+    </style>
   </head>
   <body class="bg-gray-50 text-gray-900 font-sans">
     <header class="bg-white shadow">
@@ -120,17 +146,16 @@
 
     <!-- Hero section -->
 <section
-  class="relative bg-cover bg-center h-[70vh] flex items-center justify-center"
-  style="background-image: url('hero-cover.png');"
+  id="hero"
+  class="relative bg-cover bg-center flex items-center justify-center"
+  style="background-image: url('hero-cover.png'); background-position: 50% 15%;"
 >
-      <div
-        class="absolute inset-0 bg-black bg-opacity-40 flex items-center justify-center"
-      ></div>
+      <div class="absolute inset-0 bg-black/35"></div>
       <div class="relative z-10 text-center text-white px-4">
-        <h1 class="text-4xl sm:text-5xl font-extrabold mb-4">
+        <h1 class="hero-title text-white font-extrabold text-5xl md:text-6xl text-glow mb-4">
           Tasty. Healthy. Energy.
         </h1>
-        <p class="max-w-xl mx-auto text-lg sm:text-xl mb-6">
+        <p class="hero-sub mt-4 text-white/95 text-xl md:text-2xl text-glow max-w-xl mx-auto mb-6">
           First-time guest? Grab your coupon and experience Bixby's favorite energy teas, shakes and more.
         </p>
         <button
@@ -590,6 +615,8 @@
           msg.textContent = 'Thanks! Your 50% off coupon is ready below.';
           form.reset();
           showCoupon();
+          // Fire Facebook lead conversion once the coupon is revealed
+          spartanTrackLead();
         } catch (err) {
           // Even if there’s a fetch error (for example, offline), still show the
           // coupon to avoid blocking the user. Leads may not be recorded in
@@ -597,6 +624,8 @@
           msg.textContent = 'Thanks! Your 50% off coupon is ready below.';
           form.reset();
           showCoupon();
+          // Fire Facebook lead conversion on error as well
+          spartanTrackLead();
         }
       });
 
@@ -606,6 +635,13 @@
       function showCoupon() {
         couponStepForm.classList.add("hidden");
         couponStepCode.classList.remove("hidden");
+      }
+
+      // After successful submission & coupon reveal, send a Facebook Pixel Lead event.
+      function spartanTrackLead() {
+        if (window.fbq) {
+          fbq('track', 'Lead', { source: 'coupon' });
+        }
       }
 
       // Close modal when clicking outside content
