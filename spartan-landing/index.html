@@ -223,7 +223,10 @@ fbq('track', 'PageView');
         <h2 class="text-3xl font-bold mb-8 text-center">See Our Club</h2>
         <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6">
                <!-- Adjust crop so Jon’s head and drinks are fully visible -->
-               <img src="IMG_6903.JPG" alt="Customer enjoying tea at Spartan Nutrition" class="w-full h-64 object-cover rounded-lg shadow-md" style="object-position:50% 28%;" />
+              <!-- Jon photo: bias crop downward and add cache-buster query param -->
+              <img src="IMG_6903.JPG?v=2" alt="Customer enjoying tea at Spartan Nutrition"
+                   class="w-full h-64 object-cover rounded-lg shadow-md"
+                   style="object-position:50% 32%;" />
                <img src="IMG_8719.jpeg" alt="Smiling team member holding energy teas" class="w-full h-64 object-cover object-top rounded-lg shadow-md" />
                <!-- Show the full menu poster without cropping by using object-contain -->
                <img src="August%20Menu.jpeg" alt="Monthly menu poster" class="w-full h-64 object-contain rounded-lg shadow-md bg-white" />
@@ -608,16 +611,15 @@ fbq('track', 'PageView');
            */
           /*
            * Send the lead data to Google Apps Script.
-           * We now send a POST request with a JSON body instead of appending
-           * query parameters. The Apps Script will parse the JSON and write
-           * the row to the sheet. Using the `cors` mode allows the browser
-           * to receive CORS headers returned from the script.
+           * Use a POST request with application/x-www-form-urlencoded to avoid a CORS preflight.
+           * We don't await or parse a JSON response since we're using no‑cors mode.
            */
+          const formBody = new URLSearchParams({ name, phone, email });
           await fetch(ENDPOINT, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-            mode: 'cors'
+            mode: 'no-cors',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: formBody.toString()
           });
           // Treat the submission as successful regardless of response. The Apps
           // Script endpoint will store the record in your sheet. Inform the user
