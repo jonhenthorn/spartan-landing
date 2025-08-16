@@ -222,11 +222,9 @@ fbq('track', 'PageView');
       <div class="max-w-5xl mx-auto px-4">
         <h2 class="text-3xl font-bold mb-8 text-center">See Our Club</h2>
         <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6">
-               <!-- Adjust crop so Jon’s head and drinks are fully visible -->
-              <!-- Jon photo: bias crop downward and add cache-buster query param -->
+               <!-- Fix: Use object-contain to show full image without cropping -->
               <img src="IMG_6903.JPG?v=2" alt="Customer enjoying tea at Spartan Nutrition"
-                   class="w-full h-64 object-cover rounded-lg shadow-md"
-                   style="object-position:50% 32%;" />
+                   class="w-full h-64 object-contain rounded-lg shadow-md bg-gray-100" />
                <img src="IMG_8719.jpeg" alt="Smiling team member holding energy teas" class="w-full h-64 object-cover object-top rounded-lg shadow-md" />
                <!-- Show the full menu poster without cropping by using object-contain -->
                <img src="August%20Menu.jpeg" alt="Monthly menu poster" class="w-full h-64 object-contain rounded-lg shadow-md bg-white" />
@@ -297,7 +295,7 @@ fbq('track', 'PageView');
               class="w-full flex justify-between items-center bg-gray-100 px-4 py-3 rounded-lg text-left focus:outline-none"
               onclick="toggleFaq('faq2')"
             >
-              <span class="font-medium">What makes your drinks “healthy”?</span>
+              <span class="font-medium">What makes your drinks "healthy"?</span>
               <svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M6 9l6 6 6-6"></path>
               </svg>
@@ -318,7 +316,7 @@ fbq('track', 'PageView');
               </svg>
             </button>
             <div id="faq3" class="hidden mt-2 px-4 text-gray-700">
-              Yes. We offer 200+ products for energy, fitness, weight‑loss, weight‑gain and more. Let us know your goal and we’ll point you to the best options.
+              Yes. We offer 200+ products for energy, fitness, weight‑loss, weight‑gain and more. Let us know your goal and we'll point you to the best options.
             </div>
           </div>
           <div>
@@ -378,7 +376,7 @@ fbq('track', 'PageView');
               </svg>
             </button>
             <div id="faq7" class="hidden mt-2 px-4 text-gray-700">
-              Yes! We feature monthly themed menus and specials—follow us on Instagram and Facebook to see what’s new.
+              Yes! We feature monthly themed menus and specials—follow us on Instagram and Facebook to see what's new.
             </div>
           </div>
           <div>
@@ -408,7 +406,7 @@ fbq('track', 'PageView');
               </svg>
             </button>
             <div id="faq9" class="hidden mt-2 px-4 text-gray-700">
-              Absolutely. Tell us the flavors you like and we’ll create something you’ll love.
+              Absolutely. Tell us the flavors you like and we'll create something you'll love.
             </div>
           </div>
           <div>
@@ -423,7 +421,7 @@ fbq('track', 'PageView');
               </svg>
             </button>
             <div id="faq10" class="hidden mt-2 px-4 text-gray-700">
-              We don’t usually do paid sponsorships for banners or shirts. We help on a need basis—like chipping in for team uniforms—and offer special pricing for schools and sports teams.
+              We don't usually do paid sponsorships for banners or shirts. We help on a need basis—like chipping in for team uniforms—and offer special pricing for schools and sports teams.
             </div>
           </div>
           <div>
@@ -522,7 +520,7 @@ fbq('track', 'PageView');
           </form>
         </div>
         <div id="couponStepCode" class="hidden text-center">
-          <h3 class="text-xl font-bold mb-4">Here’s Your Coupon</h3>
+          <h3 class="text-xl font-bold mb-4">Here's Your Coupon</h3>
           <img src="coupon.png" alt="Coupon" class="mx-auto my-4 w-56 sm:w-64" />
           <p class="text-sm text-gray-600 mb-4">Save or screenshot this coupon and present it at the counter.</p>
           <button
@@ -566,11 +564,13 @@ fbq('track', 'PageView');
 
       function openCouponModal() {
         couponModal.classList.remove("hidden");
+        couponModal.classList.add("flex");
         document.body.classList.add("overflow-hidden");
       }
 
       function closeCouponModal() {
         couponModal.classList.add("hidden");
+        couponModal.classList.remove("flex");
         document.body.classList.remove("overflow-hidden");
       }
 
@@ -585,7 +585,12 @@ fbq('track', 'PageView');
       // If coupon was already claimed, immediately show it
       const alreadyClaimed = localStorage.getItem("spartanCouponClaimed");
       if (alreadyClaimed) {
-        showCoupon();
+        // Don't auto-show modal, but if they click the button, skip the form
+        couponButtons.forEach(btn => {
+          btn.addEventListener("click", () => {
+            showCoupon();
+          });
+        });
       }
 
       form.addEventListener('submit', async function (e) {
@@ -595,54 +600,39 @@ fbq('track', 'PageView');
           phone: form.phone.value.trim(),
           email: form.email.value.trim()
         };
+        
         // Save to localStorage so the coupon persists for this visitor
         localStorage.setItem('spartanCouponClaimed', 'true');
         msg.textContent = 'Submitting…';
+        
         try {
-          /*
-           * Send the lead data to Google Apps Script.
-           * Many Apps Script examples expect parameters via the query string rather
-           * than a JSON body. To maximize compatibility we append the fields to
-           * the URL and perform a GET request. We still use `mode: \"no-cors\"`
-           * to avoid the browser blocking the request because the endpoint does
-           * not return CORS headers. The Apps Script can read the parameters
-           * from e.parameter and append them to the sheet.  See:
-           * https://developers.google.com/apps-script/guides/web
-           */
-          /*
-           * Send the lead data to Google Apps Script.
-           * Use a POST request with application/x-www-form-urlencoded to avoid a CORS preflight.
-           * We don't await or parse a JSON response since we're using no‑cors mode.
-           */
+          // Send the lead data to Google Apps Script
           const qs = new URLSearchParams({
             name:  payload.name,
             phone: payload.phone,
             email: payload.email
           }).toString();
-          await fetch(`${ENDPOINT}?${qs}`, {method: 'GET', mode: 'no-cors' });
+          
+          await fetch(`${ENDPOINT}?${qs}`, {
+            method: 'GET', 
+            mode: 'no-cors'
           });
-          // Treat the submission as successful regardless of response. The Apps
-          // Script endpoint will store the record in your sheet. Inform the user
-          // and reveal the coupon.
-          msg.textContent = 'Thanks! Your 50% off coupon is ready below.';
+          
+          // Treat the submission as successful regardless of response
+          msg.textContent = 'Thanks! Your 50% off coupon is ready.';
           form.reset();
           showCoupon();
           // Fire Facebook lead conversion once the coupon is revealed
           spartanTrackLead();
         } catch (err) {
-          // Even if there’s a fetch error (for example, offline), still show the
-          // coupon to avoid blocking the user. Leads may not be recorded in
-          // this case, so you might want to reconcile later.
-          msg.textContent = 'Thanks! Your 50% off coupon is ready below.';
+          // Even if there's a fetch error, still show the coupon
+          msg.textContent = 'Thanks! Your 50% off coupon is ready.';
           form.reset();
           showCoupon();
           // Fire Facebook lead conversion on error as well
           spartanTrackLead();
         }
       });
-
-      // Parse JSON safely (Apps Script may not return valid JSON on HTTP error)
-      function safeParse(t) { try { return JSON.parse(t); } catch { return null; } }
 
       function showCoupon() {
         couponStepForm.classList.add("hidden");
