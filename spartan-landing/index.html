@@ -499,7 +499,7 @@ fbq('track', 'PageView');
               id="phone"
               name="phone"
               placeholder="Phone"
-              pattern="^[0-9+()\\-.\\s]{7,}$"
+              pattern="^[0-9+() .-]{7,}"
               autocomplete="tel"
               required
               class="w-full border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500"
@@ -614,12 +614,10 @@ fbq('track', 'PageView');
            * Use a POST request with application/x-www-form-urlencoded to avoid a CORS preflight.
            * We don't await or parse a JSON response since we're using no‑cors mode.
            */
-          const formBody = new URLSearchParams({ name, phone, email });
-          await fetch(ENDPOINT, {
-            method: 'POST',
+          const qs = new URLSearchParams({ name, phone, email }).toString();
+          await fetch(`${ENDPOINT}?${qs}`, {
+            method: 'GET',
             mode: 'no-cors',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: formBody.toString()
           });
           // Treat the submission as successful regardless of response. The Apps
           // Script endpoint will store the record in your sheet. Inform the user
