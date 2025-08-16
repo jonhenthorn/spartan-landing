@@ -222,12 +222,20 @@ fbq('track', 'PageView');
       <div class="max-w-5xl mx-auto px-4">
         <h2 class="text-3xl font-bold mb-8 text-center">See Our Club</h2>
         <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6">
-               <!-- Fix: Use object-contain to show full image without cropping -->
-              <img src="IMG_6903.JPG?v=2" alt="Customer enjoying tea at Spartan Nutrition"
-                   class="w-full h-64 object-contain rounded-lg shadow-md bg-gray-100" />
-               <img src="IMG_8719.jpeg" alt="Smiling team member holding energy teas" class="w-full h-64 object-cover object-top rounded-lg shadow-md" />
-               <!-- Show the full menu poster without cropping by using object-contain -->
-               <img src="August%20Menu.jpeg" alt="Monthly menu poster" class="w-full h-64 object-contain rounded-lg shadow-md bg-white" />
+               <!-- Fix: Remove height constraint and use aspect-ratio to show full image -->
+              <div class="w-full rounded-lg shadow-md bg-gray-100 overflow-hidden">
+                <img src="IMG_6903.JPG?v=2" alt="Jon holding energy teas at Spartan Nutrition"
+                     class="w-full h-auto object-contain" />
+              </div>
+               <div class="w-full rounded-lg shadow-md overflow-hidden">
+                <img src="IMG_8719.jpeg" alt="Smiling team member holding energy teas" 
+                     class="w-full h-auto object-cover" />
+              </div>
+               <!-- Show the full menu poster without cropping -->
+               <div class="w-full rounded-lg shadow-md bg-white overflow-hidden">
+                <img src="August%20Menu.jpeg" alt="Monthly menu poster" 
+                     class="w-full h-auto object-contain" />
+              </div>
         </div>
       </div>
     </section>
