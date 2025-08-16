@@ -3,12 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Spartan Nutrition | Energy Teas in Bixby</title>
+    <title>Spartan Nutrition | Energy Teas & Protein Shakes in Bixby, OK</title>
     <link rel="canonical" href="https://spartandrink.com/" />
     <!-- Primary SEO tags -->
     <meta
       name="description"
-      content="First-time guest? Grab your coupon and experience Bixby's favorite energy teas, shakes and more."
+      content="Bixby's favorite nutrition club on Memorial Dr. Get 50% off your first energy tea or protein shake. Veteran-owned since 2016. Serving Bixby, South Tulsa, Broken Arrow."
     />
     <!-- Open Graph / Facebook -->
     <meta property="og:type" content="website" />
@@ -58,10 +58,25 @@
         },
         "geo": {
           "@type": "GeoCoordinates",
-          "latitude": "",
-          "longitude": ""
+          "latitude": "35.946942",
+          "longitude": "-95.887996"
         },
-        "openingHoursSpecification": []
+        "openingHoursSpecification": [
+          {
+            "@type": "OpeningHoursSpecification",
+            "dayOfWeek": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
+            "opens": "06:00",
+            "closes": "19:00"
+          },
+          {
+            "@type": "OpeningHoursSpecification",
+            "dayOfWeek": "Saturday",
+            "opens": "08:00",
+            "closes": "14:00"
+          }
+        ],
+        "priceRange": "$",
+        "servesCuisine": "Healthy drinks, protein shakes, energy teas"
       }
     </script>
     <link rel="icon" type="image/x-icon" href="favicon.ico" />
@@ -93,6 +108,31 @@ fbq('track', 'PageView');
         .hero-sub { font-size: 1.125rem; }
       }
       .text-glow { text-shadow: 0 3px 10px rgba(0,0,0,.55); }
+      
+      /* Floating Call Button for Mobile */
+      @media (max-width: 768px) {
+        .floating-call-btn {
+          position: fixed;
+          bottom: 20px;
+          right: 20px;
+          z-index: 40;
+          background: #16a34a;
+          color: white;
+          width: 60px;
+          height: 60px;
+          border-radius: 50%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+          animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+          0% { box-shadow: 0 4px 15px rgba(22, 163, 74, 0.4); }
+          50% { box-shadow: 0 4px 25px rgba(22, 163, 74, 0.6); }
+          100% { box-shadow: 0 4px 15px rgba(22, 163, 74, 0.4); }
+        }
+      }
     </style>
   </head>
   <body class="bg-gray-50 text-gray-900 font-sans">
@@ -157,7 +197,7 @@ fbq('track', 'PageView');
           Tasty. Healthy. Energy.
         </h1>
         <p class="hero-sub mt-4 text-white/95 text-xl md:text-2xl text-glow max-w-xl mx-auto mb-6">
-          First-time guest? Grab your coupon and experience Bixby's favorite energy teas, shakes and more.
+          Bixby's favorite nutrition club on Memorial Dr. First-time guest? Grab your coupon for energy teas, protein shakes and more.
         </p>
         <button
           id="couponBtnHero"
@@ -206,7 +246,7 @@ fbq('track', 'PageView');
       <div class="max-w-5xl mx-auto px-4 text-center">
         <h2 class="text-3xl font-bold mb-6">Take Home Your Favorites</h2>
         <p class="max-w-2xl mx-auto text-gray-700 mb-8">
-          Love our energy teas? Ask about our full-size canisters to enjoy Spartan Nutrition at home.
+          Love our energy teas? Ask about our full-size canisters to enjoy Spartan Nutrition at home. Perfect for busy Bixby families, Tulsa commuters, and anyone in the Green Country area looking to maintain their healthy lifestyle.
         </p>
         <button
           class="bg-green-600 hover:bg-green-500 text-white font-semibold px-6 py-3 rounded-lg focus:outline-none"
@@ -245,14 +285,138 @@ fbq('track', 'PageView');
       </div>
     </section>
 
+    <!-- Testimonials Section -->
+    <section class="py-16 bg-green-50">
+      <div class="max-w-5xl mx-auto px-4">
+        <h2 class="text-3xl font-bold mb-2 text-center">What Our Customers Say</h2>
+        <p class="text-center text-gray-600 mb-10">Real reviews from our Spartan family</p>
+        
+        <!-- Reviews Grid -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+          
+          <!-- Madison's Google Review -->
+          <div class="bg-white p-6 rounded-xl shadow-md">
+            <div class="flex items-center mb-3">
+              <div class="flex text-yellow-400">
+                ★★★★★
+              </div>
+              <span class="ml-2 text-sm text-gray-500">Google Review</span>
+            </div>
+            <p class="text-gray-700 mb-4 text-sm leading-relaxed">
+              "I can't say enough good things about this place! From the moment you walk in, you can feel the positive energy. Jon and Shanna, the owners, are truly passionate about what they do—and it shows. They're incredibly knowledgeable, always ready to offer advice, and genuinely care about your health journey."
+            </p>
+            <div class="flex items-center">
+              <div class="font-semibold text-sm">Madison E.</div>
+              <span class="ml-2 text-xs text-gray-500">16 weeks ago</span>
+            </div>
+          </div>
+
+          <!-- Manda's Review -->
+          <div class="bg-white p-6 rounded-xl shadow-md">
+            <div class="flex items-center mb-3">
+              <div class="flex text-yellow-400">
+                ★★★★★
+              </div>
+              <span class="ml-2 text-sm text-gray-500">Facebook</span>
+            </div>
+            <p class="text-gray-700 mb-4 text-sm leading-relaxed">
+              "I tried Spartan for the first time today and I was so impressed! I loved the atmosphere of the store, the owner and her daughter were so sweet and answered all of my questions. The drink itself was amazing! I absolutely cannot wait to go back and try another flavor!"
+            </p>
+            <div class="flex items-center">
+              <div class="font-semibold text-sm">Manda Y.</div>
+              <span class="ml-2 text-xs text-gray-500">July 2024</span>
+            </div>
+          </div>
+
+          <!-- Erin's Review -->
+          <div class="bg-white p-6 rounded-xl shadow-md">
+            <div class="flex items-center mb-3">
+              <div class="flex text-yellow-400">
+                ★★★★★
+              </div>
+              <span class="ml-2 text-sm text-gray-500">Facebook</span>
+            </div>
+            <p class="text-gray-700 mb-4 text-sm leading-relaxed">
+              "I love what Jon is doing for Bixbians. His business is perfect for the introduction of nutrition and meets people where they are. Bixby is lucky to have Spartan Nutrition and someone as passionate as Jon to lead them in the right direction!"
+            </p>
+            <div class="flex items-center">
+              <div class="font-semibold text-sm">Erin M.</div>
+              <span class="ml-2 text-xs text-gray-500">December 2018</span>
+            </div>
+          </div>
+
+          <!-- Priscila's Review -->
+          <div class="bg-white p-6 rounded-xl shadow-md">
+            <div class="flex items-center mb-3">
+              <div class="flex text-yellow-400">
+                ★★★★★
+              </div>
+              <span class="ml-2 text-sm text-gray-500">Facebook</span>
+            </div>
+            <p class="text-gray-700 mb-4 text-sm leading-relaxed">
+              "I didn't have time for breakfast this morning... on my way to work I remembered that a friend told me about Spartan Nutrition. I ordered through the phone and got it super quick... it was a delicious and healthy option!"
+            </p>
+            <div class="flex items-center">
+              <div class="font-semibold text-sm">Priscila J.</div>
+              <span class="ml-2 text-xs text-gray-500">January 2021</span>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Short Review Highlight -->
+        <div class="bg-white p-8 rounded-xl shadow-lg max-w-2xl mx-auto text-center">
+          <div class="flex justify-center mb-3">
+            <div class="flex text-yellow-400 text-xl">
+              ★★★★★
+            </div>
+          </div>
+          <p class="text-xl font-medium text-gray-800 mb-3">
+            "Oh my gosh this place is so good you have to try it!"
+          </p>
+          <div class="text-sm text-gray-600">
+            <span class="font-semibold">Kylie C.</span> • Facebook Review
+          </div>
+        </div>
+
+        <!-- Call to Action -->
+        <div class="text-center mt-10">
+          <p class="text-gray-600 mb-4">Join hundreds of happy customers!</p>
+          <button
+            onclick="document.getElementById('couponBtn').click();"
+            class="bg-green-600 hover:bg-green-500 text-white font-semibold px-8 py-3 rounded-lg text-lg"
+          >
+            Get Your First Drink 50% Off!
+          </button>
+        </div>
+      </div>
+    </section>
+
     <!-- Visit section -->
     <section id="visit" class="py-16 bg-gray-100">
       <div class="max-w-5xl mx-auto px-4">
-        <h2 class="text-3xl font-bold mb-8 text-center">Visit Us</h2>
+        <h2 class="text-3xl font-bold mb-8 text-center">Visit Our Bixby Location</h2>
+        
+        <!-- Google Maps Embed -->
+        <div class="mb-10 rounded-lg overflow-hidden shadow-lg">
+          <iframe 
+            src="https://www.google.com/maps/embed?pb=!1m18!1m12!1m3!1d3225.935437734585!2d-95.88799568472547!3d35.946941980143!2m3!1f0!2f0!3f0!3m2!1i1024!2i768!4f13.1!3m3!1m2!1s0x87b68ff789945aa9%3A0xeb033d9dadcf6b2!2sSpartan%20Nutrition!5e0!3m2!1sen!2sus!4v1699999999999!5m2!1sen!2sus"
+            width="100%" 
+            height="400" 
+            style="border:0;" 
+            allowfullscreen="" 
+            loading="lazy" 
+            referrerpolicy="no-referrer-when-downgrade"
+            title="Spartan Nutrition Location Map"
+            class="w-full">
+          </iframe>
+        </div>
+
         <div class="grid grid-cols-1 md:grid-cols-3 gap-8 text-center">
           <div class="flex flex-col items-center">
             <svg class="w-8 h-8 mb-2 text-green-600" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 8-9 13-9 13s-9-5-9-13a9 9 0 0118 0z" /><circle cx="12" cy="10" r="3" /></svg>
             <p class="font-semibold">15020 S Memorial Dr, STE C<br />Bixby, OK 74008</p>
+            <p class="text-sm text-gray-600 mt-1">South Tulsa/Bixby area</p>
             <a
               href="https://www.google.com/maps/place/Spartan+Nutrition/@35.946942,-95.887996,17z/data=!3m1!4b1!4m6!3m5!1s0x87b68ff789945aa9:0xeb033d9dadcf6b2!8m2!3d35.946942!4d-95.887996!16s%2Fg%2F11bz__tcb0?entry=ttu&g_ep=EgoyMDI1MDgxMS4wIKXMDSoASAFQAw%3D%3D"
               target="_blank"
@@ -260,24 +424,38 @@ fbq('track', 'PageView');
               >Get Directions</a>
           </div>
           <div class="flex flex-col items-center">
-            <svg class="w-8 h-8 mb-2 text-green-600" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><path d="M22 4.92V19a2 2 0 01-2 2H4a2 2 0 01-2-2V4.92a2 2 0 011.06-1.76l8-4.27a2 2 0 011.88 0l8 4.27A2 2 0 0122 4.92z" /><path d="M6 9l6 3 6-3" /></svg>
-            <a href="mailto:bixbynutrition@gmail.com" class="font-semibold">bixbynutrition@gmail.com</a>
-            <p class="text-sm text-gray-600 mt-1">Email Us</p>
+            <svg class="w-8 h-8 mb-2 text-green-600" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2" /><line x1="9" y1="9" x2="15" y2="9" /><line x1="9" y1="13" x2="15" y2="13" /></svg>
+            <p class="font-semibold">Hours</p>
+            <p class="text-sm text-gray-700">Monday-Friday: 6am-7pm</p>
+            <p class="text-sm text-gray-700">Saturday: 8am-2pm</p>
+            <p class="text-sm text-gray-700">Sunday: Closed</p>
+            <a
+              href="https://www.google.com/search?q=Spartan+Nutrition+Bixby+OK"
+              target="_blank"
+              class="text-green-600 hover:underline text-sm mt-1"
+            >
+              Check holiday hours
+            </a>
           </div>
           <div class="flex flex-col items-center">
-            <svg class="w-8 h-8 mb-2 text-green-600" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10a9 9 0 0118 0c0 2.21-.9 4.21-2.36 5.65L12 21l-6.64-5.35A8.963 8.963 0 013 10z" /></svg>
-            <a href="tel:9189289755" class="font-semibold">(918) 928‑9755</a>
-            <p class="text-sm text-gray-600 mt-1">Call Us</p>
+            <svg class="w-8 h-8 mb-2 text-green-600" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z" /></svg>
+            <a href="tel:9189289755" class="font-semibold text-lg">(918) 928‑9755</a>
+            <p class="text-sm text-gray-600">Call ahead for pickup</p>
+            <a href="mailto:bixbynutrition@gmail.com" class="text-green-600 hover:underline text-sm mt-2">bixbynutrition@gmail.com</a>
           </div>
         </div>
-        <div class="text-center mt-8">
-          <a
-            href="https://www.google.com/search?q=Spartan+Nutrition+Bixby+OK"
-            target="_blank"
-            class="text-green-600 hover:underline"
-          >
-            Check our Google listing for most current hours
-          </a>
+        
+        <!-- Local SEO Content -->
+        <div class="mt-12 text-center max-w-3xl mx-auto">
+          <p class="text-gray-700">
+            <strong>Serving the Greater Bixby and South Tulsa Area</strong><br/>
+            Located conveniently on Memorial Drive near the Bixby/Tulsa border, Spartan Nutrition is your local destination for healthy energy drinks, protein shakes, and nutritional supplements. We proudly serve customers from Bixby, South Tulsa, Broken Arrow, Jenks, and Glenpool. Whether you're heading to work in downtown Tulsa or live in the Bixby school district, we're perfectly positioned for your nutrition needs.
+          </p>
+          <div class="mt-6 flex flex-wrap justify-center gap-2">
+            <span class="bg-green-100 text-green-800 px-3 py-1 rounded-full text-sm">Veteran-Owned</span>
+            <span class="bg-green-100 text-green-800 px-3 py-1 rounded-full text-sm">Local Business Since 2016</span>
+            <span class="bg-green-100 text-green-800 px-3 py-1 rounded-full text-sm">Bixby Chamber Member</span>
+          </div>
         </div>
       </div>
     </section>
@@ -458,28 +636,44 @@ fbq('track', 'PageView');
 
     <!-- Footer -->
     <footer class="py-8 bg-gray-200">
-      <div class="max-w-5xl mx-auto px-4 flex flex-col sm:flex-row justify-between items-center">
-        <p class="text-sm text-gray-600 mb-4 sm:mb-0">
-          ©
-          <span id="currentYear"></span>
-          Spartan Nutrition. All rights reserved.
-        </p>
-        <div class="flex space-x-4 text-green-600">
-          <a href="https://www.facebook.com/bixbyspartannutrition" target="_blank" aria-label="Facebook" class="hover:text-green-800">
-            <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
-              <path
-                d="M22.675 0h-21.35C.59 0 0 .59 0 1.325v21.351C0 23.411.589 24 1.325 24h11.52v-9.294H9.691V11.58h3.154V9.124c0-3.123 1.906-4.823 4.694-4.823 1.335 0 2.485.099 2.818.144v3.27l-1.934.001c-1.515 0-1.808.72-1.808 1.775v2.329h3.616l-.471 3.126h-3.145V24h6.168C23.412 24 24 23.411 24 22.676V1.325C24 .59 23.411 0 22.675 0z"
-              ></path>
-            </svg>
-          </a>
-          <a href="https://www.instagram.com/bixbyspartannutrition/?hl=en" target="_blank" aria-label="Instagram" class="hover:text-green-800">
-            <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
-              <path
-                d="M12 2.163c3.204 0 3.584.012 4.849.07 1.366.062 2.633.338 3.608 1.313.975.975 1.251 2.242 1.313 3.608.058 1.265.069 1.645.069 4.849s-.012 3.584-.069 4.849c-.062 1.366-.338 2.633-1.313 3.608-.975.975-2.242 1.251-3.608 1.313-1.265.058-1.645.069-4.849.069s-3.584-.012-4.849-.069c-1.366-.062-2.633-.338-3.608-1.313-.975-.975-1.251-2.242-1.313-3.608C2.175 15.646 2.163 15.266 2.163 12s.012-3.584.07-4.849c.062-1.366.338-2.633 1.313-3.608C4.521 2.5 5.788 2.224 7.154 2.163 8.419 2.104 8.8 2.093 12 2.093m0-2.163C8.741 0 8.332.011 7.052.071 5.26.147 3.642.705 2.463 1.884 1.284 3.064.726 4.681.65 6.474.59 7.754.579 8.163.579 12s.011 4.246.071 5.526c.076 1.793.634 3.41 1.813 4.589 1.18 1.179 2.798 1.737 4.589 1.813 1.28.06 1.689.071 5.528.071s4.246-.011 5.526-.071c1.792-.076 3.41-.634 4.589-1.813 1.179-1.18 1.737-2.797 1.813-4.589.06-1.28.071-1.689.071-5.528s-.011-4.246-.071-5.526c-.076-1.792-.634-3.41-1.813-4.589C20.409.705 18.792.147 17 .071 15.72.011 15.31 0 12 0z"
-              />
-              <circle cx="12" cy="12" r="3.5" />
-            </svg>
-          </a>
+      <div class="max-w-5xl mx-auto px-4">
+        <div class="flex flex-col sm:flex-row justify-between items-center mb-6">
+          <div class="text-center sm:text-left mb-4 sm:mb-0">
+            <p class="text-sm text-gray-600">
+              ©
+              <span id="currentYear"></span>
+              Spartan Nutrition. All rights reserved.
+            </p>
+            <p class="text-xs text-gray-500 mt-1">
+              15020 S Memorial Dr STE C, Bixby, OK 74008
+            </p>
+          </div>
+          <div class="flex space-x-4 text-green-600">
+            <a href="https://www.facebook.com/bixbyspartannutrition" target="_blank" aria-label="Facebook" class="hover:text-green-800">
+              <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
+                <path
+                  d="M22.675 0h-21.35C.59 0 0 .59 0 1.325v21.351C0 23.411.589 24 1.325 24h11.52v-9.294H9.691V11.58h3.154V9.124c0-3.123 1.906-4.823 4.694-4.823 1.335 0 2.485.099 2.818.144v3.27l-1.934.001c-1.515 0-1.808.72-1.808 1.775v2.329h3.616l-.471 3.126h-3.145V24h6.168C23.412 24 24 23.411 24 22.676V1.325C24 .59 23.411 0 22.675 0z"
+                ></path>
+              </svg>
+            </a>
+            <a href="https://www.instagram.com/bixbyspartannutrition/?hl=en" target="_blank" aria-label="Instagram" class="hover:text-green-800">
+              <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
+                <path
+                  d="M12 2.163c3.204 0 3.584.012 4.849.07 1.366.062 2.633.338 3.608 1.313.975.975 1.251 2.242 1.313 3.608.058 1.265.069 1.645.069 4.849s-.012 3.584-.069 4.849c-.062 1.366-.338 2.633-1.313 3.608-.975.975-2.242 1.251-3.608 1.313-1.265.058-1.645.069-4.849.069s-3.584-.012-4.849-.069c-1.366-.062-2.633-.338-3.608-1.313-.975-.975-1.251-2.242-1.313-3.608C2.175 15.646 2.163 15.266 2.163 12s.012-3.584.07-4.849c.062-1.366.338-2.633 1.313-3.608C4.521 2.5 5.788 2.224 7.154 2.163 8.419 2.104 8.8 2.093 12 2.093m0-2.163C8.741 0 8.332.011 7.052.071 5.26.147 3.642.705 2.463 1.884 1.284 3.064.726 4.681.65 6.474.59 7.754.579 8.163.579 12s.011 4.246.071 5.526c.076 1.793.634 3.41 1.813 4.589 1.18 1.179 2.798 1.737 4.589 1.813 1.28.06 1.689.071 5.528.071s4.246-.011 5.526-.071c1.792-.076 3.41-.634 4.589-1.813 1.179-1.18 1.737-2.797 1.813-4.589.06-1.28.071-1.689.071-5.528s-.011-4.246-.071-5.526c-.076-1.792-.634-3.41-1.813-4.589C20.409.705 18.792.147 17 .071 15.72.011 15.31 0 12 0z"
+                />
+                <circle cx="12" cy="12" r="3.5" />
+              </svg>
+            </a>
+            <a href="https://www.google.com/maps/place/Spartan+Nutrition/@35.946942,-95.887996,17z" target="_blank" aria-label="Google Maps" class="hover:text-green-800">
+              <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>
+              </svg>
+            </a>
+          </div>
+        </div>
+        <!-- Local Citations -->
+        <div class="text-center text-xs text-gray-500 pt-4 border-t border-gray-300">
+          Proud member of the Bixby community • Serving South Tulsa, Broken Arrow, Jenks & Glenpool
         </div>
       </div>
     </footer>
@@ -545,6 +739,13 @@ fbq('track', 'PageView');
         </div>
       </div>
     </div>
+
+    <!-- Floating Call Button (Mobile Only) -->
+    <a href="tel:9189289755" class="floating-call-btn md:hidden" aria-label="Call Spartan Nutrition">
+      <svg class="w-7 h-7" fill="currentColor" viewBox="0 0 24 24">
+        <path d="M20.01 15.38c-1.23 0-2.42-.2-3.53-.56a.977.977 0 00-1.01.24l-1.57 1.97c-2.83-1.35-5.48-3.9-6.89-6.83l1.95-1.66c.27-.28.35-.67.24-1.02-.37-1.11-.56-2.3-.56-3.53 0-.54-.45-.99-.99-.99H4.19C3.65 3 3 3.24 3 3.99 3 13.28 10.73 21 20.01 21c.71 0 .99-.63.99-1.18v-3.45c0-.54-.45-.99-.99-.99z"/>
+      </svg>
+    </a>
 
     <!-- Scripts -->
     <script>
