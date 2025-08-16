@@ -221,20 +221,25 @@ fbq('track', 'PageView');
     <section class="py-16 bg-white">
       <div class="max-w-5xl mx-auto px-4">
         <h2 class="text-3xl font-bold mb-8 text-center">See Our Club</h2>
-        <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6">
-               <!-- Fix: Remove height constraint and use aspect-ratio to show full image -->
-              <div class="w-full rounded-lg shadow-md bg-gray-100 overflow-hidden">
-                <img src="IMG_6903.JPG?v=2" alt="Jon holding energy teas at Spartan Nutrition"
-                     class="w-full h-auto object-contain" />
+        <!-- Allow images to have their natural aspect ratios -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6 items-start">
+               <!-- Jon's photo - display FULL image with no cropping -->
+              <div class="w-full">
+                <img src="IMG_6903.JPG?v=3" alt="Jon holding two Spartan Nutrition drinks"
+                     class="w-full rounded-lg shadow-md" 
+                     style="height: auto; width: 100%; display: block;" />
               </div>
-               <div class="w-full rounded-lg shadow-md overflow-hidden">
+               <!-- Team member photo -->
+               <div class="w-full">
                 <img src="IMG_8719.jpeg" alt="Smiling team member holding energy teas" 
-                     class="w-full h-auto object-cover" />
+                     class="w-full rounded-lg shadow-md"
+                     style="height: auto; width: 100%; display: block;" />
               </div>
-               <!-- Show the full menu poster without cropping -->
-               <div class="w-full rounded-lg shadow-md bg-white overflow-hidden">
+               <!-- Menu poster -->
+               <div class="w-full">
                 <img src="August%20Menu.jpeg" alt="Monthly menu poster" 
-                     class="w-full h-auto object-contain" />
+                     class="w-full rounded-lg shadow-md"
+                     style="height: auto; width: 100%; display: block;" />
               </div>
         </div>
       </div>
