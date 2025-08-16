@@ -614,10 +614,12 @@ fbq('track', 'PageView');
            * Use a POST request with application/x-www-form-urlencoded to avoid a CORS preflight.
            * We don't await or parse a JSON response since we're using no‑cors mode.
            */
-          const qs = new URLSearchParams({ name, phone, email }).toString();
-          await fetch(`${ENDPOINT}?${qs}`, {
-            method: 'GET',
-            mode: 'no-cors',
+          const qs = new URLSearchParams({
+            name:  payload.name,
+            phone: payload.phone,
+            email: payload.email
+          }).toString();
+          await fetch(`${ENDPOINT}?${qs}`, {method: 'GET', mode: 'no-cors' });
           });
           // Treat the submission as successful regardless of response. The Apps
           // Script endpoint will store the record in your sheet. Inform the user
