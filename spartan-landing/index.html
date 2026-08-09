@@ -47,6 +47,7 @@
         ],
         "@id": "https://spartandrink.com/",
         "url": "https://spartandrink.com/",
+        "hasMenu": "https://cash.app/$spartannutritionok",
         "telephone": "9189289755",
         "address": {
           "@type": "PostalAddress",
@@ -145,6 +146,7 @@ fbq('track', 'PageView');
         </div>
         <nav class="hidden sm:flex space-x-6 text-sm font-medium">
           <a href="#menu" class="hover:text-green-600">Menu</a>
+          <a href="https://cash.app/$spartannutritionok" target="_blank" rel="noopener noreferrer" class="hover:text-green-600">Order Online</a>
           <a href="#visit" class="hover:text-green-600">Visit</a>
           <a href="#faq" class="hover:text-green-600">FAQ</a>
         </nav>
@@ -199,12 +201,22 @@ fbq('track', 'PageView');
         <p class="hero-sub mt-4 text-white/95 text-xl md:text-2xl text-glow max-w-xl mx-auto mb-6">
           Bixby's favorite nutrition club on Memorial Dr. First-time guest? Grab your coupon for energy teas, protein shakes and more.
         </p>
-        <button
-          id="couponBtnHero"
-          class="bg-green-600 hover:bg-green-500 text-white font-semibold px-8 py-3 rounded-lg text-lg focus:outline-none"
-        >
-          Get Your First Drink!
-        </button>
+        <div class="flex flex-col sm:flex-row gap-3 justify-center">
+          <a
+            href="https://cash.app/$spartannutritionok"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="bg-green-600 hover:bg-green-500 text-white font-semibold px-8 py-3 rounded-lg text-lg focus:outline-none"
+          >
+            Order Online
+          </a>
+          <button
+            id="couponBtnHero"
+            class="bg-white/95 hover:bg-white text-green-700 font-semibold px-8 py-3 rounded-lg text-lg focus:outline-none"
+          >
+            Get Your First Drink!
+          </button>
+        </div>
       </div>
     </section>
 
@@ -238,6 +250,14 @@ fbq('track', 'PageView');
             </p>
           </div>
         </div>
+        <a
+          href="https://cash.app/$spartannutritionok"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="inline-block mt-8 bg-green-600 hover:bg-green-500 text-white font-semibold px-8 py-3 rounded-lg text-lg focus:outline-none"
+        >
+          View Menu &amp; Order Online
+        </a>
       </div>
     </section>
 
