@@ -1,32 +1,32 @@
 {
-  "lastReviewed": "2026-07-31",
+  "lastReviewed": "2026-08-10",
   "note": "Flavor availability changes. Call ahead if you have a specific favorite in mind.",
   "sections": [
     {
       "id": "energy-teas",
-      "eyebrow": "Bright, cold, made to order",
+      "eyebrow": "Hot or iced, made to order",
       "title": "Energy teas",
-      "description": "Choose a base tea, add flavor, and ask the team about current low-caffeine or caffeine-free options.",
+      "description": "Choose a base tea, add flavor, and enjoy it hot or iced in small (16 oz), medium (24 oz) or large (32 oz). Ask the team about current low-caffeine or caffeine-free options.",
       "groups": [
         {
           "label": "Base teas",
-          "items": ["Raspberry", "Lemon", "Peach", "Chai", "Cinnamon", "Ginger"]
+          "items": ["Original", "Raspberry", "Lemon", "Peach", "Chai", "Cinnamon", "Ginger"]
         },
         {
           "label": "Flavor options",
-          "items": ["Pineapple", "Wildberry", "Blue raspberry", "Cherry limeade", "Pink Starburst", "Strawberry", "Watermelon", "Tropical", "Skittles", "Pomegranate", "Lemon raspberry", "Blackberry", "Cranberry"]
+          "items": ["Pineapple", "Wildberry", "Blue Raspberry", "Cherry Limeade", "Pink Starburst", "Strawberry", "Watermelon", "Tropical", "Skittles", "Pomegranate", "Lemon Raspberry", "Blackberry", "Cranberry", "Banana", "Coconut", "Cherry Lime", "Cherry", "Rainbow Candy", "Cotton Candy", "Grape", "Green Apple", "Mango", "Orange", "Peach", "Papaya", "Passionfruit", "Piña Colada", "Pineapple Fandango", "Pink Lemonade", "Raspberry", "Tropical Fruit", "Cucumber Lime", "Açaí Berry", "Lavender Lemon", "Margarita", "Limeade", "Prickly Pear", "Hot Tamale", "Sour Blue Raspberry", "Sour Green Apple", "Sour Blue Blast", "Sour Black Cherry", "Sour Strawberry", "Blue Blast", "Blueberry", "Dragon Fruit", "Lemonade", "Melon", "Orange Pineapple", "Strawberry Kiwi", "Tropical Fruit Punch"]
         },
         {
           "label": "Popular mixes",
-          "items": ["Mai Tai", "On the Beach", "Sour Patch", "Black Widow", "Beauty & the Beast", "Baywatch", "Bahama Mama", "Sweetheart", "The Swifty", "Palm Tree", "Watermelon Lime Chiller", "Sandy Beach", "Spring Fever"]
+          "items": ["Mai Tai", "On The Beach", "Sour Patch", "Black Widow", "Beauty & The Beast", "Hangover/Hydration", "Baywatch", "Bahama Mama", "Sweetheart", "The Swifty", "Palm Tree", "Watermelon Lime Chiller", "Sandy Beach", "Spring Fever", "Shana’s Crack Tea"]
         }
       ]
     },
     {
       "id": "protein-shakes",
       "eyebrow": "Sweet favorites and classics",
-      "title": "Protein shakes",
-      "description": "Made to order in familiar dessert-inspired and fruit flavors. Ask before ordering about ingredients, protein, or dietary preferences.",
+      "title": "Shakes",
+      "description": "Made-to-order nutrition shakes in familiar dessert-inspired and fruit flavors. Ask about protein options, ingredients, or dietary preferences.",
       "groups": [
         {
           "label": "Popular flavors",
