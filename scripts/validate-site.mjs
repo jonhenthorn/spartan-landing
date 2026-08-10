@@ -221,6 +221,24 @@ assert.match(homepage, /send_page_view:\s*false/);
 assert.match(homepage, /allow_google_signals:\s*false/);
 assert.match(homepage, /allow_ad_personalization_signals:\s*false/);
 assert.match(homepage, /ad_storage:\s*"denied"/);
+assert.match(homepage, /ad_user_data:\s*"denied"/);
+assert.match(homepage, /ad_personalization:\s*"denied"/);
+assert.match(homepage, /analytics_storage:\s*"granted"/);
+assert.equal(
+  (homepage.match(/googletagmanager\.com\/gtag\/js\?id=G-C3R237CCQ7/g) || []).length,
+  1,
+  "Homepage must load the GA4 library exactly once"
+);
+assert.equal(
+  (homepage.match(/window\.gtag\("config", "G-C3R237CCQ7"/g) || []).length,
+  1,
+  "Homepage must configure GA4 exactly once"
+);
+assert.equal(
+  (siteScript.match(/window\.gtag\("event", "page_view"/g) || []).length,
+  1,
+  "Site script must send exactly one manual GA4 page-view event"
+);
 assert.ok(
   homepage.indexOf('window.gtag("config", "G-C3R237CCQ7"') < homepage.indexOf("<!-- Meta Pixel"),
   "The production-only Google tag must be initialized before the Meta Pixel block"
