@@ -3,6 +3,9 @@ import { readFile, writeFile } from "node:fs/promises";
 const menu = JSON.parse(await readFile(new URL("../data/menu.json", import.meta.url), "utf8"));
 const megaTeaKits = JSON.parse(await readFile(new URL("../data/mega-tea-kits.json", import.meta.url), "utf8"));
 const indexPath = new URL("../index.html", import.meta.url);
+const menuPagePath = new URL("../menu/index.html", import.meta.url);
+const currentReleaseStartMarker = "<!-- CURRENT_RELEASE_DATA_START -->";
+const currentReleaseEndMarker = "<!-- CURRENT_RELEASE_DATA_END -->";
 const menuStartMarker = "<!-- MENU_DATA_START -->";
 const menuEndMarker = "<!-- MENU_DATA_END -->";
 const megaTeaKitsStartMarker = "<!-- MEGA_TEA_KITS_DATA_START -->";
@@ -25,10 +28,42 @@ const replaceMarkedSection = (source, startMarker, endMarker, generated) => {
   const end = source.indexOf(endMarker);
 
   if (start === -1 || end === -1 || end < start) {
-    throw new Error(`Markers were not found in index.html: ${startMarker} / ${endMarker}`);
+    throw new Error(`Generated-content markers were not found: ${startMarker} / ${endMarker}`);
   }
 
   return `${source.slice(0, start)}${generated}${source.slice(end + endMarker.length)}`;
+};
+
+const renderCurrentRelease = ({ assetPrefix = "", menuHref }) => {
+  const release = menu.currentRelease;
+  if (!release) throw new Error("data/menu.json is missing currentRelease");
+
+  return `${currentReleaseStartMarker}
+      <section class="section section-sea" id="current-release">
+        <div class="container release-grid">
+          <div class="release-frame">
+            <span class="release-badge">Available now</span>
+            <img
+              src="${escapeHtml(`${assetPrefix}${release.image}`)}"
+              width="${escapeHtml(release.imageWidth)}"
+              height="${escapeHtml(release.imageHeight)}"
+              alt="${escapeHtml(release.imageAlt)}"
+              loading="lazy"
+            />
+          </div>
+          <div class="release-copy">
+            <p class="eyebrow">${escapeHtml(release.eyebrow)}</p>
+            <h2>${escapeHtml(release.title)}</h2>
+            <p>${escapeHtml(release.description)}</p>
+            <p>${escapeHtml(release.availabilityNote)}</p>
+            <div class="inline-actions">
+              <a class="button button-secondary" href="tel:+19189289755" data-track="call_click" data-track-location="current_release">Call about a flavor</a>
+              <a class="button button-ghost" href="${escapeHtml(menuHref)}" data-track="menu_click" data-track-location="current_release">See the permanent menu</a>
+            </div>
+          </div>
+        </div>
+      </section>
+      ${currentReleaseEndMarker}`;
 };
 
 const sections = menu.sections.map((section) => {
@@ -133,7 +168,13 @@ const generatedMegaTeaKits = `${megaTeaKitsStartMarker}
       ${megaTeaKitsEndMarker}`;
 
 const source = await readFile(indexPath, "utf8");
-const withMenu = replaceMarkedSection(source, menuStartMarker, menuEndMarker, generatedMenu);
+const withRelease = replaceMarkedSection(
+  source,
+  currentReleaseStartMarker,
+  currentReleaseEndMarker,
+  renderCurrentRelease({ menuHref: "/menu/#permanent-menu" })
+);
+const withMenu = replaceMarkedSection(withRelease, menuStartMarker, menuEndMarker, generatedMenu);
 const next = replaceMarkedSection(
   withMenu,
   megaTeaKitsStartMarker,
@@ -141,6 +182,21 @@ const next = replaceMarkedSection(
   generatedMegaTeaKits
 );
 await writeFile(indexPath, next);
+
+const menuPageSource = await readFile(menuPagePath, "utf8");
+const menuPageWithRelease = replaceMarkedSection(
+  menuPageSource,
+  currentReleaseStartMarker,
+  currentReleaseEndMarker,
+  renderCurrentRelease({ assetPrefix: "../", menuHref: "#permanent-menu" })
+);
+const nextMenuPage = replaceMarkedSection(
+  menuPageWithRelease,
+  menuStartMarker,
+  menuEndMarker,
+  generatedMenu
+);
+await writeFile(menuPagePath, nextMenuPage);
 console.log(
-  `Updated index.html from data/menu.json (${menu.sections.length} menu sections) and data/mega-tea-kits.json (${selectionCount} kit selections).`
+  `Updated index.html and menu/index.html from data/menu.json (${menu.sections.length} menu sections) and data/mega-tea-kits.json (${selectionCount} kit selections).`
 );

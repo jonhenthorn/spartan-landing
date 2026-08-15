@@ -5,8 +5,9 @@ This is the low-maintenance operating routine for making the website, Google Bus
 ## Canonical destinations
 
 - Website: `https://spartandrink.com/`
-- Permanent menu: `https://spartandrink.com/#permanent-menu`
-- Current menu release: `https://spartandrink.com/#current-release`
+- Permanent menu: `https://spartandrink.com/menu/#permanent-menu`
+- Current menu release: `https://spartandrink.com/menu/#current-release`
+- Products shipped to you: `https://spartandrink.com/products-at-home/`
 - First-visit offer: `https://spartandrink.com/#first-visit`
 - Mega Tea Kits: `https://spartandrink.com/#mega-tea-kits`
 - Google profile: `https://www.google.com/maps?cid=1058402923204900530`
@@ -35,9 +36,9 @@ Use lowercase words separated with underscores. Never put a customer name, email
 
 | Channel | `utm_source` | `utm_medium` | Example destination |
 | --- | --- | --- | --- |
-| Instagram | `instagram` | `organic_social` | `https://spartandrink.com/?utm_source=instagram&utm_medium=organic_social&utm_campaign=monthly_menu_2026_08&utm_content=reel_01` |
-| Facebook | `facebook` | `organic_social` | `https://spartandrink.com/?utm_source=facebook&utm_medium=organic_social&utm_campaign=monthly_menu_2026_08&utm_content=post_01` |
-| TikTok | `tiktok` | `organic_social` | `https://spartandrink.com/?utm_source=tiktok&utm_medium=organic_social&utm_campaign=monthly_menu_2026_08&utm_content=video_01` |
+| Instagram | `instagram` | `organic_social` | `https://spartandrink.com/menu/?utm_source=instagram&utm_medium=organic_social&utm_campaign=monthly_menu_2026_08&utm_content=reel_01` |
+| Facebook | `facebook` | `organic_social` | `https://spartandrink.com/menu/?utm_source=facebook&utm_medium=organic_social&utm_campaign=monthly_menu_2026_08&utm_content=post_01` |
+| TikTok | `tiktok` | `organic_social` | `https://spartandrink.com/menu/?utm_source=tiktok&utm_medium=organic_social&utm_campaign=monthly_menu_2026_08&utm_content=video_01` |
 | Google profile | `google` | `organic` | `https://spartandrink.com/?utm_source=google&utm_medium=organic&utm_campaign=gbp_website` |
 | Brevo | `brevo` | `email` | `https://spartandrink.com/?utm_source=brevo&utm_medium=email&utm_campaign=monthly_menu_2026_08&utm_content=menu_button` |
 
@@ -67,5 +68,5 @@ Quarterly:
 - Preserve single-hop permanent redirects from HTTP, `www`, `/index.html` and legacy `/spartan-landing` URLs.
 - Keep `robots.txt`, `sitemap.xml`, page metadata, social-card metadata and LocalBusiness structured data valid.
 - Submit the sitemap and inspect the homepage in the verified Search Console domain property after meaningful releases.
-- Keep page weight low; do not restore the old heavy map iframe, duplicate landing page or unused JavaScript libraries for SEO appearance.
+- Keep page weight low. The official location map is below the fold with fixed dimensions and native lazy loading; do not move it into the initial viewport, replace it with an unlicensed screenshot, or add duplicate map libraries for SEO appearance.
 - Earn legitimate local links through actual Bixby organizations, events, teams, suppliers or news coverage. Do not buy links, swap large batches of links or stuff city names into repetitive copy.
