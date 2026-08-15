@@ -2,9 +2,10 @@
  * Spartan Nutrition website form handler.
  *
  * Deploy this file as the existing Google Apps Script web app that owns the
- * current lead Sheet. New forms submit by POST. During the site transition,
- * legacy GET coupon claims remain accepted so cached copies of the old page
- * cannot silently lose leads.
+ * current lead Sheet. New forms submit by authenticated Cloudflare Worker POST
+ * with a native HTML POST fallback. During the site transition, legacy GET
+ * coupon claims remain accepted so cached copies of the old page cannot
+ * silently lose leads.
  *
  * Private configuration belongs in Apps Script Properties, never in GitHub.
  */
@@ -49,8 +50,9 @@ const REQUIRED_HEADERS = [
 
 const HISTORIC_HEADERS = ['timestamp', 'name', 'phone', 'email', 'source_ip'];
 const SERVICE_NAME = 'spartan-website-forms';
-const FORM_HANDLER_VERSION = 'spartan-forms-v3.1-2026-08-10';
+const FORM_HANDLER_VERSION = 'spartan-forms-v3.2-2026-08-15';
 const FORM_CONTRACT_VERSION = 'spartan-form-contract-v3-2026-08-10';
+const WORKER_FORM_CONTRACT_VERSION = 'spartan-worker-form-v1-2026-08-15';
 const EMAIL_CONSENT_VERSION = 'email-updates-v1-2026-07-31';
 const EMAIL_CONSENT_LANGUAGE = 'Email me Spartan Nutrition Updates including new menus, holiday hours, products, store announcements, and occasional promotions. Usually 1–4 emails per month. I can unsubscribe at any time.';
 const SITE_URL = 'https://spartandrink.com/';
@@ -63,11 +65,40 @@ const ALLOWED_RETURN_HOSTS = [
 ];
 const LOCK_TIMEOUT_MS = 15000;
 const RETRY_BATCH_LIMIT = 25;
+const WORKER_AUTH_MAX_AGE_SECONDS = 300;
+const WORKER_SIGNED_FIELDS = [
+  'record_type',
+  'submission_id',
+  'form_id',
+  'source_page',
+  'referrer',
+  'utm_source',
+  'utm_medium',
+  'utm_campaign',
+  'utm_content',
+  'utm_term',
+  'company',
+  'name',
+  'phone',
+  'email',
+  'email_consent',
+  'response_mode',
+  'worker_timestamp',
+  'worker_nonce'
+];
 const RETRYABLE_PROVIDER_STATUSES = [
   'pending',
   'failed',
   'not_configured',
   'configuration_error'
+];
+const ACCEPTED_PROVIDER_STATUSES = [
+  'confirmation_requested',
+  'confirmed',
+  'active',
+  'subscribed',
+  'synced',
+  'not_needed_existing'
 ];
 
 function doGet(e) {
@@ -81,6 +112,8 @@ function doGet(e) {
       service: SERVICE_NAME,
       handler_version: FORM_HANDLER_VERSION,
       form_contract_version: FORM_CONTRACT_VERSION,
+      worker_form_contract_version: WORKER_FORM_CONTRACT_VERSION,
+      worker_json_configured: isWorkerJsonConfigured_(),
       consent_version: EMAIL_CONSENT_VERSION,
       legacy_get_compatibility: legacyState.enabled,
       legacy_get_state: legacyState.state,
@@ -110,6 +143,10 @@ function doGet(e) {
 
 function doPost(e) {
   const params = (e && e.parameter) || {};
+  if (params.response_mode === 'json') {
+    return workerJsonPostResponse_(params);
+  }
+
   const returnUrl = validateReturnUrl_(params.return_url);
 
   try {
@@ -119,6 +156,104 @@ function doPost(e) {
     console.error(error && error.stack ? error.stack : error);
     return errorResponse_();
   }
+}
+
+/**
+ * The JSON result is reserved for the same-origin Cloudflare Worker. Browsers
+ * never receive the shared secret. The Worker signs a bounded, canonical form
+ * payload, and this handler verifies the signature and a short timestamp
+ * window before any Sheet access. Native browser POSTs continue to receive the
+ * Google-hosted HTML Saved page as a deployment fallback.
+ */
+function workerJsonPostResponse_(params) {
+  if (!verifyWorkerRequest_(params)) {
+    return workerJsonResponse_({ ok: false, code: 'worker_auth_failed' });
+  }
+
+  try {
+    const result = processSubmission_(params, { legacyGet: false });
+    return workerJsonResponse_({
+      ok: true,
+      record_type: result.recordType,
+      submission_id: result.submissionId,
+      handler_version: FORM_HANDLER_VERSION,
+      filtered: Boolean(result.filtered),
+      coupon_result: result.couponResult || '',
+      coupon_code: result.couponCode || '',
+      updates_result: result.updatesResult || ''
+    });
+  } catch (error) {
+    // Never return validation details, Sheet configuration, provider details,
+    // contact data, or an exception message to the public Worker.
+    console.error('Worker form submission failed.');
+    return workerJsonResponse_({ ok: false, code: 'form_not_saved' });
+  }
+}
+
+function workerJsonResponse_(payload) {
+  return jsonResponse_({
+    ...payload,
+    worker_form_contract_version: WORKER_FORM_CONTRACT_VERSION
+  });
+}
+
+function isWorkerJsonConfigured_() {
+  const secret = String(
+    PropertiesService.getScriptProperties().getProperty('WORKER_SHARED_SECRET') || ''
+  );
+  return secret.length >= 32;
+}
+
+function verifyWorkerRequest_(params) {
+  const timestamp = String(params.worker_timestamp || '').trim();
+  const nonce = String(params.worker_nonce || '').trim();
+  const suppliedSignature = String(params.worker_signature || '').trim().toLowerCase();
+  const timestampSeconds = /^\d{10}$/.test(timestamp) ? Number(timestamp) : NaN;
+  const nowSeconds = Math.floor(Date.now() / 1000);
+
+  if (params.response_mode !== 'json') return false;
+  if (!Number.isFinite(timestampSeconds)) return false;
+  if (Math.abs(nowSeconds - timestampSeconds) > WORKER_AUTH_MAX_AGE_SECONDS) return false;
+  if (!/^[a-f0-9-]{36}$/i.test(nonce)) return false;
+  if (!/^[a-f0-9]{64}$/.test(suppliedSignature)) return false;
+
+  const secret = String(
+    PropertiesService.getScriptProperties().getProperty('WORKER_SHARED_SECRET') || ''
+  );
+  if (secret.length < 32) return false;
+
+  const canonicalPayload = canonicalWorkerPayload_(params);
+  const expectedSignature = hmacSha256Hex_(canonicalPayload, secret);
+  return constantTimeEqual_(suppliedSignature, expectedSignature);
+}
+
+function canonicalWorkerPayload_(params) {
+  return WORKER_SIGNED_FIELDS
+    .map(field => `${field}=${encodeURIComponent(String(params[field] || ''))}`)
+    .join('&');
+}
+
+function hmacSha256Hex_(value, secret) {
+  const bytes = Utilities.computeHmacSha256Signature(
+    value,
+    secret,
+    Utilities.Charset.UTF_8
+  );
+  return bytes
+    .map(byte => (`0${(byte < 0 ? byte + 256 : byte).toString(16)}`).slice(-2))
+    .join('');
+}
+
+function constantTimeEqual_(left, right) {
+  const leftText = String(left || '');
+  const rightText = String(right || '');
+  if (leftText.length !== rightText.length) return false;
+
+  let difference = 0;
+  for (let index = 0; index < leftText.length; index += 1) {
+    difference |= leftText.charCodeAt(index) ^ rightText.charCodeAt(index);
+  }
+  return difference === 0;
 }
 
 function processSubmission_(params, options) {
@@ -204,9 +339,46 @@ function processSubmission_(params, options) {
           || findExistingCoupon_(sheet, headers, phone, email)
           || 'FIRST-VISIT';
         couponResult = 'duplicate';
-        updatesResult = emailConsentGranted ? 'duplicate' : '';
-      } else {
-        updatesResult = 'duplicate';
+      }
+
+      if (emailConsentGranted) {
+        const newerEmailState = newerEmailPermissionState_(
+          sheet,
+          headers,
+          email,
+          priorSubmission.rowNumber
+        );
+        if (newerEmailState === 'blocked') {
+          // Never replay an older permission request across a newer opt-out,
+          // revocation, denial or suppression. A fresh identifier is required
+          // for an intentional re-grant.
+          updatesResult = 'blocked';
+        } else if (newerEmailState === 'accepted') {
+          // A newer auditable request already reached the provider.
+          updatesResult = 'duplicate';
+        } else if (newerEmailState === 'retryable') {
+          // A newer permission row owns the retry. Do not send from a stale ID.
+          updatesResult = 'pending';
+        } else if (isAcceptedProviderStatus_(priorSubmission.emailProviderStatus)) {
+          // Preserve the original idempotent outcome. The provider accepted a
+          // DOI request; this does not claim that the person clicked it.
+          updatesResult = priorSubmission.emailProviderStatus === 'not_needed_existing'
+            ? 'duplicate'
+            : 'requested';
+        } else {
+          // A timed-out browser may retry the same identifier after the Sheet
+          // write but before provider delivery. Retry that same auditable row.
+          updatesResult = 'pending';
+          syncContact = buildSyncContact_(
+            name,
+            email,
+            formId,
+            sourcePage,
+            now,
+            submissionId,
+            recordType
+          );
+        }
       }
     } else if (recordType === 'coupon_claim') {
       const existingCouponCode = findExistingCoupon_(sheet, headers, phone, email);
@@ -237,7 +409,7 @@ function processSubmission_(params, options) {
         }));
 
         if (emailConsentGranted) {
-          updatesResult = alreadySubscribed ? 'duplicate' : 'requested';
+          updatesResult = alreadySubscribed ? 'duplicate' : 'pending';
           if (!alreadySubscribed) {
             syncContact = buildSyncContact_(
               name,
@@ -273,7 +445,7 @@ function processSubmission_(params, options) {
           repeatCoupon: false,
           emailAlreadySubscribed: false
         }));
-        updatesResult = 'requested';
+        updatesResult = 'pending';
         syncContact = buildSyncContact_(
           name,
           email,
@@ -293,9 +465,12 @@ function processSubmission_(params, options) {
 
   // The Sheet write is authoritative. Provider delivery is deliberately
   // outside the write lock and cannot turn a saved form into a false error.
-  if (syncContact && appendedRow) {
+  if (syncContact) {
     try {
       const syncResult = syncBrevoContact_(syncContact);
+      updatesResult = syncResult.status === 'confirmation_requested'
+        ? 'requested'
+        : 'pending';
       updateRecordFieldsBySubmissionId_(syncContact.recordType, syncContact.submissionId, {
         email_provider: syncResult.provider,
         email_provider_sync_status: syncResult.status,
@@ -511,6 +686,7 @@ function findSubmission_(sheet, headers, recordType, submissionId) {
   const emailIndex = headers.indexOf('email');
   const phoneIndex = headers.indexOf('phone');
   const emailConsentIndex = headers.indexOf('email_consent_status');
+  const emailProviderStatusIndex = headers.indexOf('email_provider_sync_status');
   if (submissionIdIndex < 0 || recordTypeIndex < 0) return null;
 
   const rows = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
@@ -519,15 +695,56 @@ function findSubmission_(sheet, headers, recordType, submissionId) {
     if (String(row[recordTypeIndex] || '').trim().toLowerCase() !== recordType) continue;
     if (normalizeStoredSubmissionId_(row[submissionIdIndex]) !== submissionId) continue;
     return {
+      rowNumber: index + 2,
       couponCode: couponCodeIndex < 0 ? '' : cleanText_(row[couponCodeIndex], 40),
       email: emailIndex < 0 ? '' : row[emailIndex],
       phone: phoneIndex < 0 ? '' : row[phoneIndex],
       emailConsentGranted: emailConsentIndex >= 0
-        && String(row[emailConsentIndex] || '').trim().toLowerCase() === 'granted'
+        && String(row[emailConsentIndex] || '').trim().toLowerCase() === 'granted',
+      emailProviderStatus: emailProviderStatusIndex < 0
+        ? ''
+        : String(row[emailProviderStatusIndex] || '').trim().toLowerCase()
     };
   }
 
   return null;
+}
+
+function newerEmailPermissionState_(sheet, headers, email, priorRowNumber) {
+  const lastRow = sheet.getLastRow();
+  if (!priorRowNumber || priorRowNumber >= lastRow) return 'none';
+
+  const emailIndex = headers.indexOf('email');
+  const consentIndex = headers.indexOf('email_consent_status');
+  const optOutIndex = headers.indexOf('opt_out_status');
+  const providerStatusIndex = headers.indexOf('email_provider_sync_status');
+  if (emailIndex < 0 || consentIndex < 0 || optOutIndex < 0 || providerStatusIndex < 0) {
+    return 'blocked';
+  }
+
+  const normalizedEmail = normalizeStoredEmail_(email);
+  const rows = sheet.getRange(
+    priorRowNumber + 1,
+    1,
+    lastRow - priorRowNumber,
+    headers.length
+  ).getValues();
+
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index];
+    if (normalizeStoredEmail_(row[emailIndex]) !== normalizedEmail) continue;
+
+    const consentStatus = String(row[consentIndex] || '').trim().toLowerCase();
+    const optOutStatus = String(row[optOutIndex] || '').trim().toLowerCase();
+    const providerStatus = String(row[providerStatusIndex] || '').trim().toLowerCase();
+    if (['opted_out', 'revoked', 'suppressed'].includes(optOutStatus)) return 'blocked';
+    if (['revoked', 'denied', 'suppressed'].includes(consentStatus)) return 'blocked';
+    if (consentStatus === 'granted') {
+      return isAcceptedProviderStatus_(providerStatus) ? 'accepted' : 'retryable';
+    }
+  }
+
+  return 'none';
 }
 
 function findExistingCoupon_(sheet, headers, phone, email) {
@@ -565,9 +782,10 @@ function findExistingCoupon_(sheet, headers, phone, email) {
 }
 
 /**
- * Only affirmative, currently active permission blocks a duplicate signup.
- * Historic rows with no permission do not. A newer opt-out/revocation permits
- * a later affirmative signup to create a new auditable consent record.
+ * Only affirmative permission whose DOI request reached the provider blocks a
+ * duplicate delivery request. Historic permission without provider acceptance
+ * does not. A newer opt-out/revocation permits a later affirmative signup to
+ * create a new auditable consent record.
  */
 function hasActiveEmailConsent_(sheet, headers, email) {
   const lastRow = sheet.getLastRow();
@@ -576,7 +794,8 @@ function hasActiveEmailConsent_(sheet, headers, email) {
   const emailIndex = headers.indexOf('email');
   const consentIndex = headers.indexOf('email_consent_status');
   const optOutIndex = headers.indexOf('opt_out_status');
-  if (emailIndex < 0 || consentIndex < 0 || optOutIndex < 0) return false;
+  const providerStatusIndex = headers.indexOf('email_provider_sync_status');
+  if (emailIndex < 0 || consentIndex < 0 || optOutIndex < 0 || providerStatusIndex < 0) return false;
 
   const normalizedEmail = normalizeStoredEmail_(email);
   const rows = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
@@ -587,15 +806,23 @@ function hasActiveEmailConsent_(sheet, headers, email) {
 
     const consentStatus = String(row[consentIndex] || '').trim().toLowerCase();
     const optOutStatus = String(row[optOutIndex] || '').trim().toLowerCase();
+    const providerStatus = String(row[providerStatusIndex] || '').trim().toLowerCase();
     if (['opted_out', 'revoked', 'suppressed'].includes(optOutStatus)) return false;
     if (['revoked', 'denied', 'suppressed'].includes(consentStatus)) return false;
-    if (consentStatus === 'granted') return true;
+    if (consentStatus === 'granted' && isAcceptedProviderStatus_(providerStatus)) return true;
 
-    // A not_requested historic or coupon row does not change an earlier
-    // affirmative permission state, so continue searching older rows.
+    // A pending/failed provider request or a not_requested historic row does
+    // not prove delivery. Continue so a prior accepted request or later
+    // opt-out state can still determine the result.
   }
 
   return false;
+}
+
+function isAcceptedProviderStatus_(status) {
+  return ACCEPTED_PROVIDER_STATUSES.includes(
+    String(status || '').trim().toLowerCase()
+  );
 }
 
 function getBrevoConfig_() {
@@ -1019,6 +1246,8 @@ function successResponse_(returnUrl, result) {
   const isFiltered = Boolean(result.filtered);
   const hasCoupon = Boolean(result.couponResult && result.couponCode);
   const updatesRequested = result.updatesResult === 'requested';
+  const updatesPending = result.updatesResult === 'pending';
+  const updatesBlocked = result.updatesResult === 'blocked';
   const updatesDuplicate = result.updatesResult === 'duplicate';
   let heading = 'Saved.';
   let confirmation = 'Your information was saved successfully.';
@@ -1031,22 +1260,36 @@ function successResponse_(returnUrl, result) {
     confirmation = 'Your first-drink offer and Spartan Updates request were saved.';
   } else if (hasCoupon) {
     heading = 'Your coupon is ready.';
-    confirmation = updatesDuplicate
-      ? 'Your first-drink offer is below. Your Spartan Updates permission was already recorded.'
-      : 'Show the code below to the Spartan team when you order.';
+    confirmation = updatesPending
+      ? 'Your first-drink offer is below. Your email permission was saved, but the confirmation email was not sent yet.'
+      : updatesBlocked
+        ? 'Your first-drink offer is below. A newer email opt-out is on file, so no confirmation was sent.'
+      : updatesDuplicate
+        ? 'Your first-drink offer is below. A Spartan Updates confirmation was previously requested for this email.'
+        : 'Show the code below to the Spartan team when you order.';
   } else if (updatesRequested) {
     heading = 'Request saved.';
     confirmation = 'Your request to join Spartan Updates was saved.';
+  } else if (updatesPending) {
+    heading = 'Permission saved.';
+    confirmation = 'Your email permission was saved, but the confirmation email was not sent yet.';
+  } else if (updatesBlocked) {
+    heading = 'No confirmation sent.';
+    confirmation = 'A newer email opt-out is on file. Return to the site and submit a fresh request if you intentionally want to rejoin.';
   } else if (updatesDuplicate) {
-    heading = 'Already saved.';
-    confirmation = 'Your Spartan Updates permission was already recorded; no duplicate was added.';
+    heading = 'Confirmation previously requested.';
+    confirmation = 'Check your inbox or spam folder for the Spartan Updates confirmation email; no duplicate request was added.';
   }
   const couponPanel = !isFiltered && result.couponResult && result.couponCode
     ? `<div class="coupon"><span>Your 50% off first-drink coupon</span><strong>${escapeHtml_(result.couponCode)}</strong><small>New customers only. One prepared drink per person. Show this code to the Spartan team.</small></div>`
     : '';
   const updatesFollowUp = updatesRequested
     ? '<p><strong>Next step:</strong> Check your inbox and confirm your email to finish joining Spartan Updates.</p>'
-    : '';
+    : updatesPending
+      ? '<p><strong>Next step:</strong> Please try the Updates form again later. Your saved permission will remain on file.</p>'
+      : updatesBlocked
+        ? '<p><strong>Next step:</strong> Return to the site and submit a fresh Updates request if you intentionally want to rejoin.</p>'
+      : '';
   const returnLabel = 'Continue to Spartan Nutrition';
 
   return HtmlService.createHtmlOutput(`<!doctype html>
