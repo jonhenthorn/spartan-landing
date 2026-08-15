@@ -1,0 +1,13 @@
+name = "spartan-form-proxy"
+main = "src/index.mjs"
+compatibility_date = "2026-08-15"
+workers_dev = false
+
+routes = [
+  { pattern = "spartandrink.com/api/forms*", zone_name = "spartandrink.com" },
+  { pattern = "www.spartandrink.com/api/forms*", zone_name = "spartandrink.com" }
+]
+
+[vars]
+ALLOWED_ORIGINS = "https://spartandrink.com,https://www.spartandrink.com"
+UPSTREAM_TIMEOUT_MS = "25000"

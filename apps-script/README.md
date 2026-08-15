@@ -1,6 +1,6 @@
 # Spartan website form handler
 
-This Google Apps Script is the Sheet-backed service for Spartan Nutrition's first-drink offer and permission-based email signup. It preserves the existing Sheet's five historical columns, records auditable consent evidence, and asks Brevo to send a double-opt-in confirmation only for a new affirmative email request.
+This Google Apps Script is the Sheet-backed service for Spartan Nutrition's first-drink offer and permission-based email signup. It preserves the existing Sheet's five historical columns, records auditable consent evidence, and asks Brevo to send a double-opt-in confirmation only for a new affirmative email request. Version 3.2 also supports the authenticated same-origin Cloudflare Worker in `../worker/`, so a confirmed coupon can appear on the Spartan page without an extra Google Saved-page click.
 
 The Sheet is the evidence record for website submissions. Brevo remains responsible for confirmation delivery, list membership, unsubscribes, and suppression. A Brevo failure never erases a successful Sheet write or turns the public form response into a false failure.
 
@@ -14,8 +14,10 @@ Open the deployed `/exec` URL with no lead fields. Before the refreshed website 
 {
   "ok": true,
   "service": "spartan-website-forms",
-  "handler_version": "spartan-forms-v3.1-2026-08-10",
+  "handler_version": "spartan-forms-v3.2-2026-08-15",
   "form_contract_version": "spartan-form-contract-v3-2026-08-10",
+  "worker_form_contract_version": "spartan-worker-form-v1-2026-08-15",
+  "worker_json_configured": true,
   "consent_version": "email-updates-v1-2026-07-31",
   "legacy_get_compatibility": true,
   "legacy_get_state": "enabled",
@@ -31,7 +33,7 @@ Open the deployed `/exec` URL with no lead fields. Before the refreshed website 
 - `missing_cutoff`: the property is absent or blank.
 - `invalid_cutoff`: the value is not the required UTC ISO format.
 
-Health proves which handler answers the endpoint. It does not prove that a POST reaches the intended Sheet, that Brevo can deliver the confirmation message, or that the browser return flow works.
+`worker_json_configured` proves only that a secret of the minimum length exists in Apps Script Properties; it never reveals the secret. Health proves which handler answers the endpoint. It does not prove that a POST reaches the intended Sheet, that the Worker secret matches, that Brevo can deliver the confirmation message, or that the browser result flow works.
 
 ### Verified production snapshot — August 10, 2026
 
@@ -50,6 +52,7 @@ Open **Apps Script -> Project settings -> Script properties** and set:
 - `SPREADSHEET_ID`: the ID between `/d/` and `/edit` in the existing Spartan lead Sheet URL.
 - `SHEET_NAME`: the exact tab that begins with `timestamp`, `name`, `phone`, `email`, and `source_ip` in that order.
 - `LEGACY_GET_UNTIL`: a short transition cutoff in UTC, such as `2026-08-17T05:00:00.000Z`. Seconds are required; exactly three milliseconds are optional. Missing, malformed, or expired values disable all lead-bearing legacy GET requests.
+- `WORKER_SHARED_SECRET`: the same random secret stored as an encrypted Cloudflare Worker secret. Use at least 32 random bytes. Never place it in page code, GitHub, screenshots, Sheet cells, analytics, or a command line that may be saved in shell history.
 - `BREVO_SYNC_ENABLED`: set to `false` until the domain, sender, list, template, API key, Sheet-only tests, and double-opt-in test are ready. Only the exact value `true` enables requests.
 - `BREVO_API_KEY`: a server-side Brevo API key. Never place it in GitHub, page code, screenshots, or Sheet cells.
 - `BREVO_LIST_ID`: the positive numeric ID of the dedicated Spartan website opt-in list. Earlier setup identified list ID `3`; verify it in Brevo before deployment.
@@ -97,30 +100,31 @@ An HTTP `201` means Brevo accepted the request to send a confirmation message. I
 1. Export or copy the current Sheet and record its baseline row count, exact tab name, and full header row.
 2. Visually confirm the first five headers are exactly `timestamp`, `name`, `phone`, `email`, and `source_ip`.
 3. Open the Apps Script project currently serving the website endpoint. Preserve its current code, Script Properties, and deployment details.
-4. Replace the handler with the reviewed `Code.gs` from this directory.
-5. Set all required properties, with `BREVO_SYNC_ENABLED=false` and a short, explicit `LEGACY_GET_UNTIL` initially.
-6. Choose **Deploy -> Manage deployments -> Edit**, select **New version**, and retain:
+4. Run `node scripts/validate-form-backend.mjs` from the repository root.
+5. Publish the compatibility frontend first: JSON responses must require v3.2 plus the Worker contract, while native fallback returns temporarily accept both the deployed v3.1 and reviewed v3.2 handler versions. Before the Worker route exists, a JSON attempt may fail safely and offer the native fallback.
+6. Replace the handler with the reviewed `Code.gs` from this directory and set all required properties, including `WORKER_SHARED_SECRET`, with `BREVO_SYNC_ENABLED=false` and a short, explicit `LEGACY_GET_UNTIL` initially.
+7. Choose **Deploy -> Manage deployments -> Edit**, select **New version**, and retain:
    - **Execute as:** Me
    - **Who has access:** Anyone
-7. Confirm the existing `/exec` URL remains unchanged. If Google issues a new URL, update both production form actions before launch.
-8. Open `/exec` with no query string and reconcile the v3 health fields and cutoff state.
-9. Run the no-provider tests below and reconcile every expected row and no-write case.
-10. Test the Google-hosted Saved page in a browser. It must contain no automatic redirect, visibly show a coupon code and brief first-visit terms for coupon outcomes, and return only after the visitor activates the `target="_top"` link.
-11. Complete the Brevo setup, switch `BREVO_SYNC_ENABLED` to `true`, and run one approved double-opt-in test.
-12. Confirm the request row is `confirmation_requested`, the message arrives, the confirmation button works, and the confirmed address appears only in the intended list.
-13. Recheck the health response, then publish the matching website release.
+8. Confirm the existing `/exec` URL remains unchanged. If Google issues a new URL, update both production form actions before launch.
+9. Open `/exec` with no query string and reconcile the v3.2 health fields, Worker contract, `worker_json_configured: true`, and cutoff state.
+10. Run the no-provider tests below and reconcile every expected row and no-write case.
+11. Test the Google-hosted Saved page fallback in a browser. It must contain no automatic redirect, visibly show a coupon code and brief first-visit terms for coupon outcomes, and return only after the visitor activates the `target="_top"` link.
+12. Configure and deploy the Worker by following `worker/README.md`. Verify its safe health endpoint, then run an authenticated JSON coupon test and reconcile the exact submission ID to the Sheet.
+13. Complete the Brevo setup, switch `BREVO_SYNC_ENABLED` to `true`, and run one approved double-opt-in test through the Worker.
+14. Confirm the request row is `confirmation_requested`, the message arrives, the confirmation button works, and the confirmed address appears only in the intended list.
+15. Recheck both health responses and the browser flow. Remove v3.1 fallback acceptance in a later cleanup only after production no longer serves that version.
 
 Editing `Code.gs` does not update an existing web-app deployment. Every approved handler change requires a new Apps Script version plus repeated health, Sheet, browser-return, and provider checks.
 
 ## Frontend request contract
 
-Both POST forms submit:
+The normal website flow sends `application/json` to the same-origin `/api/forms` Worker endpoint. It sends only these fields:
 
 - `record_type`: `coupon_claim` or `email_signup`
 - `submission_id`: a fresh browser-generated identifier for that action
 - `form_id`
 - `source_page`
-- `return_url`
 - `referrer`
 - `utm_source`
 - `utm_medium`
@@ -133,6 +137,10 @@ The coupon form requires name, email, and a valid 10-digit US phone after punctu
 
 The updates form requires name, email, and affirmative `email_consent=yes`. No form in this release creates SMS permission.
 
+The Worker rejects unexpected keys, including `return_url`, `consent_language`, and `consent_language_version`. Apps Script, not the browser, supplies the canonical consent evidence. The HTML form may retain those hidden consent fields for visible-version review and retain `return_url` for the native POST fallback, but frontend JSON serialization must use the explicit Worker allowlist rather than serializing every form control.
+
+The Worker adds `response_mode=json`, a timestamp, a nonce, and an HMAC-SHA256 signature. Those server-only fields and `WORKER_SHARED_SECRET` must never be created by or exposed to browser code.
+
 The server, not a client-supplied hidden field, records the canonical evidence:
 
 - Version: `email-updates-v1-2026-07-31`
@@ -140,30 +148,36 @@ The server, not a client-supplied hidden field, records the canonical evidence:
 
 The visible consent label must retain the same meaning and frequency promise. A material wording change requires a new reviewed consent version. Historical names, phones, and emails remain unknown-consent unless separate evidence proves otherwise.
 
-## Saved-page and analytics contract
+## JSON result, Saved-page fallback, and analytics contract
 
-Apps Script HTML responses run in Google's iframe sandbox. The handler intentionally performs no scripted navigation and no meta refresh. It renders a self-contained Saved page and a visitor-activated `target="_top"` return link.
+The normal JSON result contains `ok`, `record_type`, `submission_id`, `handler_version`, `worker_form_contract_version`, `filtered`, `coupon_result`, `coupon_code`, and `updates_result`. The website must accept it only when both version strings and the pending identifier match. A matching `coupon_result=success` or `duplicate` may be displayed immediately; `coupon_confirmed` is counted only for a matching new `success`. Email outcomes are `requested` only after Brevo accepts a DOI request, `pending` when permission is saved but delivery is not accepted yet, `duplicate` when an earlier provider-accepted request exists, and `blocked` when an old identifier is superseded by a newer opt-out or equivalent state. None means the person subscribed; Brevo list membership remains authoritative.
+
+The Worker returns only bounded error codes and never returns Apps Script exception text, Sheet details, provider bodies, or customer data. The browser must show a generic retry message for any non-200 result, `ok:false`, mismatch, filtered result, timeout, or malformed response; it must never invent a coupon code.
+
+Apps Script HTML responses remain the fallback if the Worker route is deliberately removed. They run in Google's iframe sandbox. The handler intentionally performs no scripted navigation and no meta refresh. It renders a self-contained Saved page and a visitor-activated `target="_top"` return link.
 
 The return markers are:
 
 - New coupon row: `coupon=success&code=...&submission_id=...`
 - Existing or idempotently retried coupon: `coupon=duplicate&code=...&submission_id=...`
-- New email permission request: `updates=requested&submission_id=...`
-- Existing active permission or idempotent retry: `updates=duplicate&submission_id=...`
-- Coupon plus new email request: both coupon and `updates=requested` markers
+- Provider-accepted email confirmation request: `updates=requested&submission_id=...`
+- Saved permission whose provider request is retryable: `updates=pending&submission_id=...`
+- Existing provider-accepted request: `updates=duplicate&submission_id=...`
+- Stale request superseded by a newer opt-out or equivalent state: `updates=blocked&submission_id=...`
+- Coupon plus an email outcome: both coupon and the applicable `updates` marker
 - Filled honeypot with no write: `filtered=success&submission_id=...`
-- All successful returns: `handler_version=spartan-forms-v3.1-2026-08-10`
+- All successful returns: `handler_version=spartan-forms-v3.2-2026-08-15`
 - Brevo confirmation-button destination: `updates=confirmed` without a form submission ID
 
-The website must:
+For both JSON results and fallback returns, the website must:
 
 1. Create and store the pending `submission_id` immediately before each submit.
-2. Accept a form result only when the v3 handler and pending identifier match.
+2. Accept a form result only when the v3.2 handler, applicable Worker contract, record type, and pending identifier match.
 3. Reveal a coupon for a matching `coupon=success` or `coupon=duplicate`.
 4. Count `coupon_confirmed` only once for a matching new coupon.
 5. Treat `updates=requested` as a double-opt-in request and count `email_doi_requested`, not a completed subscription.
-6. Treat `updates=duplicate` as no new subscription.
-7. Treat Brevo's `updates=confirmed` return as the completed email confirmation and count `email_signup_confirmed` separately.
+6. Treat `updates=pending`, `updates=duplicate`, and `updates=blocked` as no email conversion event. A pending dedicated form may retry the same ID; a blocked stale form must use a fresh ID for an intentional re-grant.
+7. Treat Brevo's `updates=confirmed` return as a directional return signal named `email_confirmation_return`, not proof of a unique confirmation. Brevo list membership is authoritative.
 8. Never reveal a coupon or count a form-return conversion from a filled honeypot, mismatched identifier, wrong handler version, provider status, or hand-edited query string. The separate `updates=confirmed` marker comes from Brevo's approved DOI destination and is only a directional analytics signal; Brevo list membership is the authoritative confirmation record.
 9. Remove form-result details from the visible URL before recording analytics page location.
 
@@ -199,17 +213,18 @@ Permission behavior:
 - `not_requested` is not marketing permission and does not overwrite an older permission state.
 - A newest `opted_out`, `revoked`, `denied`, or `suppressed` state is not considered active permission.
 - A later affirmative signup creates a new evidence row rather than silently changing the historical row.
-- An active affirmative state returns `updates=duplicate` and creates no duplicate row.
+- A provider-accepted affirmative state returns `updates=duplicate` for a new ID and creates no duplicate row. A granted row whose provider request is pending or failed remains retryable and does not masquerade as active.
 - Legacy GET always records email and SMS as `not_requested` and never calls Brevo.
 - SMS remains `not_requested` throughout this release.
 
 Provider behavior:
 
-- Only a newly written, current-version, server-validated `granted` row triggers Brevo.
+- A newly written, current-version, server-validated `granted` row may trigger Brevo. An exact retry may also retry the same pending/failed row, but never after a newer opt-out or newer permission row supersedes it.
 - With provider delivery disabled, the Sheet row remains valid and records `not_configured`.
 - Missing or invalid provider properties record `configuration_error`.
 - API failures record only bounded categories, never response bodies that could contain customer data.
 - Provider status is updated by immutable `record_type` plus `submission_id`, never a cached row number.
+- `confirmation_requested` proves that Brevo accepted a DOI request, not that the recipient clicked it. Phase 1 does not query Brevo on every form submission, so a lost confirmation email may require owner-assisted Brevo list/template reconciliation rather than repeated automatic sends.
 
 ## Owner-run provider retry
 
@@ -237,25 +252,28 @@ The summary reports scanned rows, eligible addresses, attempted requests, accept
 
 First use `BREVO_SYNC_ENABLED=false`, no campaigns or automations, `example.com` addresses, reserved `918-555-01xx` phone numbers, and a unique run label in every `form_id`. Record the intended Sheet baseline as `B`.
 
+Run the P, C, E, F, and B cases first through `/api/forms` and require an HTTP 200 bounded JSON result for valid submissions. Re-run at least P1 and E2 through the native form action to prove the HTML fallback. `return_url` applies only to that fallback. Before any real contact, also prove that the Worker rejects a cross-origin request, unknown JSON keys, mismatched upstream identifier, wrong handler or contract version, invalid signature, and a signature older than five minutes without writing a row.
+
 | ID | Request | Expected public result | Row delta | Required evidence |
 |---|---|---|---:|---|
 | H0 | GET `/exec` with no lead fields | v3 health plus computed cutoff state | 0 | No Sheet access required |
 | L1 | Legacy GET before cutoff, unique contact | JSON `coupon_result=success` | +1 | `legacy_get`; both consents `not_requested`; no provider request |
 | L2 | Repeat L1 before cutoff | JSON `coupon_result=duplicate`; same code | 0 | No second row |
-| P1 | POST coupon, unique contact, no email choice | Saved page -> `coupon=success` | +1 | ID stored; email/SMS `not_requested`; coupon visible immediately |
-| P2 | Exact retry of P1 with the same ID | Saved page -> `coupon=duplicate`; same code | 0 | No second row |
-| P3 | P1 contact with a new ID | Saved page -> `coupon=duplicate`; same code | 0 | One-per-person check |
-| C1 | P1 ID reused with different contact data | Generic error page | 0 | Collision rejected; no code disclosure |
-| P4 | New coupon with checked email permission | `coupon=success&updates=requested` | +1 | Consent evidence; provider `not_configured` |
-| E1 | Updates POST without `email_consent=yes` | Generic error page | 0 | No row and no provider request |
-| E2 | New updates signup with permission | `updates=requested` | +1 | Current consent; SMS `not_requested`; provider `not_configured` |
-| E3 | Exact retry of E2 | `updates=duplicate` | 0 | No second row |
-| E4 | Same active E2 email with a new ID | `updates=duplicate` | 0 | No duplicate active row |
-| F1 | New coupon whose name begins with `=` | `coupon=success` | +1 | Stored name begins with protective apostrophe |
-| B1 | Valid-looking POST with `company` filled | Only `filtered=success` | 0 | No code, conversion, or provider request |
+| P1 | POST coupon, unique contact, no email choice | JSON `coupon_result=success` | +1 | Matching ID stored; email/SMS `not_requested`; coupon shown only after confirmation |
+| P2 | Exact retry of P1 with the same ID | JSON `coupon_result=duplicate`; same code | 0 | No second row |
+| P3 | P1 contact with a new ID | JSON `coupon_result=duplicate`; same code | 0 | One-per-person check |
+| C1 | P1 ID reused with different contact data | Bounded `form_not_saved` error | 0 | Collision rejected; no code disclosure |
+| P4 | New coupon with checked email permission and provider disabled | JSON coupon `success`; updates `pending` | +1 | Consent evidence; provider `not_configured`; no email event |
+| E1 | Updates POST without `email_consent=yes` | Bounded `invalid_request` error | 0 | Worker rejects before upstream; no row and no provider request |
+| E2 | New updates signup with permission and provider disabled | JSON `updates_result=pending` | +1 | Current consent; SMS `not_requested`; provider `not_configured`; no email event |
+| E3 | Exact retry of E2 | JSON `updates_result=pending` | 0 | Same row retried; no second row |
+| E4 | Same retryable E2 email with a new ID | JSON `updates_result=pending` | +1 | New affirmative request remains auditable; no false active state |
+| E5 | Replay an old ID after a newer opt-out | JSON `updates_result=blocked` | 0 | No provider request and no email event |
+| F1 | New coupon whose name begins with `=` | JSON `coupon_result=success` | +1 | Stored name begins with protective apostrophe |
+| B1 | Valid-looking POST with `company` filled | JSON `filtered=true`; no outcomes | 0 | No code, conversion, or provider request |
 | U1 | B1 with `return_url=https://example.com/` | Return falls back to Spartan | 0 | No open redirect |
 
-Expected no-provider count: **`B + 5`**. Reconcile every written identifier, marker, code, consent field, provider status, and label; row count alone is insufficient.
+Expected no-provider count for the table above is **`B + 6`**. Reconcile every written identifier, marker, code, consent field, provider status, and label; row count alone is insufficient.
 
 Perform configuration-failure checks in an isolated Sheet copy or test deployment, not by damaging the production Sheet:
 
@@ -271,6 +289,6 @@ Then run one approved DOI case:
 
 Finally test `retryPendingBrevoConfirmations()` against labeled test rows containing eligible statuses, duplicate emails, an older eligible row beneath a newer opt-out, wrong consent versions, already requested rows, and more than 25 eligible addresses. Verify the eligibility rules, 25-address ceiling, DOI payload, and submission-ID-targeted updates.
 
-Finish with one coupon and one updates submission through the real production browser. Activate Google's Saved-page return link and reconcile the page behavior, matching identifier, Sheet row, Brevo state, and analytics event. Use owner-controlled test data, and never delete historical rows to make a test count appear correct.
+Finish with one coupon and one updates submission through the real production browser. Confirm there is no Google Saved-page step in the normal Worker flow, then reconcile the page behavior, matching identifier, Sheet row, Brevo state, and analytics event. Separately exercise the native Saved-page fallback once before launch. Use owner-controlled test data, and never delete historical rows to make a test count appear correct.
 
 Local syntax and simulation checks do not replace deployed-endpoint, intended-Sheet, real-browser, and provider reconciliation.

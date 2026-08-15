@@ -714,7 +714,9 @@ button,
 
 .centered-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: center;
+  gap: 0.75rem;
   margin-top: 1.75rem;
 }
 
@@ -1071,6 +1073,50 @@ button,
   font-weight: 800;
 }
 
+.social-follow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 1.5rem;
+  margin-top: 2rem;
+  padding: 1.4rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.social-follow h3 {
+  margin: 0;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(1.35rem, 3vw, 2rem);
+  line-height: 1.1;
+}
+
+.social-profile-links {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.55rem;
+}
+
+.social-profile-links a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  padding: 0.65rem 0.9rem;
+  border: 1px solid var(--teal-dark);
+  border-radius: 999px;
+  color: var(--teal-dark);
+  font-size: 0.86rem;
+  font-weight: 850;
+  text-decoration: none;
+}
+
+.social-profile-links a:hover {
+  background: var(--teal-dark);
+  color: #fff;
+}
+
 .updates-grid {
   display: grid;
   grid-template-columns: minmax(0, 0.85fr) minmax(21rem, 1.15fr);
@@ -1183,6 +1229,20 @@ button,
   color: var(--teal-dark);
   font-size: 0.82rem;
   font-weight: 750;
+}
+
+.form-fallback {
+  margin-top: 0.65rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: currentColor;
+  font: inherit;
+  font-size: 0.86rem;
+  font-weight: 850;
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+  cursor: pointer;
 }
 
 .honeypot {
@@ -1392,6 +1452,12 @@ dialog::backdrop {
   letter-spacing: 0.08em;
 }
 
+.coupon-result-message {
+  margin: 0.65rem auto 1rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
 .legal-main {
   padding: clamp(3.5rem, 7vw, 6rem) 0;
 }
@@ -1477,6 +1543,14 @@ dialog::backdrop {
     grid-template-columns: 1fr;
   }
 
+  .social-follow {
+    grid-template-columns: 1fr;
+  }
+
+  .social-profile-links {
+    justify-content: flex-start;
+  }
+
   .extras-grid {
     grid-template-columns: 1fr;
   }
@@ -1529,7 +1603,8 @@ dialog::backdrop {
   }
 
   .hero-actions .button,
-  .inline-actions .button {
+  .inline-actions .button,
+  .centered-actions .button {
     width: 100%;
   }
 

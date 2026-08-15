@@ -7,13 +7,21 @@
   const couponFormStep = document.querySelector("[data-coupon-form-step]");
   const couponResult = document.querySelector("[data-coupon-result]");
   const couponCode = document.querySelector("[data-coupon-code]");
+  const couponResultMessage = document.querySelector("[data-coupon-result-message]");
   const couponForm = document.getElementById("coupon-form");
   const updatesForm = document.getElementById("updates-form");
   const updatesStatus = document.getElementById("updates-status");
   const year = document.getElementById("current-year");
   const productionHosts = ["spartandrink.com", "www.spartandrink.com"];
   const isPreviewMode = !productionHosts.includes(window.location.hostname);
-  const expectedHandlerVersion = "spartan-forms-v3.1-2026-08-10";
+  const expectedHandlerVersion = "spartan-forms-v3.2-2026-08-15";
+  const expectedWorkerContractVersion = "spartan-worker-form-v1-2026-08-15";
+  const acceptedNativeHandlerVersions = new Set([
+    "spartan-forms-v3.1-2026-08-10",
+    expectedHandlerVersion
+  ]);
+  const confirmationEndpoint = "/api/forms";
+  const confirmationTimeoutMs = 30000;
   const pendingSubmissionMaxAge = 30 * 60 * 1000;
   const pendingKeys = {
     coupon: "spartanPendingCouponSubmission",
@@ -27,6 +35,78 @@
     "handler_version",
     "filtered"
   ];
+  const campaignParameterNames = [
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "utm_content",
+    "utm_term",
+    "utm_id",
+    "utm_source_platform",
+    "gclid",
+    "dclid",
+    "gbraid",
+    "wbraid",
+    "gad_source",
+    "gad_campaignid",
+    "fbclid",
+    "msclkid"
+  ];
+  const clickIdentifierParameterNames = new Set([
+    "gclid",
+    "dclid",
+    "gbraid",
+    "wbraid",
+    "gad_source",
+    "gad_campaignid",
+    "fbclid",
+    "msclkid"
+  ]);
+  const formPayloadFieldNames = [
+    "record_type",
+    "submission_id",
+    "form_id",
+    "source_page",
+    "referrer",
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "utm_content",
+    "utm_term",
+    "company",
+    "name",
+    "phone",
+    "email",
+    "email_consent"
+  ];
+
+  const sanitizeCampaignValue = (name, value) => {
+    const candidate = String(value || "").trim().slice(0, 180);
+    if (!candidate || candidate.includes("@")) return "";
+    if (!clickIdentifierParameterNames.has(name) && (candidate.match(/\d/g) || []).length >= 10) return "";
+    return /^[a-zA-Z0-9._~-]+$/.test(candidate) ? candidate : "";
+  };
+
+  const analyticsPageLocation = () => {
+    const current = new URL(window.location.href);
+    const safe = new URL(`${current.origin}${current.pathname}`);
+    campaignParameterNames.forEach((name) => {
+      const value = sanitizeCampaignValue(name, current.searchParams.get(name));
+      if (value) safe.searchParams.set(name, value);
+    });
+    safe.hash = current.hash;
+    return safe.toString();
+  };
+
+  const attributionReferrer = () => {
+    try {
+      const referrer = new URL(document.referrer);
+      if (!/^https?:$/.test(referrer.protocol)) return "";
+      return `${referrer.origin}${referrer.pathname}`.slice(0, 500);
+    } catch (error) {
+      return "";
+    }
+  };
 
   const track = (eventName, details = {}) => {
     window.dataLayer = window.dataLayer || [];
@@ -63,10 +143,14 @@
     }
   });
 
-  const showCouponResult = (code = "FIRST-VISIT") => {
+  const showCouponResult = (code = "FIRST-VISIT", message = "") => {
     couponFormStep?.setAttribute("hidden", "");
     couponResult?.removeAttribute("hidden");
     if (couponCode) couponCode.textContent = code;
+    if (couponResultMessage) {
+      couponResultMessage.textContent = message;
+      couponResultMessage.hidden = !message;
+    }
   };
 
   const showCouponForm = () => {
@@ -74,16 +158,31 @@
     couponFormStep?.removeAttribute("hidden");
   };
 
+  const focusCouponResult = () => {
+    couponResult?.querySelector("[data-coupon-result-title]")?.focus({ preventScroll: true });
+  };
+
   const openCoupon = () => {
     if (!couponDialog) return;
 
-    if (localStorage.getItem("spartanCouponClaimed") === "true") {
-      showCouponResult(localStorage.getItem("spartanCouponCode") || "FIRST-VISIT");
+    let rememberedCode = "";
+    try {
+      if (localStorage.getItem("spartanCouponClaimed") === "true") {
+        rememberedCode = localStorage.getItem("spartanCouponCode") || "FIRST-VISIT";
+      }
+    } catch (error) {
+      // Storage is only a convenience. A browser that blocks it must still be
+      // able to claim and display a server-confirmed coupon.
+    }
+
+    if (rememberedCode) {
+      showCouponResult(rememberedCode);
     } else {
       showCouponForm();
     }
 
     if (!couponDialog.open) couponDialog.showModal();
+    if (rememberedCode) focusCouponResult();
     document.body.classList.add("dialog-open");
     track("coupon_open");
   };
@@ -130,12 +229,12 @@
     if (!form) return;
     const params = new URLSearchParams(window.location.search);
     const values = {
-      referrer: document.referrer,
-      utm_source: params.get("utm_source") || "",
-      utm_medium: params.get("utm_medium") || "",
-      utm_campaign: params.get("utm_campaign") || "",
-      utm_content: params.get("utm_content") || "",
-      utm_term: params.get("utm_term") || ""
+      referrer: attributionReferrer(),
+      utm_source: sanitizeCampaignValue("utm_source", params.get("utm_source")),
+      utm_medium: sanitizeCampaignValue("utm_medium", params.get("utm_medium")),
+      utm_campaign: sanitizeCampaignValue("utm_campaign", params.get("utm_campaign")),
+      utm_content: sanitizeCampaignValue("utm_content", params.get("utm_content")),
+      utm_term: sanitizeCampaignValue("utm_term", params.get("utm_term"))
     };
 
     Object.entries(values).forEach(([name, value]) => {
@@ -205,8 +304,19 @@
   };
 
   const prepareSubmission = (form, kind) => {
-    const submissionId = createSubmissionId();
     const field = ensureHiddenField(form, "submission_id");
+    const existingId = String(field?.value || "").replace(/[^a-zA-Z0-9-]/g, "").slice(0, 80);
+    const pending = readPendingSubmission(kind);
+    if (existingId && (!pending || pending.id === existingId)) {
+      storePendingSubmission(kind, existingId);
+      return existingId;
+    }
+    if (!existingId && pending) {
+      if (field) field.value = pending.id;
+      return pending.id;
+    }
+
+    const submissionId = createSubmissionId();
     if (field) field.value = submissionId;
     storePendingSubmission(kind, submissionId);
     return submissionId;
@@ -236,37 +346,205 @@
   setAttributionFields(couponForm);
   setAttributionFields(updatesForm);
 
-  couponForm?.addEventListener("submit", (event) => {
-    const button = couponForm.querySelector('button[type="submit"]');
+  const setFormBusy = (form, busy, busyLabel) => {
+    const button = form?.querySelector('button[type="submit"]');
+    if (!button) return;
+    if (!button.dataset.defaultLabel) button.dataset.defaultLabel = button.textContent;
+    button.disabled = busy;
+    button.textContent = busy ? busyLabel : button.dataset.defaultLabel;
+  };
+
+  const setFallbackAvailable = (form, available) => {
+    const fallback = form?.querySelector("[data-native-submit]");
+    if (fallback) fallback.hidden = !available;
+  };
+
+  const nativeFallback = (form, kind) => {
+    if (!form) return;
+    prepareSubmission(form, kind);
+    setReturnUrl(form, kind);
+    setAttributionFields(form);
+    form.submit();
+  };
+
+  document.querySelectorAll("[data-native-submit]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const form = button.closest("form");
+      const kind = form === couponForm ? "coupon" : "updates";
+      nativeFallback(form, kind);
+    });
+  });
+
+  const formPayload = (form) => {
+    const data = new FormData(form);
+    return Object.fromEntries(formPayloadFieldNames
+      .filter((name) => data.has(name))
+      .map((name) => [name, String(data.get(name))]));
+  };
+
+  const requestConfirmation = async (form) => {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), confirmationTimeoutMs);
+    try {
+      const response = await fetch(confirmationEndpoint, {
+        method: "POST",
+        credentials: "omit",
+        headers: {
+          "Accept": "application/json",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(formPayload(form)),
+        signal: controller.signal
+      });
+      const result = await response.json();
+      if (!response.ok || !result || result.ok !== true) throw new Error("Unconfirmed form response");
+      return result;
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  };
+
+  const responseMatches = (result, submissionId, recordType) => Boolean(
+    result
+    && result.handler_version === expectedHandlerVersion
+    && result.worker_form_contract_version === expectedWorkerContractVersion
+    && result.submission_id === submissionId
+    && result.record_type === recordType
+    && result.filtered !== true
+  );
+
+  const couponConfirmationMessage = (couponStatus, updatesResult) => {
+    const messages = [];
+    if (couponStatus === "duplicate") {
+      messages.push("We found your existing first-visit offer, so no duplicate claim was added.");
+    }
+    if (updatesResult === "requested") {
+      messages.push("Check your inbox and confirm your email to finish joining Spartan Updates.");
+    } else if (updatesResult === "pending") {
+      messages.push("Your email permission was saved, but we could not send the confirmation email yet. Please try the Updates form again later.");
+    } else if (updatesResult === "blocked") {
+      messages.push("A newer email opt-out is on file, so no confirmation was sent. Use the Updates form again if you intentionally want to rejoin.");
+    } else if (updatesResult === "duplicate") {
+      messages.push("A Spartan Updates confirmation was previously requested for this email. Check your inbox or spam folder.");
+    }
+    return messages.join(" ");
+  };
+
+  const acceptCouponConfirmation = ({ couponStatus, code, updatesResult = "", submissionId }) => {
+    const safeCode = String(code || "FIRST-VISIT").replace(/[^A-Z0-9-]/gi, "").slice(0, 24) || "FIRST-VISIT";
+    try {
+      localStorage.setItem("spartanCouponClaimed", "true");
+      localStorage.setItem("spartanCouponCode", safeCode);
+    } catch (error) {
+      // A confirmed coupon must remain visible even when storage is blocked.
+    }
+    showCouponResult(safeCode, couponConfirmationMessage(couponStatus, updatesResult));
+    if (!couponDialog?.open) couponDialog?.showModal();
+    focusCouponResult();
+    document.body.classList.add("dialog-open");
+    clearPendingSubmission("coupon");
+
+    if (couponStatus === "success") {
+      trackConfirmedOnce("coupon", submissionId, () => {
+        if (typeof window.fbq === "function") {
+          window.fbq("track", "Lead", { source: "coupon_confirmed" });
+        }
+        track("coupon_confirmed");
+      });
+    }
+
+    if (updatesResult === "requested") {
+      trackConfirmedOnce("email", submissionId, () => track("email_doi_requested"));
+    }
+  };
+
+  const acceptUpdatesConfirmation = (updatesResult, submissionId) => {
+    if (updatesStatus) {
+      if (updatesResult === "requested") {
+        updatesStatus.textContent = "Thanks—your email permission was saved. Check your inbox and confirm your email to finish joining Spartan Updates.";
+      } else if (updatesResult === "pending") {
+        updatesStatus.textContent = "Your email permission was saved, but we could not send the confirmation email yet. Please try again later.";
+      } else if (updatesResult === "blocked") {
+        updatesStatus.textContent = "A newer email opt-out is on file, so no confirmation was sent. Submit the form once more if you intentionally want to rejoin.";
+      } else {
+        updatesStatus.textContent = "A Spartan Updates confirmation was previously requested for this email. Check your inbox or spam folder; if it is missing, contact us and we’ll help.";
+      }
+    }
+    if (updatesResult === "pending") {
+      setFormBusy(updatesForm, false, "");
+    } else {
+      clearPendingSubmission("updates");
+    }
+    if (updatesResult === "blocked") {
+      const submissionField = ensureHiddenField(updatesForm, "submission_id");
+      if (submissionField) submissionField.value = "";
+      setFormBusy(updatesForm, false, "");
+    }
+    if (updatesResult === "requested") {
+      trackConfirmedOnce("email", submissionId, () => track("email_doi_requested"));
+    }
+  };
+
+  const showUnconfirmedState = (form, status, kind) => {
+    if (status) {
+      status.textContent = kind === "coupon"
+        ? "We couldn’t confirm the result yet. Try again, or use secure confirmation below; your claim will not be duplicated."
+        : "We couldn’t confirm the result yet. Try again, or use secure confirmation below; your request will not be duplicated.";
+    }
+    setFormBusy(form, false, "");
+    setFallbackAvailable(form, true);
+  };
+
+  couponForm?.addEventListener("submit", async (event) => {
     const status = couponForm.querySelector("[data-form-status]");
+    event.preventDefault();
     if (isPreviewMode) {
-      event.preventDefault();
       if (status) status.textContent = "Preview mode: no coupon data was submitted.";
       return;
     }
-    prepareSubmission(couponForm, "coupon");
-    if (button) {
-      button.disabled = true;
-      button.textContent = "Saving your claim…";
-    }
-    if (status) status.textContent = "Please wait while we save your coupon.";
+
+    const submissionId = prepareSubmission(couponForm, "coupon");
+    setFormBusy(couponForm, true, "Saving your claim…");
+    setFallbackAvailable(couponForm, false);
+    if (status) status.textContent = "Saving your claim and preparing your coupon…";
     track("coupon_submit");
+
+    try {
+      const result = await requestConfirmation(couponForm);
+      if (!responseMatches(result, submissionId, "coupon_claim")) throw new Error("Mismatched form response");
+      if (!["success", "duplicate"].includes(result.coupon_result)) throw new Error("Missing coupon result");
+      acceptCouponConfirmation({
+        couponStatus: result.coupon_result,
+        code: result.coupon_code,
+        updatesResult: result.updates_result || "",
+        submissionId
+      });
+    } catch (error) {
+      showUnconfirmedState(couponForm, status, "coupon");
+    }
   });
 
-  updatesForm?.addEventListener("submit", (event) => {
-    const button = updatesForm.querySelector('button[type="submit"]');
+  updatesForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
     if (isPreviewMode) {
-      event.preventDefault();
       if (updatesStatus) updatesStatus.textContent = "Preview mode: no email permission was submitted.";
       return;
     }
-    prepareSubmission(updatesForm, "updates");
-    if (button) {
-      button.disabled = true;
-      button.textContent = "Saving your permission…";
-    }
+
+    const submissionId = prepareSubmission(updatesForm, "updates");
+    setFormBusy(updatesForm, true, "Saving your permission…");
+    setFallbackAvailable(updatesForm, false);
     if (updatesStatus) updatesStatus.textContent = "Saving your email permission…";
     track("email_signup_submit");
+
+    try {
+      const result = await requestConfirmation(updatesForm);
+      if (!responseMatches(result, submissionId, "email_signup")) throw new Error("Mismatched form response");
+      if (!["requested", "pending", "blocked", "duplicate"].includes(result.updates_result)) throw new Error("Missing updates result");
+      acceptUpdatesConfirmation(result.updates_result, submissionId);
+    } catch (error) {
+      showUnconfirmedState(updatesForm, updatesStatus, "updates");
+    }
   });
 
   document.querySelectorAll("[data-track]").forEach((element) => {
@@ -305,10 +583,10 @@
   const returnedSubmissionId = (params.get("submission_id") || "")
     .replace(/[^a-zA-Z0-9-]/g, "")
     .slice(0, 80);
-  const handlerMatches = params.get("handler_version") === expectedHandlerVersion;
+  const handlerMatches = acceptedNativeHandlerVersions.has(params.get("handler_version"));
   const isFilteredReturn = params.get("filtered") === "success";
   const hasCouponResult = ["success", "duplicate"].includes(couponStatus);
-  const hasUpdatesResult = ["requested", "duplicate"].includes(updatesResult);
+  const hasUpdatesResult = ["requested", "pending", "blocked", "duplicate"].includes(updatesResult);
   const isDoiConfirmation = updatesResult === "confirmed";
   const returnKind = hasCouponResult ? "coupon" : hasUpdatesResult ? "updates" : "";
   const pendingSubmission = returnKind ? readPendingSubmission(returnKind) : null;
@@ -335,13 +613,13 @@
   if (typeof window.gtag === "function") {
     window.gtag("event", "page_view", {
       page_title: document.title,
-      page_location: `${window.location.origin}${window.location.pathname}${window.location.hash}`
+      page_location: analyticsPageLocation()
     });
   }
 
   if (isDoiConfirmation && updatesStatus) {
-    updatesStatus.textContent = "Your email is confirmed. You’re now on the Spartan Updates email list.";
-    track("email_signup_confirmed", {
+    updatesStatus.textContent = "Thanks—your confirmation link was opened. If confirmation completed successfully, you’re all set for Spartan Updates.";
+    track("email_confirmation_return", {
       source: "brevo_doi_return",
       verification: "provider_redirect"
     });
@@ -349,40 +627,22 @@
 
   if (returnMatches && hasCouponResult) {
     const code = (params.get("code") || "FIRST-VISIT").replace(/[^A-Z0-9-]/gi, "").slice(0, 24);
-    localStorage.setItem("spartanCouponClaimed", "true");
-    localStorage.setItem("spartanCouponCode", code);
-    showCouponResult(code);
-    couponDialog?.showModal();
-    document.body.classList.add("dialog-open");
-
-    const couponFormStatus = couponForm?.querySelector("[data-form-status]");
-    if (couponStatus === "duplicate" && couponFormStatus) {
-      couponFormStatus.textContent = "We found your existing first-visit coupon. No duplicate claim was added.";
-    }
-
-    if (couponStatus === "success") {
-      trackConfirmedOnce("coupon", returnedSubmissionId, () => {
-        if (typeof window.fbq === "function") {
-          window.fbq("track", "Lead", { source: "coupon_confirmed" });
-        }
-        track("coupon_confirmed");
-      });
-    }
+    acceptCouponConfirmation({
+      couponStatus,
+      code,
+      updatesResult,
+      submissionId: returnedSubmissionId
+    });
   }
 
-  if (returnMatches && hasUpdatesResult && updatesStatus) {
-    updatesStatus.textContent = updatesResult === "requested"
-      ? "Thanks—your email permission was saved. Check your inbox and confirm your email to finish joining Spartan Updates."
-      : "We already have this email on file. If you are not receiving Spartan Updates, contact us and we’ll help.";
-
-    if (updatesResult === "requested") {
-      trackConfirmedOnce("email", returnedSubmissionId, () => {
-        track("email_doi_requested");
-      });
-    }
+  if (returnMatches && hasUpdatesResult && !hasCouponResult) {
+    acceptUpdatesConfirmation(updatesResult, returnedSubmissionId);
   }
 
-  if (returnKind && (returnMatches || isFilteredReturn)) {
+  const keepPendingUpdatesRetry = returnKind === "updates"
+    && returnMatches
+    && updatesResult === "pending";
+  if (returnKind && (returnMatches || isFilteredReturn) && !keepPendingUpdatesRetry) {
     clearPendingSubmission(returnKind);
   }
 

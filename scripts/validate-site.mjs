@@ -54,6 +54,18 @@ const schema = JSON.parse(schemaSource);
 assert.equal(schema["@type"], "LocalBusiness");
 assert.equal(schema.telephone, "+1-918-928-9755");
 assert.equal(schema.slogan, "Tasty. Healthy. Energy.");
+assert.equal(schema.hasMap, "https://www.google.com/maps?cid=1058402923204900530");
+assert.deepEqual(schema.sameAs, [
+  "https://www.facebook.com/bixbyspartannutrition/",
+  "https://www.instagram.com/bixbyspartannutrition/",
+  "https://www.tiktok.com/@spartan_nutrition",
+  "https://www.google.com/maps?cid=1058402923204900530"
+]);
+assert.match(homepage, /<title>Spartan Nutrition \| Energy Teas &amp; Protein Shakes in Bixby, OK<\/title>/);
+assert.match(homepage, /a Bixby favorite since 2016/);
+assert.match(homepage, /A Bixby favorite since 2016/);
+assert.match(homepage, /protein shakes and other made-to-order nutrition shakes/);
+assert.match(homepage, /Visit Spartan Nutrition in Bixby—at 151st &amp; Memorial\./);
 assert.match(homepage, /\(918\) 928-9755/);
 assert.match(homepage, /The Megan Moroney menu drop is here\./);
 assert.doesNotMatch(homepage, /Golden Hour|Sunset Squeeze/);
@@ -190,12 +202,34 @@ assert.match(siteScript, /data-track-view/);
 assert.match(siteScript, /crypto\.randomUUID/);
 assert.match(siteScript, /prepareSubmission\(couponForm, "coupon"\)/);
 assert.match(siteScript, /returnedSubmissionId === pendingSubmission\.id/);
+assert.match(siteScript, /if \(!existingId && pending\)/);
 assert.match(siteScript, /spartan-forms-v3\.1-2026-08-10/);
+assert.match(siteScript, /spartan-forms-v3\.2-2026-08-15/);
+assert.match(siteScript, /spartan-worker-form-v1-2026-08-15/);
+assert.match(siteScript, /const confirmationEndpoint = "\/api\/forms"/);
+assert.match(siteScript, /const confirmationTimeoutMs = 30000/);
+assert.match(siteScript, /credentials: "omit"/);
+assert.match(siteScript, /result\.worker_form_contract_version === expectedWorkerContractVersion/);
+assert.match(siteScript, /const formPayloadFieldNames = \[/);
+for (const forbiddenWorkerField of ["return_url", "consent_language", "consent_language_version"]) {
+  const payloadList = siteScript.match(/const formPayloadFieldNames = \[([\s\S]*?)\n  \];/)?.[1] || "";
+  assert.doesNotMatch(payloadList, new RegExp(`"${forbiddenWorkerField}"`));
+}
+assert.match(siteScript, /analyticsPageLocation/);
+assert.match(siteScript, /campaignParameterNames\.forEach/);
+assert.match(siteScript, /safe\.searchParams\.set/);
+assert.match(siteScript, /const attributionReferrer = \(\) =>/);
+assert.match(siteScript, /`\$\{referrer\.origin\}\$\{referrer\.pathname\}`/);
+assert.doesNotMatch(siteScript, /referrer:\s*document\.referrer/);
 assert.match(siteScript, /couponStatus === "success"/);
 assert.match(siteScript, /updatesResult === "requested"/);
+assert.match(siteScript, /updatesResult === "pending"/);
+assert.match(siteScript, /updatesResult === "blocked"/);
 assert.match(siteScript, /updatesResult === "confirmed"/);
 assert.match(siteScript, /email_doi_requested/);
-assert.match(siteScript, /email_signup_confirmed/);
+assert.match(siteScript, /email_confirmation_return/);
+assert.doesNotMatch(siteScript, /email_signup_confirmed/);
+assert.match(siteScript, /If confirmation completed successfully/);
 assert.match(homepage, /We’ll email a confirmation link; you join the list only after confirming\./);
 assert.equal(
   (siteScript.match(/callback\(\);/g) || []).length,
@@ -211,8 +245,8 @@ assert.ok(
   "Meta PageView must run after form-result parameters are removed"
 );
 assert.ok(
-  siteScript.indexOf("window.history.replaceState") < siteScript.indexOf('track("coupon_confirmed")'),
-  "Confirmed conversion events must run after form-result parameters are removed"
+  siteScript.indexOf("window.history.replaceState") < siteScript.indexOf("if (returnMatches && hasCouponResult)"),
+  "Native confirmed conversions must be handled after form-result parameters are removed"
 );
 assert.match(homepage, /\["spartandrink\.com", "www\.spartandrink\.com"\]/);
 assert.match(homepage, /G-C3R237CCQ7/);
@@ -224,6 +258,18 @@ assert.match(homepage, /ad_storage:\s*"denied"/);
 assert.match(homepage, /ad_user_data:\s*"denied"/);
 assert.match(homepage, /ad_personalization:\s*"denied"/);
 assert.match(homepage, /analytics_storage:\s*"granted"/);
+for (const socialOrMapUrl of [
+  "https://www.facebook.com/bixbyspartannutrition/",
+  "https://www.instagram.com/bixbyspartannutrition/",
+  "https://www.tiktok.com/@spartan_nutrition",
+  "https://www.google.com/maps?cid=1058402923204900530",
+  "https://g.page/r/CbL23NrZM7AOEBE/review",
+  "https://maps.apple.com/"
+]) {
+  assert.ok(homepage.includes(socialOrMapUrl), `Homepage is missing ${socialOrMapUrl}`);
+}
+assert.match(homepage, /href="#faq"/);
+assert.doesNotMatch(homepage, /google\.com\/search\?q=Spartan/);
 assert.equal(
   (homepage.match(/googletagmanager\.com\/gtag\/js\?id=G-C3R237CCQ7/g) || []).length,
   1,
@@ -383,7 +429,7 @@ const historicConsentResponse = submit({
 });
 assert.equal(rows.length, historicCountBefore + 1);
 assert.match(historicConsentResponse.html, /coupon=duplicate/);
-assert.match(historicConsentResponse.html, /updates=requested/);
+assert.match(historicConsentResponse.html, /updates=pending/);
 assert.equal(rows.at(-1)[indexOf("email_consent_status")], "granted");
 assert.equal(rows.at(-1)[indexOf("email_provider_sync_status")], "not_configured");
 
@@ -406,7 +452,7 @@ assert.equal(rows.at(-1)[indexOf("name")], "'= Test");
 assert.equal(rows.at(-1)[indexOf("coupon_redemption_status")], "not_recorded");
 assert.equal(rows.at(-1)[indexOf("submission_method")], "website_post");
 assert.equal(rows.at(-1)[indexOf("submission_id")], "validation-p1");
-assert.equal(rows.at(-1)[indexOf("handler_version")], "spartan-forms-v3.1-2026-08-10");
+assert.equal(rows.at(-1)[indexOf("handler_version")], "spartan-forms-v3.2-2026-08-15");
 assert.deepEqual(rows[0].slice(0, 5), ["timestamp", "name", "phone", "email", "source_ip"]);
 assert.equal(rows[0].length, 34);
 
@@ -447,8 +493,8 @@ const optedInResponse = submit({
   email_consent: "yes"
 });
 assert.match(optedInResponse.html, /coupon=success/);
-assert.match(optedInResponse.html, /updates=requested/);
-assert.match(optedInResponse.html, /Check your inbox and confirm your email/);
+assert.match(optedInResponse.html, /updates=pending/);
+assert.match(optedInResponse.html, /confirmation email was not sent yet/);
 assert.equal(rows.at(-1)[indexOf("email_consent_status")], "granted");
 assert.equal(rows.at(-1)[indexOf("opt_out_status")], "not_opted_out");
 assert.match(rows.at(-1)[indexOf("consent_language")], /1–4 emails per month/);
@@ -475,7 +521,7 @@ const subscriberParameters = {
   utm_campaign: "bixby-summer"
 };
 const subscriberResponse = submit(subscriberParameters);
-assert.match(subscriberResponse.html, /updates=requested/);
+assert.match(subscriberResponse.html, /updates=pending/);
 assert.equal(rows.at(-1)[indexOf("record_type")], "email_signup");
 assert.equal(rows.at(-1)[indexOf("tags")], "email_updates,website_signup");
 assert.equal(rows.at(-1)[indexOf("referrer")], "https://example.com/community");
@@ -483,10 +529,10 @@ assert.equal(rows.at(-1)[indexOf("utm_source")], "google");
 assert.equal(rows.at(-1)[indexOf("utm_campaign")], "bixby-summer");
 
 const countBeforeSignupRetries = rows.length;
-assert.match(submit(subscriberParameters).html, /updates=duplicate/);
+assert.match(submit(subscriberParameters).html, /updates=pending/);
 assert.equal(rows.length, countBeforeSignupRetries);
-assert.match(submit({ ...subscriberParameters, submission_id: "validation-e4" }).html, /updates=duplicate/);
-assert.equal(rows.length, countBeforeSignupRetries);
+assert.match(submit({ ...subscriberParameters, submission_id: "validation-e4" }).html, /updates=pending/);
+assert.equal(rows.length, countBeforeSignupRetries + 1);
 
 const optOutValues = {
   timestamp: new Date("2026-08-10T12:00:00Z"),
@@ -497,9 +543,13 @@ const optOutValues = {
   email_consent_status: "revoked",
   consent_language_version: "email-updates-v1-2026-07-31",
   opt_out_status: "opted_out",
-  handler_version: "spartan-forms-v3.1-2026-08-10"
+  handler_version: "spartan-forms-v3.2-2026-08-15"
 };
 rows.push(rows[0].map((header) => optOutValues[header] ?? ""));
+const blockedReplayCountBefore = rows.length;
+const blockedReplayResponse = submit(subscriberParameters);
+assert.match(blockedReplayResponse.html, /updates=blocked/);
+assert.equal(rows.length, blockedReplayCountBefore);
 const regrantCountBefore = rows.length;
 const regrantResponse = submit({
   record_type: "email_signup",
@@ -509,7 +559,7 @@ const regrantResponse = submit({
   email_consent: "yes"
 });
 assert.equal(rows.length, regrantCountBefore + 1);
-assert.match(regrantResponse.html, /updates=requested/);
+assert.match(regrantResponse.html, /updates=pending/);
 assert.equal(rows.at(-1)[indexOf("email_consent_status")], "granted");
 assert.equal(rows.at(-1)[indexOf("opt_out_status")], "not_opted_out");
 
@@ -524,10 +574,10 @@ const subscriberCouponResponse = submit({
 });
 assert.equal(rows.length, countBeforeSubscriberCoupon + 1);
 assert.match(subscriberCouponResponse.html, /coupon=success/);
-assert.match(subscriberCouponResponse.html, /updates=duplicate/);
+assert.match(subscriberCouponResponse.html, /updates=pending/);
 assert.equal(rows.at(-1)[indexOf("record_type")], "coupon_claim");
 assert.equal(rows.at(-1)[indexOf("email_consent_status")], "granted");
-assert.equal(rows.at(-1)[indexOf("email_provider_sync_status")], "not_needed_existing");
+assert.equal(rows.at(-1)[indexOf("email_provider_sync_status")], "not_configured");
 
 const legacyCountBefore = rows.length;
 const legacyResponse = context.doGet({
@@ -562,8 +612,10 @@ const healthResponse = context.doGet({ parameter: {} });
 assert.deepEqual(JSON.parse(healthResponse.text), {
   ok: true,
   service: "spartan-website-forms",
-  handler_version: "spartan-forms-v3.1-2026-08-10",
+  handler_version: "spartan-forms-v3.2-2026-08-15",
   form_contract_version: "spartan-form-contract-v3-2026-08-10",
+  worker_form_contract_version: "spartan-worker-form-v1-2026-08-15",
+  worker_json_configured: false,
   consent_version: "email-updates-v1-2026-07-31",
   legacy_get_compatibility: true,
   legacy_get_state: "enabled",
@@ -673,13 +725,14 @@ scriptProperties.BREVO_API_KEY = "test-api-key";
 scriptProperties.BREVO_LIST_ID = "42";
 scriptProperties.BREVO_DOI_TEMPLATE_ID = "7";
 scriptProperties.BREVO_SYNC_ENABLED = "true";
-const providerResponse = submit({
+const providerParameters = {
   record_type: "email_signup",
   submission_id: "validation-br1",
   name: "Provider Sync",
   email: "provider-sync@example.com",
   email_consent: "yes"
-});
+};
+const providerResponse = submit(providerParameters);
 assert.match(providerResponse.html, /updates=requested/);
 assert.equal(brevoRequests.length, 1);
 assert.equal(brevoRequests[0].url, "https://api.brevo.com/v3/contacts/doubleOptinConfirmation");
@@ -696,15 +749,57 @@ assert.ok(rows.at(-1)[indexOf("email_provider_requested_at")] instanceof Date);
 assert.equal(rows.at(-1)[indexOf("email_provider_synced_at")], "");
 assert.equal(rows.at(-1)[indexOf("email_provider_contact_id")], "");
 
+const providerAcceptedRowCount = rows.length;
+assert.match(submit(providerParameters).html, /updates=requested/);
+assert.equal(rows.length, providerAcceptedRowCount);
+assert.equal(brevoRequests.length, 1, "An exact accepted retry must not request a second DOI email");
+assert.match(submit({
+  ...providerParameters,
+  submission_id: "validation-br1-new-id"
+}).html, /updates=duplicate/);
+assert.equal(rows.length, providerAcceptedRowCount);
+assert.equal(brevoRequests.length, 1, "A new ID must not duplicate an accepted DOI request");
+
+const providerCouponParameters = {
+  record_type: "coupon_claim",
+  submission_id: "validation-br1-coupon",
+  name: "Provider Sync",
+  phone: "918-555-0161",
+  email: "provider-sync@example.com",
+  email_consent: "yes"
+};
+const providerCouponResponse = submit(providerCouponParameters);
+assert.match(providerCouponResponse.html, /coupon=success/);
+assert.match(providerCouponResponse.html, /updates=duplicate/);
+assert.equal(rows.at(-1)[indexOf("email_provider_sync_status")], "not_needed_existing");
+const requestsBeforeCouponRetry = brevoRequests.length;
+assert.match(submit(providerCouponParameters).html, /updates=duplicate/);
+assert.equal(brevoRequests.length, requestsBeforeCouponRetry);
+
+rows.push(rows[0].map((header) => ({
+  timestamp: new Date(),
+  name: "Provider Sync",
+  email: "provider-sync@example.com",
+  submission_id: "validation-br1-opt-out",
+  record_type: "email_signup",
+  email_consent_status: "revoked",
+  opt_out_status: "opted_out",
+  handler_version: "spartan-forms-v3.2-2026-08-15"
+})[header] ?? ""));
+const requestsBeforeAcceptedReplay = brevoRequests.length;
+assert.match(submit(providerParameters).html, /updates=blocked/);
+assert.equal(brevoRequests.length, requestsBeforeAcceptedReplay);
+
 brevoResponseCode = 503;
-const providerFailureResponse = submit({
+const providerFailureParameters = {
   record_type: "email_signup",
   submission_id: "validation-br2-failure",
   name: "Provider Failure",
   email: "provider-failure@example.com",
   email_consent: "yes"
-});
-assert.match(providerFailureResponse.html, /updates=requested/);
+};
+const providerFailureResponse = submit(providerFailureParameters);
+assert.match(providerFailureResponse.html, /updates=pending/);
 assert.doesNotMatch(providerFailureResponse.html, /private provider detail|provider_http_503/);
 assert.equal(rows.at(-1)[indexOf("email_provider")], "brevo");
 assert.equal(rows.at(-1)[indexOf("email_provider_sync_status")], "failed");
@@ -720,6 +815,37 @@ assert.ok(
   Array.from(retryCandidates).some((candidate) => candidate.submissionId === "validation-br2-failure"),
   "Failed current-consent DOI requests must remain eligible for controlled retry"
 );
+
+const providerFailureRowCount = rows.length;
+const recoveredProviderResponse = submit(providerFailureParameters);
+assert.match(recoveredProviderResponse.html, /updates=requested/);
+assert.equal(rows.length, providerFailureRowCount, "An exact failed retry must reuse its auditable row");
+assert.equal(rows.at(-1)[indexOf("email_provider_sync_status")], "confirmation_requested");
+const providerRequestsAfterRecovery = brevoRequests.length;
+assert.match(submit({
+  ...providerFailureParameters,
+  submission_id: "validation-br2-new-id"
+}).html, /updates=duplicate/);
+assert.equal(rows.length, providerFailureRowCount);
+assert.equal(brevoRequests.length, providerRequestsAfterRecovery);
+
+brevoResponseCode = 503;
+const staleFailureParameters = {
+  record_type: "email_signup",
+  submission_id: "validation-br-stale-old",
+  name: "Stale Failure",
+  email: "stale-failure@example.com",
+  email_consent: "yes"
+};
+assert.match(submit(staleFailureParameters).html, /updates=pending/);
+brevoResponseCode = 201;
+assert.match(submit({
+  ...staleFailureParameters,
+  submission_id: "validation-br-stale-new"
+}).html, /updates=requested/);
+const requestsBeforeStaleReplay = brevoRequests.length;
+assert.match(submit(staleFailureParameters).html, /updates=duplicate/);
+assert.equal(brevoRequests.length, requestsBeforeStaleReplay);
 
 const retryStateRow = (fields) => rows[0].map((header) => fields[header] ?? "");
 const deniedRetryRows = [
