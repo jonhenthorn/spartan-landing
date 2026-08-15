@@ -1,6 +1,16 @@
 {
   "lastReviewed": "2026-08-10",
   "note": "Flavor availability changes. Call ahead if you have a specific favorite in mind.",
+  "currentRelease": {
+    "eyebrow": "Six drinks. Pick your vibe.",
+    "title": "The Megan Moroney menu drop is here.",
+    "description": "Choose from Tennessee Orange, I’m Not Pretty, Lucky, Girl in the Mirror, Wonder and Hair Salon.",
+    "availabilityNote": "Availability can change before the next menu is posted. Call ahead if you have a specific drink in mind.",
+    "image": "assets/current-release-menu.webp",
+    "imageWidth": 989,
+    "imageHeight": 1280,
+    "imageAlt": "Megan Moroney menu drop featuring six Spartan Nutrition drinks"
+  },
   "sections": [
     {
       "id": "energy-teas",

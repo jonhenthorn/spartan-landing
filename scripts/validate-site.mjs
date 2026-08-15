@@ -9,6 +9,8 @@ const read = (file) => readFile(path.join(root, file), "utf8");
 
 const pages = [
   "index.html",
+  "menu/index.html",
+  "products-at-home/index.html",
   "privacy.html",
   "offer-terms.html",
   "index_updated.html",
@@ -20,7 +22,7 @@ const pageSources = new Map(await Promise.all(
 ));
 
 for (const [page, source] of pageSources) {
-  if (["index.html", "privacy.html", "offer-terms.html"].includes(page)) {
+  if (["index.html", "menu/index.html", "products-at-home/index.html", "privacy.html", "offer-terms.html"].includes(page)) {
     assert.match(source, /<meta name="referrer" content="strict-origin-when-cross-origin" \/>/);
   }
   for (const match of source.matchAll(/(?:href|src)="([^"]+)"/g)) {
@@ -37,13 +39,18 @@ for (const [page, source] of pageSources) {
 }
 
 const homepage = pageSources.get("index.html");
+const menuPage = pageSources.get("menu/index.html");
+const productsPage = pageSources.get("products-at-home/index.html");
 const privacyPolicy = pageSources.get("privacy.html");
-const ids = [...homepage.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
-assert.equal(new Set(ids).size, ids.length, "index.html contains duplicate IDs");
 assert.match(privacyPolicy, /https:\/\/policies\.google\.com\/technologies\/partner-sites/);
 
-for (const match of homepage.matchAll(/href="#([^"]+)"/g)) {
-  assert.ok(ids.includes(match[1]), `index.html links to missing anchor #${match[1]}`);
+for (const page of ["index.html", "menu/index.html", "products-at-home/index.html", "privacy.html", "offer-terms.html"]) {
+  const source = pageSources.get(page);
+  const ids = [...source.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
+  assert.equal(new Set(ids).size, ids.length, `${page} contains duplicate IDs`);
+  for (const match of source.matchAll(/href="#([^"]+)"/g)) {
+    assert.ok(ids.includes(match[1]), `${page} links to missing anchor #${match[1]}`);
+  }
 }
 
 const schemaSource = homepage.match(
@@ -55,12 +62,20 @@ assert.equal(schema["@type"], "LocalBusiness");
 assert.equal(schema.telephone, "+1-918-928-9755");
 assert.equal(schema.slogan, "Tasty. Healthy. Energy.");
 assert.equal(schema.hasMap, "https://www.google.com/maps?cid=1058402923204900530");
+assert.equal(schema.hasMenu, "https://spartandrink.com/menu/");
 assert.deepEqual(schema.sameAs, [
   "https://www.facebook.com/bixbyspartannutrition/",
   "https://www.instagram.com/bixbyspartannutrition/",
   "https://www.tiktok.com/@spartan_nutrition",
   "https://www.google.com/maps?cid=1058402923204900530"
 ]);
+const structuredData = [...homepage.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)]
+  .map((match) => JSON.parse(match[1]));
+const websiteSchema = structuredData.find((item) => item["@type"] === "WebSite");
+assert.ok(websiteSchema, "WebSite JSON-LD was not found");
+assert.equal(websiteSchema.name, "Spartan Nutrition");
+assert.equal(websiteSchema.url, "https://spartandrink.com/");
+assert.equal(websiteSchema.alternateName, "spartandrink.com");
 assert.match(homepage, /<title>Spartan Nutrition \| Energy Teas &amp; Protein Shakes in Bixby, OK<\/title>/);
 assert.match(homepage, /a Bixby favorite since 2016/);
 assert.match(homepage, /A Bixby favorite since 2016/);
@@ -78,6 +93,12 @@ assert.match(homepage, /<li>Original<\/li>/);
 assert.match(homepage, /immunity-support/);
 assert.match(homepage, /More than drinks/);
 assert.match(homepage, /https:\/\/cash\.app\/\$spartannutritionok/);
+assert.match(homepage, /href="\/menu\/"/);
+assert.match(homepage, /href="\/products-at-home\/"/);
+assert.match(homepage, /class="container visit-map" data-track-view="google_map_view"/);
+assert.match(homepage, /google\.com\/maps\/embed\?pb=/);
+assert.match(homepage, /loading="lazy"/);
+assert.match(homepage, /class="hero-social"/);
 assert.match(homepage, /Online availability may differ from the full in-store menu\./);
 assert.match(homepage, /locally owned by Jon and Shana Henthorn/);
 assert.doesNotMatch(homepage, /Bixby-owned\. Veteran-owned/);
@@ -108,7 +129,30 @@ for (const flavor of [
   assert.ok(homepage.includes(`<li>${flavor}</li>`), `Permanent menu is missing flavor: ${flavor}`);
 }
 
-JSON.parse(await read("data/menu.json"));
+const menu = JSON.parse(await read("data/menu.json"));
+assert.equal(menu.currentRelease.title, "The Megan Moroney menu drop is here.");
+assert.equal(menu.currentRelease.image, "assets/current-release-menu.webp");
+assert.equal(menu.currentRelease.imageWidth, 989);
+assert.equal(menu.currentRelease.imageHeight, 1280);
+assert.match(menuPage, /<title>Spartan Nutrition Menu \| Energy Teas &amp; Protein Shakes in Bixby<\/title>/);
+assert.match(menuPage, /data-track-view="menu_page_permanent_view"/);
+assert.match(menuPage, /The Megan Moroney menu drop is here\./);
+assert.match(menuPage, /<li>Original<\/li>/);
+assert.match(menuPage, /href="\/products-at-home\/"/);
+
+assert.match(productsPage, /<title>Products Shipped to You \| Spartan Nutrition Bixby<\/title>/);
+assert.match(productsPage, /Get your favorite products shipped to you\./);
+assert.match(productsPage, /data-track="home_delivery_click"/);
+assert.match(productsPage, /data-track="member_savings_click"/);
+assert.match(productsPage, /rel="sponsored noopener noreferrer"/);
+assert.match(productsPage, /https:\/\/get-started\.herbalife\.com\/en-us\/u\/category\/all-products/);
+assert.match(productsPage, /https:\/\/get-started\.herbalife\.com\/en-us\/u\/loyalty/);
+assert.match(productsPage, /https:\/\/www\.herbalife\.com\/en-us\/footer\/herbalife-privacy-policy/);
+assert.match(productsPage, /Spartan does not pack or ship these orders\./);
+assert.doesNotMatch(productsPage, /connect\.facebook\.net|fbq\(/);
+assert.doesNotMatch(productsPage, /\$19\.95|15% off/);
+assert.doesNotMatch(productsPage, /Sponsor ID/i);
+assert.match(privacyPolicy, /External product storefront/);
 const megaTeaKits = JSON.parse(await read("data/mega-tea-kits.json"));
 const escapeHtml = (value) => String(value)
   .replaceAll("&", "&amp;")
@@ -199,6 +243,18 @@ assert.match(siteScript, /window\.gtag\("event", eventName, details\)/);
 assert.match(siteScript, /utm_campaign/);
 assert.match(siteScript, /mega_tea_kit_options_expand/);
 assert.match(siteScript, /data-track-view/);
+assert.match(siteScript, /link_location:/);
+const metaBlockedList = siteScript.match(/const metaBlockedEvents = new Set\(\[([\s\S]*?)\n  \]\);/)?.[1] || "";
+for (const eventName of [
+  "home_products_view",
+  "home_delivery_click",
+  "member_savings_click",
+  "home_shipping_page_click",
+  "product_interest_click"
+]) {
+  assert.match(metaBlockedList, new RegExp(`"${eventName}"`), `${eventName} must remain blocked from Meta`);
+}
+assert.match(siteScript, /typeof window\.fbq === "function" && !metaBlockedEvents\.has\(eventName\)/);
 assert.match(siteScript, /crypto\.randomUUID/);
 assert.match(siteScript, /prepareSubmission\(couponForm, "coupon"\)/);
 assert.match(siteScript, /returnedSubmissionId === pendingSubmission\.id/);

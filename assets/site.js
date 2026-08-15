@@ -79,6 +79,13 @@
     "email",
     "email_consent"
   ];
+  const metaBlockedEvents = new Set([
+    "home_products_view",
+    "home_delivery_click",
+    "member_savings_click",
+    "home_shipping_page_click",
+    "product_interest_click"
+  ]);
 
   const sanitizeCampaignValue = (name, value) => {
     const candidate = String(value || "").trim().slice(0, 180);
@@ -116,7 +123,7 @@
       window.gtag("event", eventName, details);
     }
 
-    if (typeof window.fbq === "function") {
+    if (typeof window.fbq === "function" && !metaBlockedEvents.has(eventName)) {
       window.fbq("trackCustom", eventName, details);
     }
   };
@@ -550,7 +557,10 @@
   document.querySelectorAll("[data-track]").forEach((element) => {
     element.addEventListener("click", () => {
       track(element.dataset.track, {
-        destination: element.getAttribute("href") || "button"
+        destination: element.getAttribute("href") || "button",
+        link_location: element.dataset.trackLocation
+          || element.closest("section")?.id
+          || (element.closest("footer") ? "footer" : "site")
       });
     });
   });

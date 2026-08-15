@@ -5,8 +5,10 @@ This repository contains the static website published at [spartandrink.com](http
 ## Phase 1 structure
 
 - `index.html` — primary landing page and canonical homepage.
+- `menu/index.html` — crawlable current and permanent menu page generated from the same structured menu source as the homepage.
+- `products-at-home/index.html` — shipped-product, independent-reordering and optional member-savings journey.
 - `assets/site.css` and `assets/site.js` — shared presentation and interactions.
-- `data/menu.json` — structured permanent menu source.
+- `data/menu.json` — structured current-release copy and permanent menu source.
 - `data/mega-tea-kits.json` — structured source for Mega Tea Kit choices, optional Liftoff flavors, add-ins and prices.
 - `assets/current-release-menu.webp` — the replaceable seasonal/current release image.
 - `privacy.html` — website and subscriber privacy disclosures.
@@ -28,8 +30,9 @@ This repository contains the static website published at [spartandrink.com](http
    cwebp -q 82 -resize 1200 0 "/path/to/new-menu.jpg" -o assets/current-release-menu.webp
    ```
 
-3. Update the release title, description and image alt text in the `current-release` section of `index.html`.
-4. Preview the website on both phone and desktop before publishing.
+3. Update the `currentRelease` title, description, availability note, dimensions and image alt text in `data/menu.json`.
+4. Run `node scripts/build-menu.mjs` to refresh both the homepage and `/menu/` page.
+5. Preview both pages on phone and desktop before publishing.
 
 Replacing the file with the same name automatically removes the previous release from the live page while preserving a simple update workflow.
 
@@ -42,9 +45,9 @@ Replacing the file with the same name automatically removes the previous release
    node scripts/build-menu.mjs
    ```
 
-3. Review `index.html` and preview the page.
+3. Review `index.html` and `menu/index.html`, then preview both pages.
 
-The same build step also refreshes the Mega Tea Kit section from its separate data file without changing the permanent prepared-drink menu.
+The same build step refreshes the current-release copy and permanent menu on both public pages, plus the homepage Mega Tea Kit section from its separate data file.
 
 ### Update Mega Tea Kits
 
@@ -86,9 +89,9 @@ From the repository folder, start a local preview:
 python3 -m http.server 4173 --bind 127.0.0.1
 ```
 
-Then open `http://127.0.0.1:4173/`. Preview mode on every non-production hostname prevents coupon and email forms from submitting and does not load the production Google tag or Meta Pixel. Stop the preview with `Control-C` when finished.
+Then open `http://127.0.0.1:4173/`, `http://127.0.0.1:4173/menu/` and `http://127.0.0.1:4173/products-at-home/`. Preview mode on every non-production hostname prevents coupon and email forms from submitting and does not load the production Google tag or Meta Pixel. Stop the preview with `Control-C` when finished.
 
-The stylesheet and browser script use a date-based `?v=` value in page references so GitHub Pages and Cloudflare visitors receive a new file after a release. Update that value in `index.html`, `privacy.html` and `offer-terms.html` whenever `assets/site.css` or `assets/site.js` changes.
+The stylesheet and browser script use a date-based `?v=` value in page references so GitHub Pages and Cloudflare visitors receive a new file after a release. Update that value on every page that references `assets/site.css` or `assets/site.js` whenever either file changes.
 
 ## Form deployment gate
 
@@ -123,7 +126,9 @@ No customer data, API keys, spreadsheet IDs or provider credentials should be co
 - **Permanent menu:** `data/menu.json`, because the Square catalog does not represent all prepared-drink flavors clearly enough for customers.
 - **Mega Tea Kits:** `data/mega-tea-kits.json`, reconciled to the current live Square kit, modifier choices and prices. The generated section links to the existing online-pickup profile and keeps an availability caveat because live choices and inventory can change.
 - **Featured release:** `assets/current-release-menu.webp`, replaced as one owner-managed image.
-- **Meta:** current website analytics retained. Custom events are emitted for menu, call, directions, coupon, at-home and Mega Tea Kit actions.
+- **Home-product shipping:** the owner-attributed external storefront is `https://get-started.herbalife.com/en-us/u`. The public website links to its stable Shop All and Wellness Rewards routes. Herbalife is merchant of record and handles account creation, payment, taxes, shipping, subscriptions, returns and membership terms. Spartan does not collect enrollment/payment/shipping data or fulfill these orders.
+- **Home-product measurement:** `home_products_view`, `home_delivery_click` and `member_savings_click` are anonymous GA4 website-intent events only. The product-shipping page does not load Meta Pixel, and health-adjacent product-interest events are withheld from Meta. A click is not a completed order or membership. Reconcile completions from authenticated Herbalife owner reporting; do not invent a cross-domain conversion or upload customer data without an approved privacy/consent basis.
+- **Meta:** current homepage/menu analytics are retained for general menu, call, directions, coupon and Mega Tea Kit actions. The shipped-products page does not load Meta Pixel, and `assets/site.js` blocks health-adjacent at-home product-interest event names from Meta.
 - **Google Analytics:** GA4 property `Spartan Nutrition Website` uses web stream `Spartan Nutrition Website` and measurement ID `G-C3R237CCQ7`. The production-host-only loader disables automatic page views and advertising signals; `assets/site.js` removes form-result parameters before sending one page view and the site’s anonymous action events. It preserves only allowlisted campaign and click-identification parameters so approved Facebook, Instagram, TikTok, Google Business Profile and Brevo links can be attributed without putting names, email addresses or phone numbers into analytics. Enhanced Measurement retains page loads and scrolls only; history-change page views and the automatic click, form, search, video and download events are off. Google signals and user-provided-data collection remain off, event/user retention remains at 2/14 months, and `script.google.com` is excluded as a referral so a native fallback return does not overwrite the visitor’s original source. `email_doi_requested` records provider acceptance of a confirmation-email request. `email_confirmation_return` is only a directional redirect signal because its URL can be revisited; it is not a confirmed-subscriber count or key event. `coupon_confirmed` is the website key event. Brevo list membership remains the authoritative email-confirmation source. Do not send form field values or other personal information.
 - **Email delivery:** the Sheet remains the consent audit source. Only rows with `email_consent_status=granted` may sync to the dedicated Brevo list. Provider suppressions and unsubscribes must never be cleared by the website sync.
 
