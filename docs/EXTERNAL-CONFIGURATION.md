@@ -100,6 +100,16 @@ This file records external configuration that cannot be inferred from GitHub alo
 - An owner-controlled checkout through the public Square/Cash App ordering profile created a paid order in the Square dashboard, confirming that the destination is more than a website click.
 - A merchant notification was not observed during that test. Square POS new-order notifications and merchant email alerts still require verification before online pickup is considered operationally complete.
 
+### Square customer-journey audit
+
+- Read-only Dashboard review on August 16, 2026 confirmed Customer Directory access with 3,539 existing customer profiles and a customer form that includes phone plus Reference ID.
+- Square Loyalty is not active; its page offers a 30-day trial. The customer-journey baseline will not depend on Loyalty.
+- Square Online is on its Free plan. Square for Restaurants Plus is in a free trial ending September 11, 2026. The subscription manager showed the current configuration as $139/month if subscribed and 2.6% + 10¢ versus 2.6% + 15¢ on Free. No plan selection was changed. Square's current restaurant guidance says an unselected trial downgrades to Free; verify the account-specific result before the deadline.
+- The account has one visible active location, `Spartan`, with Square location ID `3MDGSXS33HERT`.
+- The calendar-year Discounts report separately lists `50% Off First Drink — Enter 50%` and showed $26.12 discounted at audit time. This proves named aggregate reporting, not contact-level redemption attribution.
+- One recent paid transaction exposed stable transaction/order/receipt references but no visible customer-profile link. This sample is not a coverage estimate.
+- No customer, plan, discount, transaction or account setting was changed. Physical POS customer attachment, fixed-discount behavior, export fields and a controlled redemption/return/reversal path remain to test.
+
 ### Meta privacy setting still to verify
 
 - A fresh attempt to inspect Events Manager redirected to Facebook login, so automatic advanced matching and automatic form-event collection were not verified in this session.

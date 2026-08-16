@@ -88,7 +88,7 @@ Project 1 is complete and live. Project 2 is the active next project because Pro
 | Project | Status | Business owner | Dependency/blocker | Next action | Target release | One-time/monthly cost | Owner-time ceiling | Stop gate |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 Insight/confirmation | **Live** | Owner with technical support | No release blocker; first 30-day learning window is in progress | Monitor interest/source response and form health | Live August 16, 2026 | Current tools | ~15 min/month | Roll back any question that reduces claim/signup completion |
-| 2 Measurement/identity | **Next** | Owner with technical support | Reliable Square identifier and redemption procedure | Define Square SOP, baseline and manual reconciliation ledger | Staged implementation starts now | Pilot `$0`; future data store TBD | ≤15 min/week | Defer automation if match coverage/owner burden fails |
+| 2 Measurement/identity | **Active — Square audit started** | Owner with technical support | Controlled POS redemption/return proof | Run the controlled Square path, then create the two-tab ledger | Staged implementation started August 16 | Pilot `$0`; future data store TBD | ≤15 min/week | Defer automation if match coverage/owner burden fails |
 | 3 Referral/Rewards MVP | Planned, not live | Owner | Project 2 redemption measurement | Finalize terms and manual 60-day pilot | After measurement gate | Reward economics TBD; software `$0` pilot | ≤30 min/week pilot | Stop for fraud, weak observed contribution or excess work |
 | 4 Lifecycle email | Welcome/interest automation live; purchase lifecycle planned | Owner | Trusted redemption/return signal | Measure welcome flow; add one return message after Project 2 | Welcome live; later messages staged | Current Brevo limits; upgrades TBD | ~15 min/month | Pause on consent errors, complaints or no directional value |
 | 5 Social operating system | Ready for Stage 0 | Owner | Source pack and approval routine | Run four-week native-tools baseline | Start in parallel | `$0`; paid tool only after test | 75–100 min/week initially | No paid tool without ≥30 min/week saved or better actions |
@@ -181,6 +181,8 @@ Apps Script Version `14` and the Worker contracts accept only these ten choices.
 ## Project 2 — Journey measurement and identity foundation
 
 **Status: next active project.** Project 1 is live; the immediate need is to connect website claims to reliable Square redemption and return evidence without building a new database first.
+
+The read-only live-account audit is now partly complete: Customer Directory contains 3,539 profiles, the first-drink discount is separately visible in reporting, Loyalty is inactive, one Square location ID is confirmed and the current Restaurant Plus trial/cost was recorded. The physical POS attach-before-payment workflow, fixed-discount behavior, export fields and controlled customer journey remain the next proof.
 
 ### Business problem
 
