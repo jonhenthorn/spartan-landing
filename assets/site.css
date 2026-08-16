@@ -26,6 +26,13 @@ html {
   scroll-padding-top: 7rem;
 }
 
+.anchor-alias {
+  display: block;
+  height: 0;
+  scroll-margin-top: 7rem;
+  pointer-events: none;
+}
+
 body {
   margin: 0;
   background: var(--cream);

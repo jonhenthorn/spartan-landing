@@ -5,8 +5,8 @@ This is the low-maintenance operating routine for making the website, Google Bus
 ## Canonical destinations
 
 - Website: `https://spartandrink.com/`
-- Permanent menu: `https://spartandrink.com/menu/#permanent-menu`
-- Current menu release: `https://spartandrink.com/menu/#current-release`
+- Our menu: `https://spartandrink.com/menu/#our-menu`
+- Special menus: `https://spartandrink.com/menu/#special-menu`
 - Products shipped to you: `https://spartandrink.com/products-at-home/`
 - First-visit offer: `https://spartandrink.com/#first-visit`
 - Mega Tea Kits: `https://spartandrink.com/#mega-tea-kits`
@@ -18,14 +18,14 @@ This is the low-maintenance operating routine for making the website, Google Bus
 
 Keep the business name, address, phone, hours, website and categories aligned wherever they appear. Update the visible website hours and LocalBusiness structured data together. Use the exact Google profile—not a generic Google search—for reviews and special-hours checks.
 
-## One release, several channels
+## One special menu, several channels
 
-When a monthly or seasonal menu changes:
+When a different special menu is featured:
 
-1. Replace the current-release image and update its descriptive alt text on the website.
+1. Replace the featured special-menu image and update its descriptive alt text on the website. Keep prior recipes available in our menu.
 2. Update the Google Business Profile menu photo or menu link and publish one accurate update.
-3. Publish the same release on Facebook, Instagram and TikTok using platform-native media.
-4. Send it to opted-in Spartan Updates subscribers only when the release is useful enough to justify an email.
+3. Publish the same special menu on Facebook, Instagram and TikTok using platform-native media.
+4. Send it to opted-in Spartan Updates subscribers only when the special menu is useful enough to justify an email.
 5. Use the same lowercase campaign name everywhere so GA4 can reconcile website visits and actions.
 
 This creates a connected campaign without copying identical long-form text everywhere. Social reach can create referral visits, branded searches, shares and real-world visits; it is not treated as a direct Google ranking guarantee.
@@ -36,11 +36,11 @@ Use lowercase words separated with underscores. Never put a customer name, email
 
 | Channel | `utm_source` | `utm_medium` | Example destination |
 | --- | --- | --- | --- |
-| Instagram | `instagram` | `organic_social` | `https://spartandrink.com/menu/?utm_source=instagram&utm_medium=organic_social&utm_campaign=monthly_menu_2026_08&utm_content=reel_01` |
-| Facebook | `facebook` | `organic_social` | `https://spartandrink.com/menu/?utm_source=facebook&utm_medium=organic_social&utm_campaign=monthly_menu_2026_08&utm_content=post_01` |
-| TikTok | `tiktok` | `organic_social` | `https://spartandrink.com/menu/?utm_source=tiktok&utm_medium=organic_social&utm_campaign=monthly_menu_2026_08&utm_content=video_01` |
+| Instagram | `instagram` | `organic_social` | `https://spartandrink.com/menu/?utm_source=instagram&utm_medium=organic_social&utm_campaign=special_menu_2026_08&utm_content=reel_01` |
+| Facebook | `facebook` | `organic_social` | `https://spartandrink.com/menu/?utm_source=facebook&utm_medium=organic_social&utm_campaign=special_menu_2026_08&utm_content=post_01` |
+| TikTok | `tiktok` | `organic_social` | `https://spartandrink.com/menu/?utm_source=tiktok&utm_medium=organic_social&utm_campaign=special_menu_2026_08&utm_content=video_01` |
 | Google profile | `google` | `organic` | `https://spartandrink.com/?utm_source=google&utm_medium=organic&utm_campaign=gbp_website` |
-| Brevo | `brevo` | `email` | `https://spartandrink.com/?utm_source=brevo&utm_medium=email&utm_campaign=monthly_menu_2026_08&utm_content=menu_button` |
+| Brevo | `brevo` | `email` | `https://spartandrink.com/?utm_source=brevo&utm_medium=email&utm_campaign=special_menu_2026_08&utm_content=menu_button` |
 
 For permanent social-profile bio links, use campaign `profile` and content `bio`. Do not add UTM parameters to links between pages or sections on the Spartan website.
 
@@ -49,7 +49,7 @@ For permanent social-profile bio links, use campaign `profile` and content `bio`
 Monthly, or whenever facts change:
 
 - Confirm hours, holiday hours, phone, address, menu link, photos and social profiles in Google Business Profile.
-- Add the current menu image and several honest, current store or drink photos.
+- Add the featured special-menu image and several honest, current store or drink photos.
 - Ask real customers for an honest Google review using the direct review link or a QR code. Do not reward, gate or script positive reviews.
 - Reply briefly and authentically to new reviews, especially questions or service concerns.
 - Confirm the website still naturally describes energy teas, protein shakes, nutrition shakes, protein coffee, Mega Tea Kits, Bixby, South Tulsa and the 151st & Memorial location.

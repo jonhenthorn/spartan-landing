@@ -4,8 +4,8 @@ const menu = JSON.parse(await readFile(new URL("../data/menu.json", import.meta.
 const megaTeaKits = JSON.parse(await readFile(new URL("../data/mega-tea-kits.json", import.meta.url), "utf8"));
 const indexPath = new URL("../index.html", import.meta.url);
 const menuPagePath = new URL("../menu/index.html", import.meta.url);
-const currentReleaseStartMarker = "<!-- CURRENT_RELEASE_DATA_START -->";
-const currentReleaseEndMarker = "<!-- CURRENT_RELEASE_DATA_END -->";
+const specialMenuStartMarker = "<!-- SPECIAL_MENU_DATA_START -->";
+const specialMenuEndMarker = "<!-- SPECIAL_MENU_DATA_END -->";
 const menuStartMarker = "<!-- MENU_DATA_START -->";
 const menuEndMarker = "<!-- MENU_DATA_END -->";
 const megaTeaKitsStartMarker = "<!-- MEGA_TEA_KITS_DATA_START -->";
@@ -34,36 +34,37 @@ const replaceMarkedSection = (source, startMarker, endMarker, generated) => {
   return `${source.slice(0, start)}${generated}${source.slice(end + endMarker.length)}`;
 };
 
-const renderCurrentRelease = ({ assetPrefix = "", menuHref }) => {
-  const release = menu.currentRelease;
-  if (!release) throw new Error("data/menu.json is missing currentRelease");
+const renderSpecialMenu = ({ assetPrefix = "", menuHref }) => {
+  const special = menu.specialMenu;
+  if (!special) throw new Error("data/menu.json is missing specialMenu");
 
-  return `${currentReleaseStartMarker}
-      <section class="section section-sea" id="current-release">
+  return `${specialMenuStartMarker}
+      <span class="anchor-alias" id="current-release" aria-hidden="true"></span>
+      <section class="section section-sea" id="special-menu">
         <div class="container release-grid">
           <div class="release-frame">
-            <span class="release-badge">Available now</span>
+            <span class="release-badge">Special menu</span>
             <img
-              src="${escapeHtml(`${assetPrefix}${release.image}`)}"
-              width="${escapeHtml(release.imageWidth)}"
-              height="${escapeHtml(release.imageHeight)}"
-              alt="${escapeHtml(release.imageAlt)}"
+              src="${escapeHtml(`${assetPrefix}${special.image}`)}"
+              width="${escapeHtml(special.imageWidth)}"
+              height="${escapeHtml(special.imageHeight)}"
+              alt="${escapeHtml(special.imageAlt)}"
               loading="lazy"
             />
           </div>
           <div class="release-copy">
-            <p class="eyebrow">${escapeHtml(release.eyebrow)}</p>
-            <h2>${escapeHtml(release.title)}</h2>
-            <p>${escapeHtml(release.description)}</p>
-            <p>${escapeHtml(release.availabilityNote)}</p>
+            <p class="eyebrow">${escapeHtml(special.eyebrow)}</p>
+            <h2>${escapeHtml(special.title)}</h2>
+            <p>${escapeHtml(special.description)}</p>
+            <p>${escapeHtml(special.continuityNote)}</p>
             <div class="inline-actions">
-              <a class="button button-secondary" href="tel:+19189289755" data-track="call_click" data-track-location="current_release">Call about a flavor</a>
-              <a class="button button-ghost" href="${escapeHtml(menuHref)}" data-track="menu_click" data-track-location="current_release">See the permanent menu</a>
+              <a class="button button-secondary" href="tel:+19189289755" data-track="call_click" data-track-location="special_menu">Call about a recipe</a>
+              <a class="button button-ghost" href="${escapeHtml(menuHref)}" data-track="menu_click" data-track-location="special_menu">Explore our menu</a>
             </div>
           </div>
         </div>
       </section>
-      ${currentReleaseEndMarker}`;
+      ${specialMenuEndMarker}`;
 };
 
 const sections = menu.sections.map((section) => {
@@ -168,13 +169,13 @@ const generatedMegaTeaKits = `${megaTeaKitsStartMarker}
       ${megaTeaKitsEndMarker}`;
 
 const source = await readFile(indexPath, "utf8");
-const withRelease = replaceMarkedSection(
+const withSpecialMenu = replaceMarkedSection(
   source,
-  currentReleaseStartMarker,
-  currentReleaseEndMarker,
-  renderCurrentRelease({ menuHref: "/menu/#permanent-menu" })
+  specialMenuStartMarker,
+  specialMenuEndMarker,
+  renderSpecialMenu({ menuHref: "/menu/#our-menu" })
 );
-const withMenu = replaceMarkedSection(withRelease, menuStartMarker, menuEndMarker, generatedMenu);
+const withMenu = replaceMarkedSection(withSpecialMenu, menuStartMarker, menuEndMarker, generatedMenu);
 const next = replaceMarkedSection(
   withMenu,
   megaTeaKitsStartMarker,
@@ -184,14 +185,14 @@ const next = replaceMarkedSection(
 await writeFile(indexPath, next);
 
 const menuPageSource = await readFile(menuPagePath, "utf8");
-const menuPageWithRelease = replaceMarkedSection(
+const menuPageWithSpecialMenu = replaceMarkedSection(
   menuPageSource,
-  currentReleaseStartMarker,
-  currentReleaseEndMarker,
-  renderCurrentRelease({ assetPrefix: "../", menuHref: "#permanent-menu" })
+  specialMenuStartMarker,
+  specialMenuEndMarker,
+  renderSpecialMenu({ assetPrefix: "../", menuHref: "#our-menu" })
 );
 const nextMenuPage = replaceMarkedSection(
-  menuPageWithRelease,
+  menuPageWithSpecialMenu,
   menuStartMarker,
   menuEndMarker,
   generatedMenu

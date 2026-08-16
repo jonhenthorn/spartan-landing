@@ -94,8 +94,8 @@
     },
     {
       "id": "more-named-recipes",
-      "label": "More named recipes",
-      "description": "More current and past Spartan combinations available as kit choices.",
+      "label": "Special-menu recipes",
+      "description": "Recipes from featured Spartan special menus remain available as kit choices.",
       "items": [
         "Tennessee Orange",
         "I’m Not Pretty",
