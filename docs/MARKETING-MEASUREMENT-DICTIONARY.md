@@ -104,7 +104,7 @@ Every first-party event should have:
 - `amount_minor` and ISO currency when applicable
 - versioned, allowlisted metadata only
 
-Store timestamps in UTC and preserve the provider/source timestamp. Enforce uniqueness on `(source_system, source_event_id)`, not `(contact_id, event_type)`, because contacts may resubscribe, purchase repeatedly, receive reversals or correct an identity link.
+Store timestamps in UTC and preserve the provider/source timestamp. Enforce uniqueness on `(source_system, source_event_id, event_type)`, not `(contact_id, event_type)`, because one provider record may truthfully support more than one event type while contacts may resubscribe, purchase repeatedly, receive reversals or correct an identity link.
 
 ### Core first-party events
 
@@ -445,7 +445,7 @@ Do not build custom email/SMS delivery, payment, storefront shipping, multi-tena
 
 ## Data-quality acceptance tests
 
-- `event_id` and `(source_system, source_event_id)` are unique; required fields and event/status enums validate.
+- `event_id` and `(source_system, source_event_id, event_type)` are unique; required fields and event/status enums validate.
 - No orphan contact, referral, order, reward or reversal foreign key exists.
 - No future timestamp exceeds the approved provider-clock tolerance.
 - Each provider import reconciles input/output row counts and reports missing/late source data.

@@ -122,6 +122,87 @@ const DISCOVERY_SOURCE_VALUES = [
   'community_event_local_group',
   'other'
 ];
+const JOURNEY_LEDGER_VERSION = 'spartan-journey-ledger-v1-2026-08-16';
+const JOURNEY_LEDGER_SHEET_SPECS = [
+  {
+    name: 'Identity Links',
+    plainTextHeaders: [
+      'identity_link_id',
+      'link_key',
+      'contact_id',
+      'website_submission_id',
+      'provider_customer_id',
+      'reversal_of_link_id'
+    ],
+    headers: [
+      'identity_link_id',
+      'link_key',
+      'contact_id',
+      'website_submission_id',
+      'provider',
+      'provider_customer_id',
+      'link_status',
+      'match_method',
+      'match_confidence',
+      'effective_at_utc',
+      'verified_at_utc',
+      'recorded_at_utc',
+      'recorded_by',
+      'reversal_of_link_id',
+      'notes'
+    ]
+  },
+  {
+    name: 'Journey Events',
+    plainTextHeaders: [
+      'event_id',
+      'schema_version',
+      'source_event_id',
+      'import_batch_id',
+      'idempotency_key',
+      'contact_id',
+      'identity_link_id',
+      'website_submission_id',
+      'coupon_code',
+      'square_customer_id',
+      'square_payment_id',
+      'square_order_id',
+      'square_location_id',
+      'discount_catalog_object_id',
+      'reversal_of_event_id'
+    ],
+    headers: [
+      'event_id',
+      'schema_version',
+      'event_type',
+      'event_status',
+      'occurred_at_utc',
+      'received_at_utc',
+      'source_system',
+      'source_event_id',
+      'import_batch_id',
+      'idempotency_key',
+      'contact_id',
+      'identity_link_id',
+      'website_submission_id',
+      'coupon_code',
+      'square_customer_id',
+      'square_payment_id',
+      'square_order_id',
+      'square_location_id',
+      'discount_catalog_object_id',
+      'discount_name',
+      'discount_amount_minor',
+      'net_amount_minor',
+      'currency',
+      'match_method',
+      'match_confidence',
+      'recorded_by',
+      'reversal_of_event_id',
+      'notes'
+    ]
+  }
+];
 const RETRYABLE_PROVIDER_STATUSES = [
   'pending',
   'failed',
@@ -784,6 +865,270 @@ function getLeadSheet_() {
     throw new Error('The configured lead Sheet tab was not found.');
   }
   return configuredSheet;
+}
+
+function getJourneyLedgerSetupConfig_() {
+  const properties = PropertiesService.getScriptProperties();
+  const spreadsheetId = cleanText_(properties.getProperty('SPREADSHEET_ID'), 200);
+  const configuredSheetName = cleanText_(properties.getProperty('SHEET_NAME'), 100);
+
+  if (!spreadsheetId || !configuredSheetName) {
+    throw new Error('SPREADSHEET_ID and SHEET_NAME are required.');
+  }
+
+  const spreadsheet = SpreadsheetApp.openById(spreadsheetId);
+  const configuredSheet = spreadsheet.getSheetByName(configuredSheetName);
+  if (!configuredSheet) {
+    throw new Error('The configured lead Sheet tab was not found.');
+  }
+
+  const historicHeaders = configuredSheet
+    .getRange(1, 1, 1, HISTORIC_HEADERS.length)
+    .getValues()[0];
+  const historicHeadersMatch = HISTORIC_HEADERS.every(
+    (header, index) => historicHeaders[index] === header
+  );
+  if (!historicHeadersMatch) {
+    throw new Error('The configured lead Sheet tab does not match the historic header contract.');
+  }
+
+  return { spreadsheet, configuredSheetName };
+}
+
+function getJourneyLedgerNameMatches_(spreadsheet, expectedName) {
+  const normalizedExpectedName = expectedName.trim().toLowerCase();
+  return spreadsheet.getSheets().filter(
+    sheet => String(sheet.getName()).trim().toLowerCase() === normalizedExpectedName
+  );
+}
+
+function inspectJourneyLedgerSheet_(spreadsheet, spec) {
+  const nameMatches = getJourneyLedgerNameMatches_(spreadsheet, spec.name);
+  if (nameMatches.length > 1 || (nameMatches.length === 1 && nameMatches[0].getName() !== spec.name)) {
+    return {
+      spec,
+      sheet: null,
+      state: 'name_conflict',
+      issue: 'case-insensitive tab-name conflict',
+      dataRowCount: 0
+    };
+  }
+
+  const sheet = nameMatches[0] || null;
+  if (!sheet) return { spec, sheet: null, state: 'missing', issue: '', dataRowCount: 0 };
+
+  const lastRow = sheet.getLastRow();
+  const lastColumn = sheet.getLastColumn();
+  if (lastRow === 0 && lastColumn === 0) {
+    return { spec, sheet, state: 'blank', issue: '', dataRowCount: 0 };
+  }
+
+  const inspectedColumnCount = Math.max(lastColumn, spec.headers.length);
+  const headerRange = sheet.getRange(1, 1, 1, inspectedColumnCount);
+  const observedHeaders = headerRange.getValues()[0];
+  const usedRangeFormulas = sheet
+    .getRange(1, 1, lastRow, Math.max(1, lastColumn))
+    .getFormulas();
+  const containsFormula = usedRangeFormulas.some(
+    row => row.some(formula => Boolean(formula))
+  );
+  const nonblankHeaders = observedHeaders.filter(header => String(header) !== '');
+  const duplicateHeaders = nonblankHeaders.filter(
+    (header, index) => nonblankHeaders.indexOf(header) !== index
+  );
+  const headersMatch = lastColumn === spec.headers.length && spec.headers.every(
+    (header, index) => observedHeaders[index] === header
+  );
+  let state = 'verified';
+  let issue = '';
+
+  if (containsFormula) {
+    state = 'formula_content';
+    issue = 'formula found in ledger tab';
+  } else if (duplicateHeaders.length) {
+    state = 'duplicate_headers';
+    issue = 'duplicate header found';
+  } else if (!headersMatch) {
+    state = 'mismatch';
+    issue = 'header mismatch';
+  } else if (lastRow > 1) {
+    state = 'nonempty';
+    issue = 'ledger tab contains data rows';
+  }
+
+  const exactHeaderRange = sheet.getRange(1, 1, 1, spec.headers.length);
+  const headerRowBold = exactHeaderRange.getFontWeights()[0]
+    .every(weight => weight === 'bold');
+  const maxRows = sheet.getMaxRows();
+  const plainTextColumnsReady = spec.plainTextHeaders.every(header => {
+    const column = spec.headers.indexOf(header) + 1;
+    return sheet.getRange(1, column, maxRows, 1)
+      .getNumberFormats()
+      .every(row => row[0] === '@');
+  });
+
+  return {
+    spec,
+    sheet,
+    state,
+    issue,
+    dataRowCount: Math.max(0, lastRow - 1),
+    headerRowBold,
+    frozenHeaderRows: sheet.getFrozenRows(),
+    plainTextColumnsReady
+  };
+}
+
+function ensureJourneyLedgerFormat_(sheet, spec) {
+  let changeCount = 0;
+  const headerRange = sheet.getRange(1, 1, 1, spec.headers.length);
+  const currentWeights = headerRange.getFontWeights()[0];
+  if (currentWeights.some(weight => weight !== 'bold')) {
+    headerRange.setFontWeight('bold');
+    changeCount += 1;
+  }
+  if (sheet.getFrozenRows() !== 1) {
+    sheet.setFrozenRows(1);
+    changeCount += 1;
+  }
+  const maxRows = sheet.getMaxRows();
+  spec.plainTextHeaders.forEach(header => {
+    const column = spec.headers.indexOf(header) + 1;
+    const columnRange = sheet.getRange(1, column, maxRows, 1);
+    const formats = columnRange.getNumberFormats();
+    if (formats.some(row => row[0] !== '@')) {
+      columnRange.setNumberFormat('@');
+      changeCount += 1;
+    }
+  });
+  return changeCount;
+}
+
+function summarizeJourneyLedgerInspection_(inspection) {
+  return {
+    sheet_name: inspection.spec.name,
+    state: inspection.state,
+    issue: inspection.issue || '',
+    header_count: inspection.spec.headers.length,
+    data_row_count: inspection.dataRowCount,
+    empty: inspection.dataRowCount === 0,
+    header_row_bold: Boolean(inspection.headerRowBold),
+    frozen_header_rows: inspection.frozenHeaderRows || 0,
+    plain_text_id_columns: Boolean(inspection.plainTextColumnsReady)
+  };
+}
+
+/**
+ * Owner-run read-only diagnostic. It does not create, format or protect tabs,
+ * and it never reads or returns lead-row contents.
+ */
+function diagnoseJourneyLedgerSetup() {
+  const config = getJourneyLedgerSetupConfig_();
+  const inspections = JOURNEY_LEDGER_SHEET_SPECS.map(
+    spec => inspectJourneyLedgerSheet_(config.spreadsheet, spec)
+  );
+  const sheets = inspections.map(summarizeJourneyLedgerInspection_);
+  const ready = sheets.every(
+    sheet => sheet.state === 'verified'
+      && sheet.header_row_bold
+      && sheet.frozen_header_rows === 1
+      && sheet.plain_text_id_columns
+  );
+  const result = {
+    ledger_version: JOURNEY_LEDGER_VERSION,
+    configured_lead_sheet: config.configuredSheetName,
+    ready,
+    read_only: true,
+    writes_to_lead_sheet: 0,
+    journey_rows_appended: 0,
+    sheets
+  };
+  console.log(JSON.stringify(result));
+  return result;
+}
+
+/**
+ * Owner-run, repeat-safe setup and diagnostic for the restricted Project 2
+ * ledger foundation. It creates or verifies only the two reviewed ledger tabs.
+ * It never edits the configured lead tab and never appends identity or journey
+ * data. Both existing ledger tabs are preflighted before either is changed, so
+ * a nonblank header mismatch fails without a partial setup.
+ */
+function setupJourneyLedgerSheets() {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(LOCK_TIMEOUT_MS);
+
+  try {
+    const config = getJourneyLedgerSetupConfig_();
+    const plans = JOURNEY_LEDGER_SHEET_SPECS.map(
+      spec => inspectJourneyLedgerSheet_(config.spreadsheet, spec)
+    );
+    const rejectedStates = [
+      'name_conflict',
+      'formula_content',
+      'duplicate_headers',
+      'mismatch',
+      'nonempty'
+    ];
+    const rejectedPlans = plans.filter(plan => rejectedStates.includes(plan.state));
+
+    if (rejectedPlans.length) {
+      const problems = rejectedPlans.map(plan => `${plan.spec.name} (${plan.issue})`);
+      throw new Error(`Journey ledger preflight failed: ${problems.join(', ')}.`);
+    }
+
+    let headerWriteCount = 0;
+    let formatChangeCount = 0;
+    const sheetResults = plans.map(plan => {
+      let sheet = plan.sheet;
+      let state = plan.state;
+
+      if (state === 'missing') {
+        sheet = config.spreadsheet.insertSheet(plan.spec.name);
+        state = 'created';
+      } else if (state === 'blank') {
+        state = 'initialized';
+      }
+
+      if (state === 'created' || state === 'initialized') {
+        sheet.getRange(1, 1, 1, plan.spec.headers.length)
+          .setValues([plan.spec.headers]);
+        headerWriteCount += 1;
+      }
+      formatChangeCount += ensureJourneyLedgerFormat_(sheet, plan.spec);
+
+      return {
+        sheet_name: plan.spec.name,
+        state,
+        header_count: plan.spec.headers.length,
+        data_row_count: plan.dataRowCount,
+        empty: plan.dataRowCount === 0,
+        header_row_bold: true,
+        frozen_header_rows: 1,
+        plain_text_id_columns: true
+      };
+    });
+
+    const result = {
+      ledger_version: JOURNEY_LEDGER_VERSION,
+      configured_lead_sheet: config.configuredSheetName,
+      ready: true,
+      created_count: sheetResults.filter(result => result.state === 'created').length,
+      initialized_count: sheetResults.filter(result => result.state === 'initialized').length,
+      verified_count: sheetResults.filter(result => result.state === 'verified').length,
+      header_write_count: headerWriteCount,
+      format_change_count: formatChangeCount,
+      write_operation_count: headerWriteCount + formatChangeCount,
+      protection_change_count: 0,
+      writes_to_lead_sheet: 0,
+      journey_rows_appended: 0,
+      sheets: sheetResults
+    };
+    console.log(JSON.stringify(result));
+    return result;
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function getOwnerNotificationConfig_() {

@@ -65,6 +65,22 @@ Open **Apps Script -> Project settings -> Script properties** and set:
 
 Both Sheet properties are mandatory. There is no active-spreadsheet or first-tab fallback. The handler also refuses to write unless the configured tab's first five header cells exactly match the historical schema. Public visitors receive only a generic error when either safety check fails.
 
+## Project 2 journey-ledger foundation
+
+`diagnoseJourneyLedgerSetup()` is an owner-run, read-only check for the two reviewed header-only tabs: `Identity Links` and `Journey Events`. It reports their exact-name, header, empty-state and formatting readiness without returning lead data or changing the workbook.
+
+`setupJourneyLedgerSheets()` is the corresponding repeat-safe initializer. It uses the same required `SPREADSHEET_ID` and `SHEET_NAME`, validates the historic lead-tab contract read-only, and then creates or initializes only the two reviewed ledger tabs. It never calls `ensureHeaders_()`, adds columns to the lead tab, appends a contact/event, changes consent/provider state, or changes spreadsheet sharing.
+
+Safety behavior:
+
+- Both tab states pass preflight before either missing tab is created.
+- Only an exact-name, truly blank existing tab can be initialized.
+- A case-insensitive look-alike name, formula, data row, duplicate/reordered header, extra header cell or other mismatch throws without overwriting anything.
+- Header row 1 is exact, bold and frozen; identifier/key/code columns are plain text.
+- A second successful setup performs zero header or formatting writes.
+
+The current workbook is private and owner-only. This initializer does not attempt to remove editors or alter recovery access. Explicit per-tab protection is deferred until its access effect can be verified safely. Follow the controlled-proof and activation gates in `../docs/SQUARE-JOURNEY-PILOT.md`; merely creating these empty tabs does not authorize journey imports.
+
 ## Owner submission notifications
 
 Website rows are created by the deployed Apps Script, so Google Sheet edit alerts and linked-Google-Form response rules are not a reliable notification mechanism for this flow. The handler instead records `owner_notification_status=pending` on every newly appended coupon or email-signup row. Duplicate contacts and exact retries that add no row also add no owner alert.
