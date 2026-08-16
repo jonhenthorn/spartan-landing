@@ -7,6 +7,10 @@
   const couponFormStep = document.querySelector("[data-coupon-form-step]");
   const couponResult = document.querySelector("[data-coupon-result]");
   const couponCode = document.querySelector("[data-coupon-code]");
+  const couponResultEyebrow = document.querySelector("[data-coupon-result-eyebrow]");
+  const couponResultTitle = document.querySelector("[data-coupon-result-title]");
+  const couponStateNotice = document.querySelector("[data-coupon-state-notice]");
+  const couponResultInstruction = document.querySelector("[data-coupon-result-instruction]");
   const couponResultMessage = document.querySelector("[data-coupon-result-message]");
   const couponForm = document.getElementById("coupon-form");
   const updatesForm = document.getElementById("updates-form");
@@ -150,10 +154,41 @@
     }
   });
 
-  const showCouponResult = (code = "FIRST-VISIT", message = "") => {
+  const couponResultContent = {
+    success: {
+      eyebrow: "Claim confirmed",
+      title: "Your coupon is ready.",
+      notice: "",
+      instruction: "Save or screenshot this coupon and show it to staff when ordering."
+    },
+    duplicate: {
+      eyebrow: "Existing claim found",
+      title: "You already claimed this offer.",
+      notice: "No new coupon was created.",
+      instruction: "We did not create another coupon. If your original offer has not been redeemed, show this saved coupon to staff."
+    },
+    remembered: {
+      eyebrow: "Saved claim found",
+      title: "Your saved first-visit offer.",
+      notice: "This is your original saved claim—not a new coupon.",
+      instruction: "This is the same one-per-person offer saved on this device—not a new coupon. If it has not been redeemed, show it to staff."
+    }
+  };
+
+  const showCouponResult = (code = "FIRST-VISIT", message = "", state = "success") => {
+    const content = couponResultContent[state] || couponResultContent.success;
     couponFormStep?.setAttribute("hidden", "");
     couponResult?.removeAttribute("hidden");
+    couponResult?.setAttribute("data-coupon-state", state);
+    couponDialog?.setAttribute("aria-labelledby", "coupon-result-title");
     if (couponCode) couponCode.textContent = code;
+    if (couponResultEyebrow) couponResultEyebrow.textContent = content.eyebrow;
+    if (couponResultTitle) couponResultTitle.textContent = content.title;
+    if (couponStateNotice) {
+      couponStateNotice.textContent = content.notice;
+      couponStateNotice.hidden = !content.notice;
+    }
+    if (couponResultInstruction) couponResultInstruction.textContent = content.instruction;
     if (couponResultMessage) {
       couponResultMessage.textContent = message;
       couponResultMessage.hidden = !message;
@@ -163,6 +198,7 @@
   const showCouponForm = () => {
     couponResult?.setAttribute("hidden", "");
     couponFormStep?.removeAttribute("hidden");
+    couponDialog?.setAttribute("aria-labelledby", "coupon-title");
   };
 
   const focusCouponResult = () => {
@@ -183,7 +219,7 @@
     }
 
     if (rememberedCode) {
-      showCouponResult(rememberedCode);
+      showCouponResult(rememberedCode, "", "remembered");
     } else {
       showCouponForm();
     }
@@ -422,9 +458,6 @@
 
   const couponConfirmationMessage = (couponStatus, updatesResult) => {
     const messages = [];
-    if (couponStatus === "duplicate") {
-      messages.push("We found your existing first-visit offer, so no duplicate claim was added.");
-    }
     if (updatesResult === "requested") {
       messages.push("Check your inbox and confirm your email to finish joining Spartan Updates.");
     } else if (updatesResult === "pending") {
@@ -445,7 +478,11 @@
     } catch (error) {
       // A confirmed coupon must remain visible even when storage is blocked.
     }
-    showCouponResult(safeCode, couponConfirmationMessage(couponStatus, updatesResult));
+    showCouponResult(
+      safeCode,
+      couponConfirmationMessage(couponStatus, updatesResult),
+      couponStatus === "duplicate" ? "duplicate" : "success"
+    );
     if (!couponDialog?.open) couponDialog?.showModal();
     focusCouponResult();
     document.body.classList.add("dialog-open");

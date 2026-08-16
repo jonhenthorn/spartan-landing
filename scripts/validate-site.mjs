@@ -196,7 +196,17 @@ const selectionCounts = new Map([
   ["more-named-recipes", 46]
 ]);
 
-assert.equal(megaTeaKits.title, "Mega Tea Kits Sold Here");
+assert.equal(megaTeaKits.title, "Choose your take-home tea.");
+assert.equal(megaTeaKits.toGoTea.title, "$5 To-Go Tea");
+assert.equal(megaTeaKits.toGoTea.basePrice, 5);
+assert.deepEqual(megaTeaKits.toGoTea.baseChoices, [
+  "Chai",
+  "Lemon",
+  "Peach",
+  "Raspberry",
+  "Sweet Ginger"
+]);
+assert.equal(megaTeaKits.toGoTea.optionalLiftoffPrice, 3.25);
 assert.equal(megaTeaKits.basePrice, 10.75);
 assert.equal(megaTeaKits.orderUrl, "https://cash.app/$spartannutritionok");
 assert.deepEqual(megaTeaKits.fixedBase, [
@@ -239,13 +249,22 @@ const megaTeaKitsBlock = homepage.match(
   /<!-- MEGA_TEA_KITS_DATA_START -->([\s\S]*?)<!-- MEGA_TEA_KITS_DATA_END -->/
 )?.[1];
 assert.ok(megaTeaKitsBlock, "Generated Mega Tea Kits section was not found");
-assert.match(megaTeaKitsBlock, /<h2 id="mega-tea-kits-title">Mega Tea Kits Sold Here<\/h2>/);
+assert.match(megaTeaKitsBlock, /Tea concentrate choices:/);
+assert.match(megaTeaKitsBlock, /<h2 id="mega-tea-kits-title">Choose your take-home tea\.<\/h2>/);
+assert.match(megaTeaKitsBlock, /<h3>Mega Tea Kits Sold Here<\/h3>/);
 assert.match(megaTeaKitsBlock, /Then choose exactly one of 112 build-your-own or named-tea options\./);
 assert.match(megaTeaKitsBlock, /data-track="mega_tea_kit_order_click"/);
 assert.match(megaTeaKitsBlock, /data-track="mega_tea_kit_call_click"/);
+assert.match(megaTeaKitsBlock, /id="to-go-teas" data-track-view="to_go_tea_view"/);
+assert.match(megaTeaKitsBlock, /data-track="to_go_tea_order_click" data-track-location="to_go_tea"/);
+assert.match(megaTeaKitsBlock, /data-track="to_go_tea_call_click" data-track-location="to_go_tea"/);
+assert.match(megaTeaKitsBlock, /A simple single-serving tea to mix when you’re ready./);
 assert.match(homepage, /href="#mega-tea-kits" data-track="mega_tea_kits_view_click"/);
 assert.match(homepage, /What comes in a Mega Tea Kit\?/);
+assert.match(homepage, /What’s the difference between a To-Go Tea and a Mega Tea Kit\?/);
 assert.match(homepage, /Mega Tea Kits for pickup/);
+assert.match(homepage, /id="first-visit" data-track-view="first_visit_section_view"/);
+assert.match(homepage, /id="updates" data-track-view="updates_view"/);
 
 const getRenderedMegaGroup = (groupId) => {
   const start = megaTeaKitsBlock.indexOf(`data-mega-kit-group="${groupId}"`);
@@ -280,6 +299,10 @@ const siteScript = await read("assets/site.js");
 new Function(siteScript);
 const siteStyles = await read("assets/site.css");
 assert.match(siteStyles, /\.release-frame img\s*\{[\s\S]*?height: auto;/);
+assert.match(siteStyles, /\.coupon-result img\s*\{[\s\S]*?height: auto;/);
+assert.match(siteStyles, /\.coupon-result \[data-coupon-result-title\]:focus\s*\{[\s\S]*?outline: none;/);
+assert.match(siteStyles, /\.coupon-state-notice\s*\{[\s\S]*?font-weight: 900;/);
+assert.match(siteStyles, /\.coupon-result\[data-coupon-state="duplicate"\] img/);
 assert.match(siteScript, /isPreviewMode/);
 assert.match(siteScript, /window\.gtag\("event", eventName, details\)/);
 assert.match(siteScript, /utm_campaign/);
@@ -320,6 +343,12 @@ assert.match(siteScript, /const attributionReferrer = \(\) =>/);
 assert.match(siteScript, /`\$\{referrer\.origin\}\$\{referrer\.pathname\}`/);
 assert.doesNotMatch(siteScript, /referrer:\s*document\.referrer/);
 assert.match(siteScript, /couponStatus === "success"/);
+assert.match(siteScript, /showCouponResult\(rememberedCode, "", "remembered"\)/);
+assert.match(siteScript, /notice: "No new coupon was created\."/);
+assert.match(siteScript, /notice: "This is your original saved claim—not a new coupon\."/);
+assert.match(siteScript, /couponStatus === "duplicate" \? "duplicate" : "success"/);
+assert.match(siteScript, /You already claimed this offer\./);
+assert.match(siteScript, /same one-per-person offer saved on this device—not a new coupon/);
 assert.match(siteScript, /updatesResult === "requested"/);
 assert.match(siteScript, /updatesResult === "pending"/);
 assert.match(siteScript, /updatesResult === "blocked"/);
@@ -329,6 +358,10 @@ assert.match(siteScript, /email_confirmation_return/);
 assert.doesNotMatch(siteScript, /email_signup_confirmed/);
 assert.match(siteScript, /If confirmation completed successfully/);
 assert.match(homepage, /We’ll email a confirmation link; you join the list only after confirming\./);
+assert.match(homepage, /id="coupon-result-title" tabindex="-1" data-coupon-result-title/);
+assert.match(homepage, /data-coupon-state-notice hidden/);
+assert.match(homepage, /data-track="menu_click" data-track-location="coupon_result"/);
+assert.match(homepage, /data-track="directions_click" data-track-location="coupon_result"/);
 assert.equal(
   (siteScript.match(/callback\(\);/g) || []).length,
   1,
@@ -419,7 +452,8 @@ const rows = [
   [new Date("2025-08-16T10:10:26Z"), "Historic Lead", "(918) 555-0142", "historic@example.com", ""]
 ];
 
-const makeSheet = (sheetRows) => ({
+const makeSheet = (sheetRows, sheetId = 123456) => ({
+  getSheetId: () => sheetId,
   getLastColumn: () => sheetRows[0]?.length || 0,
   getLastRow: () => sheetRows.length,
   getRange(row, column, rowCount, columnCount) {
@@ -442,21 +476,28 @@ const makeSheet = (sheetRows) => ({
 });
 
 const sheet = makeSheet(rows);
+let activeSheet = sheet;
 
 const spreadsheet = {
-  getSheetByName: (name) => name === "spartan leads" ? sheet : null,
-  getSheets: () => [sheet]
+  getSheetByName: (name) => name === "spartan leads" ? activeSheet : null,
+  getSheets: () => [activeSheet]
 };
 
 const scriptProperties = {
   SPREADSHEET_ID: "test-id",
   SHEET_NAME: "spartan leads",
   BREVO_SYNC_ENABLED: "false",
+  OWNER_NOTIFICATION_ENABLED: "false",
+  OWNER_NOTIFICATION_EMAIL: "owner@example.com",
   LEGACY_GET_UNTIL: "2099-09-10T00:00:00.000Z"
 };
 const brevoRequests = [];
+const ownerNotificationMails = [];
+const ownerNotificationTriggers = [];
 let uuidCounter = 0;
 let brevoResponseCode = 201;
+let ownerNotificationMailShouldFail = false;
+let ownerNotificationMailHook = null;
 
 const context = {
   console: { error: () => {}, log: () => {} },
@@ -476,6 +517,32 @@ const context = {
   },
   Utilities: {
     getUuid: () => `${(++uuidCounter).toString(16).padStart(8, "0")}-abcd-4000-8000-000000000000`
+  },
+  MailApp: {
+    getRemainingDailyQuota: () => 100,
+    sendEmail: (message) => {
+      if (ownerNotificationMailShouldFail) throw new Error("test mail failure");
+      ownerNotificationMails.push(message);
+      if (ownerNotificationMailHook) ownerNotificationMailHook(message);
+    }
+  },
+  ScriptApp: {
+    getProjectTriggers: () => Array.from(ownerNotificationTriggers),
+    deleteTrigger: (trigger) => {
+      const index = ownerNotificationTriggers.indexOf(trigger);
+      if (index >= 0) ownerNotificationTriggers.splice(index, 1);
+    },
+    newTrigger: (handler) => {
+      const trigger = {
+        handler,
+        minutes: 0,
+        getHandlerFunction: () => handler,
+        timeBased() { return this; },
+        everyMinutes(minutes) { this.minutes = minutes; return this; },
+        create() { ownerNotificationTriggers.push(this); return this; }
+      };
+      return trigger;
+    }
   },
   HtmlService: {
     createHtmlOutput: (html) => ({ html })
@@ -555,8 +622,9 @@ assert.equal(rows.at(-1)[indexOf("coupon_redemption_status")], "not_recorded");
 assert.equal(rows.at(-1)[indexOf("submission_method")], "website_post");
 assert.equal(rows.at(-1)[indexOf("submission_id")], "validation-p1");
 assert.equal(rows.at(-1)[indexOf("handler_version")], "spartan-forms-v3.2-2026-08-15");
+assert.equal(rows.at(-1)[indexOf("owner_notification_status")], "pending");
 assert.deepEqual(rows[0].slice(0, 5), ["timestamp", "name", "phone", "email", "source_ip"]);
-assert.equal(rows[0].length, 34);
+assert.equal(rows[0].length, 37);
 
 const countBeforeP1Retry = rows.length;
 const p1Retry = submit(p1Parameters);
@@ -718,6 +786,8 @@ assert.deepEqual(JSON.parse(healthResponse.text), {
   form_contract_version: "spartan-form-contract-v3-2026-08-10",
   worker_form_contract_version: "spartan-worker-form-v1-2026-08-15",
   worker_json_configured: false,
+  owner_notification_version: "spartan-owner-notifications-v1-2026-08-16",
+  owner_notifications_configured: false,
   consent_version: "email-updates-v1-2026-07-31",
   legacy_get_compatibility: true,
   legacy_get_state: "enabled",
@@ -820,8 +890,270 @@ rows[0][0] = originalFirstHeader;
 const customRows = [["timestamp", "name", "phone", "email", "source_ip", "owner_note"]];
 const customHeaders = context.ensureHeaders_(makeSheet(customRows));
 assert.deepEqual(customRows[0].slice(0, 6), ["timestamp", "name", "phone", "email", "source_ip", "owner_note"]);
-assert.equal(Array.from(customHeaders).length, 35);
-assert.equal(customRows[0].at(-1), "email_provider_error");
+assert.equal(Array.from(customHeaders).length, 38);
+assert.equal(customRows[0].at(-1), "owner_notification_sent_at");
+
+const notificationRows = [["timestamp", "name", "phone", "email", "source_ip"]];
+const notificationSheet = makeSheet(notificationRows, 24680);
+activeSheet = notificationSheet;
+scriptProperties.OWNER_NOTIFICATION_ENABLED = "true";
+assert.equal(context.authorizeOwnerNotificationMailAccess().message_sent, false);
+assert.equal(ownerNotificationMails.length, 0);
+
+scriptProperties.SHEET_NAME = "missing tab";
+const missingSheetDiagnostic = context.diagnoseOwnerNotifications();
+assert.equal(missingSheetDiagnostic.properties_complete, true);
+assert.equal(missingSheetDiagnostic.sheet_tab_found, false);
+assert.equal(missingSheetDiagnostic.configuration_valid, false);
+assert.equal(missingSheetDiagnostic.sheet_resolution, "sheet_not_found");
+assert.equal(missingSheetDiagnostic.sheet_url, "");
+assert.equal(missingSheetDiagnostic.queue, null);
+assert.throws(
+  () => context.processPendingOwnerNotifications(),
+  /Script Properties are invalid/
+);
+assert.throws(
+  () => context.installOwnerNotificationTrigger(),
+  /Script Properties must be complete and enabled/
+);
+scriptProperties.SHEET_NAME = "spartan leads";
+
+const configuredDiagnostic = context.diagnoseOwnerNotifications();
+assert.equal(configuredDiagnostic.delivery_enabled, true);
+assert.equal(configuredDiagnostic.properties_complete, true);
+assert.equal(configuredDiagnostic.sheet_tab_found, true);
+assert.equal(configuredDiagnostic.configuration_valid, true);
+assert.equal(configuredDiagnostic.sheet_resolution, "ready");
+assert.equal(
+  configuredDiagnostic.sheet_url,
+  "https://docs.google.com/spreadsheets/d/test-id/edit#gid=24680"
+);
+assert.equal(configuredDiagnostic.current_account_trigger_count, 0);
+assert.equal(configuredDiagnostic.current_account_trigger_present, false);
+assert.equal(configuredDiagnostic.operational, false);
+
+context.ScriptApp.newTrigger("unrelatedWorker").timeBased().everyMinutes(30).create();
+const firstTriggerInstall = context.installOwnerNotificationTrigger();
+const secondTriggerInstall = context.installOwnerNotificationTrigger();
+const ownerTriggers = ownerNotificationTriggers.filter(
+  (trigger) => trigger.getHandlerFunction() === "processPendingOwnerNotifications"
+);
+assert.equal(ownerNotificationTriggers.length, 2, "Installer must preserve unrelated current-account triggers");
+assert.equal(ownerTriggers.length, 1, "Trigger installation must not create owner-alert duplicates");
+assert.equal(ownerTriggers[0].minutes, 15);
+assert.equal(firstTriggerInstall.current_account_trigger_count, 1);
+assert.equal(secondTriggerInstall.removed_current_account_trigger_count, 1);
+assert.equal(secondTriggerInstall.current_account_trigger_count, 1);
+const operationalDiagnostic = context.diagnoseOwnerNotifications();
+assert.equal(operationalDiagnostic.current_account_trigger_count, 1);
+assert.equal(operationalDiagnostic.current_account_trigger_present, true);
+assert.equal(operationalDiagnostic.operational, true);
+
+const notificationCouponParameters = {
+  record_type: "coupon_claim",
+  submission_id: "validation-owner-alert-coupon",
+  name: "Owner Alert Test",
+  phone: "918-555-0177",
+  email: "owner-alert-test@example.com"
+};
+assert.match(submit(notificationCouponParameters).html, /coupon=success/);
+const notificationIndexOf = (header) => notificationRows[0].indexOf(header);
+assert.equal(notificationRows.at(-1)[notificationIndexOf("owner_notification_status")], "pending");
+const notificationCouponRowCount = notificationRows.length;
+assert.match(submit(notificationCouponParameters).html, /coupon=duplicate/);
+assert.equal(notificationRows.length, notificationCouponRowCount, "Exact retry must not queue another owner alert");
+
+assert.match(submit({
+  record_type: "coupon_claim",
+  submission_id: "validation-owner-alert-coupon-consent",
+  name: "Coupon Consent Test",
+  phone: "918-555-0178",
+  email: "coupon-consent-test@example.com",
+  email_consent: "yes"
+}).html, /coupon=success/);
+assert.match(submit({
+  ...notificationCouponParameters,
+  submission_id: "validation-owner-alert-repeat-consent",
+  email_consent: "yes"
+}).html, /coupon=duplicate/);
+assert.match(submit({
+  record_type: "email_signup",
+  submission_id: "validation-owner-alert-email-consent",
+  name: "Email Consent Test",
+  email: "email-consent-test@example.com",
+  email_consent: "yes"
+}).html, /updates=pending/);
+
+const sentOwnerSummary = context.processPendingOwnerNotifications();
+assert.equal(sentOwnerSummary.state, "sent");
+assert.equal(sentOwnerSummary.claimed, 4);
+assert.equal(sentOwnerSummary.coupon_claims, 2);
+assert.equal(sentOwnerSummary.email_consent_grants, 3);
+assert.equal(sentOwnerSummary.finalized, 4);
+assert.equal(sentOwnerSummary.mail_call_completed, true);
+assert.equal(sentOwnerSummary.sent, true);
+assert.equal(ownerNotificationMails.length, 1);
+assert.equal(ownerNotificationMails[0].to, "owner@example.com");
+assert.match(ownerNotificationMails[0].subject, /4 new submissions/);
+assert.match(ownerNotificationMails[0].body, /First-drink coupon claims: 2/);
+assert.match(ownerNotificationMails[0].body, /Rows with granted email consent: 3/);
+assert.match(ownerNotificationMails[0].body, /Total saved rows in this alert: 4/);
+assert.match(ownerNotificationMails[0].body, /docs\.google\.com\/spreadsheets\/d\/test-id\/edit#gid=24680/);
+assert.doesNotMatch(ownerNotificationMails[0].body, /repeat.claim/i);
+assert.doesNotMatch(
+  ownerNotificationMails[0].body,
+  /Owner Alert Test|Coupon Consent Test|Email Consent Test|918-555-017[78]|(?:owner-alert|coupon-consent|email-consent)-test@example\.com/
+);
+notificationRows.slice(1).forEach((row) => {
+  assert.equal(row[notificationIndexOf("owner_notification_status")], "sent");
+  assert.ok(row[notificationIndexOf("owner_notification_attempted_at")] instanceof Date);
+  assert.ok(row[notificationIndexOf("owner_notification_sent_at")] instanceof Date);
+});
+assert.equal(context.processPendingOwnerNotifications().state, "idle");
+assert.equal(ownerNotificationMails.length, 1, "An idle worker must not send an email");
+
+assert.match(submit({
+  record_type: "email_signup",
+  submission_id: "validation-owner-alert-email",
+  name: "Email Alert Test",
+  email: "email-alert-test@example.com",
+  email_consent: "yes"
+}).html, /updates=pending/);
+ownerNotificationMailShouldFail = true;
+assert.throws(() => context.processPendingOwnerNotifications(), /test mail failure/);
+ownerNotificationMailShouldFail = false;
+assert.equal(notificationRows.at(-1)[notificationIndexOf("owner_notification_status")], "failed");
+assert.equal(ownerNotificationMails.length, 1, "A failed batch must not be recorded as another sent mail");
+const transientFailureRow = notificationRows.at(-1);
+notificationRows.push(notificationRows[0].map((header) => ({
+  submission_id: "validation-owner-alert-ambiguous",
+  record_type: "email_signup",
+  email_consent_status: "granted",
+  tags: "email_updates,website_signup",
+  owner_notification_status: "attempting"
+})[header] ?? ""));
+const ambiguousRow = notificationRows.at(-1);
+const requeueResult = context.requeueFailedOwnerNotifications();
+assert.deepEqual(JSON.parse(JSON.stringify(requeueResult)), {
+  requeued: 1,
+  remaining_failed: 0,
+  limit: 50
+});
+assert.equal(transientFailureRow[notificationIndexOf("owner_notification_status")], "pending");
+assert.equal(ambiguousRow[notificationIndexOf("owner_notification_status")], "attempting");
+const recoveredOwnerSummary = context.processPendingOwnerNotifications();
+assert.equal(recoveredOwnerSummary.state, "sent");
+assert.equal(recoveredOwnerSummary.claimed, 1);
+assert.equal(recoveredOwnerSummary.finalized, 1);
+assert.equal(ownerNotificationMails.length, 2);
+assert.equal(ambiguousRow[notificationIndexOf("owner_notification_status")], "attempting");
+assert.equal(context.processPendingOwnerNotifications().state, "idle");
+
+const boundedRecoveryRows = [Array.from(notificationRows[0])];
+const boundedRecoveryIndexOf = (header) => boundedRecoveryRows[0].indexOf(header);
+for (let index = 0; index < 51; index += 1) {
+  boundedRecoveryRows.push(boundedRecoveryRows[0].map((header) => ({
+    submission_id: `validation-owner-recovery-${index}`,
+    record_type: "email_signup",
+    email_consent_status: "granted",
+    tags: "email_updates,website_signup",
+    owner_notification_status: "failed"
+  })[header] ?? ""));
+}
+boundedRecoveryRows.push(boundedRecoveryRows[0].map((header) => ({
+  submission_id: "validation-owner-recovery-ambiguous",
+  record_type: "email_signup",
+  email_consent_status: "granted",
+  tags: "email_updates,website_signup",
+  owner_notification_status: "attempting"
+})[header] ?? ""));
+activeSheet = makeSheet(boundedRecoveryRows, 24681);
+const boundedRecovery = context.requeueFailedOwnerNotifications();
+assert.equal(boundedRecovery.requeued, 50);
+assert.equal(boundedRecovery.remaining_failed, 1);
+assert.equal(boundedRecovery.limit, 50);
+assert.equal(
+  boundedRecoveryRows.slice(1).filter(
+    (row) => row[boundedRecoveryIndexOf("owner_notification_status")] === "pending"
+  ).length,
+  50
+);
+assert.equal(
+  boundedRecoveryRows.slice(1).filter(
+    (row) => row[boundedRecoveryIndexOf("owner_notification_status")] === "failed"
+  ).length,
+  1
+);
+assert.equal(
+  boundedRecoveryRows.slice(1).filter(
+    (row) => row[boundedRecoveryIndexOf("owner_notification_status")] === "attempting"
+  ).length,
+  1
+);
+
+const boundedWorkerRows = [Array.from(notificationRows[0])];
+const boundedWorkerIndexOf = (header) => boundedWorkerRows[0].indexOf(header);
+for (let index = 0; index < 51; index += 1) {
+  boundedWorkerRows.push(boundedWorkerRows[0].map((header) => ({
+    submission_id: `validation-owner-worker-${index}`,
+    record_type: "email_signup",
+    email_consent_status: "granted",
+    tags: "email_updates,website_signup",
+    owner_notification_status: "pending"
+  })[header] ?? ""));
+}
+activeSheet = makeSheet(boundedWorkerRows, 24682);
+ownerNotificationMails.length = 0;
+const firstBoundedWorkerSummary = context.processPendingOwnerNotifications();
+assert.equal(firstBoundedWorkerSummary.claimed, 50);
+assert.equal(firstBoundedWorkerSummary.email_consent_grants, 50);
+assert.equal(firstBoundedWorkerSummary.finalized, 50);
+assert.equal(
+  boundedWorkerRows.slice(1).filter(
+    (row) => row[boundedWorkerIndexOf("owner_notification_status")] === "pending"
+  ).length,
+  1
+);
+const secondBoundedWorkerSummary = context.processPendingOwnerNotifications();
+assert.equal(secondBoundedWorkerSummary.claimed, 1);
+assert.equal(secondBoundedWorkerSummary.finalized, 1);
+assert.equal(ownerNotificationMails.length, 2);
+
+const finalizationMismatchRows = [
+  Array.from(notificationRows[0]),
+  notificationRows[0].map((header) => ({
+    submission_id: "validation-owner-finalize-mismatch",
+    record_type: "email_signup",
+    email_consent_status: "granted",
+    tags: "email_updates,website_signup",
+    owner_notification_status: "pending"
+  })[header] ?? "")
+];
+const finalizationMismatchIndexOf = (header) => finalizationMismatchRows[0].indexOf(header);
+activeSheet = makeSheet(finalizationMismatchRows, 24683);
+ownerNotificationMails.length = 0;
+ownerNotificationMailHook = () => {
+  finalizationMismatchRows[1][finalizationMismatchIndexOf("owner_notification_status")] = "pending";
+};
+assert.throws(
+  () => context.processPendingOwnerNotifications(),
+  /finalization was incomplete \(0\/1\)/
+);
+ownerNotificationMailHook = null;
+const quarantinedMismatchRow = finalizationMismatchRows.find(
+  (row) => row[finalizationMismatchIndexOf("submission_id")] === "validation-owner-finalize-mismatch"
+);
+assert.ok(quarantinedMismatchRow);
+assert.equal(quarantinedMismatchRow[finalizationMismatchIndexOf("owner_notification_status")], "attempting");
+assert.equal(quarantinedMismatchRow[finalizationMismatchIndexOf("owner_notification_sent_at")], "");
+assert.equal(ownerNotificationMails.length, 1);
+const mismatchFollowup = context.processPendingOwnerNotifications();
+assert.equal(mismatchFollowup.state, "idle");
+assert.equal(mismatchFollowup.sent, false);
+assert.equal(ownerNotificationMails.length, 1, "An ambiguous attempting row must not be sent again");
+
+activeSheet = sheet;
+scriptProperties.OWNER_NOTIFICATION_ENABLED = "false";
 
 scriptProperties.BREVO_API_KEY = "test-api-key";
 scriptProperties.BREVO_LIST_ID = "42";

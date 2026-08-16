@@ -2,7 +2,7 @@
 
 This Google Apps Script is the Sheet-backed service for Spartan Nutrition's first-drink offer and permission-based email signup. It preserves the existing Sheet's five historical columns, records auditable consent evidence, and asks Brevo to send a double-opt-in confirmation only for a new affirmative email request. Version 3.2 also supports the authenticated same-origin Cloudflare Worker in `../worker/`, so a confirmed coupon can appear on the Spartan page without an extra Google Saved-page click.
 
-The Sheet is the evidence record for website submissions. Brevo remains responsible for confirmation delivery, list membership, unsubscribes, and suppression. A Brevo failure never erases a successful Sheet write or turns the public form response into a false failure.
+The Sheet is the evidence record for website submissions. Brevo remains responsible for confirmation delivery, list membership, unsubscribes, and suppression. A separate counts-only owner alert queue reports newly saved rows without putting customer details into email. A Brevo or owner-alert failure never erases a successful Sheet write or turns the public form response into a false failure.
 
 This release does not create SMS permission, import historical contacts, send a marketing campaign, clear a Brevo suppression, or treat a confirmation request as a confirmed subscriber.
 
@@ -18,6 +18,8 @@ Open the deployed `/exec` URL with no lead fields. Before the refreshed website 
   "form_contract_version": "spartan-form-contract-v3-2026-08-10",
   "worker_form_contract_version": "spartan-worker-form-v1-2026-08-15",
   "worker_json_configured": true,
+  "owner_notification_version": "spartan-owner-notifications-v1-2026-08-16",
+  "owner_notifications_configured": true,
   "consent_version": "email-updates-v1-2026-07-31",
   "legacy_get_compatibility": true,
   "legacy_get_state": "enabled",
@@ -33,7 +35,7 @@ Open the deployed `/exec` URL with no lead fields. Before the refreshed website 
 - `missing_cutoff`: the property is absent or blank.
 - `invalid_cutoff`: the value is not the required UTC ISO format.
 
-`worker_json_configured` proves only that a secret of the minimum length exists in Apps Script Properties; it never reveals the secret. Health proves which handler answers the endpoint. It does not prove that a POST reaches the intended Sheet, that the Worker secret matches, that Brevo can deliver the confirmation message, or that the browser result flow works.
+`worker_json_configured` proves only that a secret of the minimum length exists in Apps Script Properties; it never reveals the secret. `owner_notifications_configured` means owner delivery is enabled, the required properties are complete, and the exact configured `SHEET_NAME` tab currently resolves. It does not prove that the current account owns an operational trigger; use `diagnoseOwnerNotifications()` for that. Health proves which handler answers the endpoint. It does not prove that a POST reaches the intended Sheet, that the Worker secret matches, that Brevo can deliver the confirmation message, or that the browser result flow works.
 
 ### Verified production snapshot — August 10, 2026
 
@@ -57,8 +59,34 @@ Open **Apps Script -> Project settings -> Script properties** and set:
 - `BREVO_API_KEY`: a server-side Brevo API key. Never place it in GitHub, page code, screenshots, or Sheet cells.
 - `BREVO_LIST_ID`: the positive numeric ID of the dedicated Spartan website opt-in list. Earlier setup identified list ID `3`; verify it in Brevo before deployment.
 - `BREVO_DOI_TEMPLATE_ID`: the positive numeric ID of the active Brevo double-opt-in confirmation template.
+- `OWNER_NOTIFICATION_ENABLED`: leave `false` through code paste, mail authorization, deployment, and the no-send configuration diagnostic. Enable it only for the controlled labeled delivery test and later operation. Only exact `true` enables delivery.
+- `OWNER_NOTIFICATION_EMAIL`: the single owner-controlled mailbox that should receive counts-only submission alerts. Use `bixbynutrition@gmail.com` for the current Spartan business inbox unless ownership changes.
 
 Both Sheet properties are mandatory. There is no active-spreadsheet or first-tab fallback. The handler also refuses to write unless the configured tab's first five header cells exactly match the historical schema. Public visitors receive only a generic error when either safety check fails.
+
+## Owner submission notifications
+
+Website rows are created by the deployed Apps Script, so Google Sheet edit alerts and linked-Google-Form response rules are not a reliable notification mechanism for this flow. The handler instead records `owner_notification_status=pending` on every newly appended coupon or email-signup row. Duplicate contacts and exact retries that add no row also add no owner alert.
+
+`processPendingOwnerNotifications()` runs separately from the public form. It claims at most 50 pending rows, sends one counts-only email, and then records `sent` only when every claimed row is finalized. The email separately counts genuine new first-drink coupon claims and rows containing granted email consent. A new coupon row with permission appears in both category counts, while a repeat coupon form that writes only new consent is not mislabeled as a new coupon. The total is always the number of saved rows in the batch, not the sum of the overlapping categories. The email includes the exact restricted-Sheet tab URL ending in `#gid=<sheet id>` and contains no customer names, phone numbers, email addresses, coupon codes or consent details.
+
+`diagnoseOwnerNotifications()` sends nothing. It independently reports whether the properties are complete, whether the configured tab actually resolves, its exact `#gid=` URL, whether delivery is enabled, queue counts, and how many matching triggers are visible to the current Google account. `operational=true` requires valid configuration, delivery enabled, and exactly one matching current-account trigger.
+
+Before deploying a version that adds `MailApp`, keep `OWNER_NOTIFICATION_ENABLED=false`, select `authorizeOwnerNotificationMailAccess` in the Apps Script editor, and choose **Run** from the durable Spartan business account. Approve the new mail scope and confirm `message_sent=false`. A deployed web app or time-driven trigger cannot stop to request that authorization, so this preflight must happen before updating the live `/exec` deployment.
+
+To activate safely:
+
+1. Complete the pre-deployment mail-authorization preflight above with `OWNER_NOTIFICATION_ENABLED=false`, publish the reviewed version, and confirm the three notification headers.
+2. Set `OWNER_NOTIFICATION_EMAIL=bixbynutrition@gmail.com`, leave delivery disabled, and run `diagnoseOwnerNotifications`. Require `properties_complete=true`, `sheet_tab_found=true`, `configuration_valid=true`, and the exact intended `sheet_url`. At this point `operational=false` is expected because delivery and its trigger are not active.
+3. Set `OWNER_NOTIFICATION_ENABLED=true`, then submit one labeled owner-controlled coupon claim through production and run `processPendingOwnerNotifications`. Verify one generic email arrives and the exact Sheet row changes from `pending` to `sent`.
+4. Retry the exact same submission identifier and run the worker again. It must report `idle` and send no second email.
+5. From the durable Spartan business account that will continue to own the schedule, run `installOwnerNotificationTrigger`. It removes only that current account's existing triggers for this exact handler and creates one 15-minute trigger. It cannot discover or deduplicate a matching trigger created by a different Google account.
+6. Run `diagnoseOwnerNotifications` again. Require `current_account_trigger_count=1` and `operational=true`.
+7. In **Triggers**, confirm one `processPendingOwnerNotifications` trigger under the durable account and enable immediate failure notifications for that Apps Script owner. Do not install from a temporary or personal account that will not remain responsible for the automation.
+
+If `MailApp.sendEmail` throws before completing, claimed rows are marked `failed` and the trigger execution fails visibly. After reviewing the execution and confirming no owner email was accepted, run `requeueFailedOwnerNotifications()` manually; one run moves at most 50 explicit `failed` rows back to `pending`, reports how many remain, and sends nothing. Then run the worker once and reconcile its single counts-only email and the exact rows. The recovery function never touches `attempting` rows.
+
+If the mail call completes but final status recording fails or updates fewer rows than were claimed, the worker does not report `sent`; any unresolved rows remain `attempting`. That state is deliberately quarantined because the email may already have been accepted. Do not change or requeue an `attempting` row until the restricted Sheet, Apps Script execution log, destination mailbox, batch counts, and timestamps have been reconciled. Automatic runs claim only `pending`, so they do not retry an ambiguous batch. The worker also checks mail quota before claiming and never sends when no rows are pending.
 
 The approved return hosts are fixed in `Code.gs`: `spartandrink.com`, `www.spartandrink.com`, `localhost`, and `127.0.0.1`. Production hosts require HTTPS on the default HTTPS port. Localhost exists for clearly labeled local testing; the website itself blocks non-production submission.
 
@@ -97,23 +125,31 @@ An HTTP `201` means Brevo accepted the request to send a confirmation message. I
 
 ## Deployment order
 
+### Current Spartan incremental release
+
+Production already runs the v3.2 handler and Worker-v1 contract. For the August 16 owner-notification update, preserve the existing `/exec` URL and every existing Script Property, including the enabled Brevo configuration and current legacy-GET cutoff. Add only the owner-notification properties with delivery disabled, paste the reviewed code, run the no-send MailApp authorization preflight from the durable business account, and then publish a new version of the existing deployment. Do not repeat the original no-provider bootstrap or disable working double opt-in. The Worker does not require another deployment unless its upstream URL or signing secret changes.
+
+After the incremental deployment, require the new notification health fields, run the disabled diagnostic, complete the controlled counts-only alert and exact-retry checks, enable delivery, and install exactly one 15-minute trigger from the durable business account. The broader sequence below remains the clean-install and disaster-recovery procedure.
+
 1. Export or copy the current Sheet and record its baseline row count, exact tab name, and full header row.
 2. Visually confirm the first five headers are exactly `timestamp`, `name`, `phone`, `email`, and `source_ip`.
 3. Open the Apps Script project currently serving the website endpoint. Preserve its current code, Script Properties, and deployment details.
 4. Run `node scripts/validate-form-backend.mjs` from the repository root.
 5. Publish the compatibility frontend first: JSON responses must require v3.2 plus the Worker contract, while native fallback returns temporarily accept both the deployed v3.1 and reviewed v3.2 handler versions. Before the Worker route exists, a JSON attempt may fail safely and offer the native fallback.
-6. Replace the handler with the reviewed `Code.gs` from this directory and set all required properties, including `WORKER_SHARED_SECRET`, with `BREVO_SYNC_ENABLED=false` and a short, explicit `LEGACY_GET_UNTIL` initially.
-7. Choose **Deploy -> Manage deployments -> Edit**, select **New version**, and retain:
+6. Replace the handler with the reviewed `Code.gs` from this directory and set all required properties, including `WORKER_SHARED_SECRET`, with `BREVO_SYNC_ENABLED=false`, `OWNER_NOTIFICATION_ENABLED=false`, and a short, explicit `LEGACY_GET_UNTIL` initially.
+7. Before deployment, select `authorizeOwnerNotificationMailAccess` in the Apps Script editor and choose **Run** from the durable Spartan business account. Approve the new mail scope and verify the returned summary says `message_sent=false`. Do not defer this step: a deployed web app or trigger cannot prompt for authorization.
+8. Choose **Deploy -> Manage deployments -> Edit**, select **New version**, and retain:
    - **Execute as:** Me
    - **Who has access:** Anyone
-8. Confirm the existing `/exec` URL remains unchanged. If Google issues a new URL, update both production form actions before launch.
-9. Open `/exec` with no query string and reconcile the v3.2 health fields, Worker contract, `worker_json_configured: true`, and cutoff state.
-10. Run the no-provider tests below and reconcile every expected row and no-write case.
-11. Test the Google-hosted Saved page fallback in a browser. It must contain no automatic redirect, visibly show a coupon code and brief first-visit terms for coupon outcomes, and return only after the visitor activates the `target="_top"` link.
-12. Configure and deploy the Worker by following `worker/README.md`. Verify its safe health endpoint, then run an authenticated JSON coupon test and reconcile the exact submission ID to the Sheet.
-13. Complete the Brevo setup, switch `BREVO_SYNC_ENABLED` to `true`, and run one approved double-opt-in test through the Worker.
-14. Confirm the request row is `confirmation_requested`, the message arrives, the confirmation button works, and the confirmed address appears only in the intended list.
-15. Recheck both health responses and the browser flow. Remove v3.1 fallback acceptance in a later cleanup only after production no longer serves that version.
+9. Confirm the existing `/exec` URL remains unchanged. If Google issues a new URL, update both production form actions before launch.
+10. Open `/exec` with no query string and reconcile the v3.2 health fields, Worker contract, `worker_json_configured: true`, and cutoff state.
+11. Run the no-provider tests below and reconcile every expected row and no-write case.
+12. Test the Google-hosted Saved page fallback in a browser. It must contain no automatic redirect, visibly show a coupon code and brief first-visit terms for coupon outcomes, and return only after the visitor activates the `target="_top"` link.
+13. Configure and deploy the Worker by following `worker/README.md`. Verify its safe health endpoint, then run an authenticated JSON coupon test and reconcile the exact submission ID to the Sheet.
+14. Complete the Brevo setup, switch `BREVO_SYNC_ENABLED` to `true`, and run one approved double-opt-in test through the Worker.
+15. Confirm the request row is `confirmation_requested`, the message arrives, the confirmation button works, and the confirmed address appears only in the intended list.
+16. Complete the later owner-notification activation and verification flow above, including one alert, one exact retry, `current_account_trigger_count=1`, and `operational=true`.
+17. Recheck both health responses and the browser flow. Remove v3.1 fallback acceptance in a later cleanup only after production no longer serves that version.
 
 Editing `Code.gs` does not update an existing web-app deployment. Every approved handler change requires a new Apps Script version plus repeated health, Sheet, browser-return, and provider checks.
 
@@ -195,7 +231,7 @@ email
 source_ip
 ```
 
-The v3 canonical contract contains 34 headers. Missing canonical headers are appended after every existing column. The handler never deletes, renames, shifts, compacts, or rewrites historical/custom headers or internal blank columns.
+The v3 canonical contract contains 37 headers. Missing canonical headers are appended after every existing column. The handler never deletes, renames, shifts, compacts, or rewrites historical/custom headers or internal blank columns.
 
 Every new row contains a `submission_id` and `handler_version`. `LockService` protects schema checks, duplicate checks, coupon lookup, consent lookup, and each write. Values beginning with `=`, `+`, `-`, or `@` receive a protective apostrophe before reaching Sheets.
 
@@ -256,7 +292,7 @@ Run the P, C, E, F, and B cases first through `/api/forms` and require an HTTP 2
 
 | ID | Request | Expected public result | Row delta | Required evidence |
 |---|---|---|---:|---|
-| H0 | GET `/exec` with no lead fields | v3 health plus computed cutoff state | 0 | No Sheet access required |
+| H0 | GET `/exec` with no lead fields | v3 health plus computed cutoff state | 0 | No row write; owner-notification configuration may read the configured tab metadata |
 | L1 | Legacy GET before cutoff, unique contact | JSON `coupon_result=success` | +1 | `legacy_get`; both consents `not_requested`; no provider request |
 | L2 | Repeat L1 before cutoff | JSON `coupon_result=duplicate`; same code | 0 | No second row |
 | P1 | POST coupon, unique contact, no email choice | JSON `coupon_result=success` | +1 | Matching ID stored; email/SMS `not_requested`; coupon shown only after confirmation |

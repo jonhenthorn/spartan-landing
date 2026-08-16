@@ -1097,6 +1097,69 @@ button,
   line-height: 1;
 }
 
+.take-home-tea-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  margin-top: 2rem;
+}
+
+.take-home-tea-card {
+  display: flex;
+  flex-direction: column;
+  padding: clamp(1.3rem, 3vw, 2rem);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: var(--radius);
+  background: #fff;
+  color: var(--ink);
+}
+
+.take-home-tea-card-mega {
+  background: var(--sea);
+}
+
+.take-home-tea-card-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.take-home-tea-card .eyebrow {
+  color: var(--teal-dark);
+}
+
+.take-home-tea-card h3 {
+  margin: 0;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(1.65rem, 3vw, 2.25rem);
+  line-height: 1.05;
+}
+
+.take-home-tea-card-heading > strong {
+  flex: 0 0 auto;
+  padding: 0.45rem 0.7rem;
+  border-radius: 999px;
+  background: var(--sun);
+  color: var(--ink);
+  font-size: 1.05rem;
+  line-height: 1;
+}
+
+.take-home-tea-card > p:not(.eyebrow) {
+  color: var(--muted);
+}
+
+.take-home-tea-card .take-home-tea-detail {
+  flex: 1;
+  margin-top: 0;
+  font-size: 0.9rem;
+}
+
+.take-home-tea-card .inline-actions {
+  margin-top: 0.8rem;
+}
+
 .mega-kit-includes {
   display: flex;
   flex-wrap: wrap;
@@ -1754,11 +1817,13 @@ dialog::backdrop {
 }
 
 .dialog-shell h2 {
-  max-width: 12ch;
+  max-width: 15ch;
   margin: 0;
   font-family: Georgia, "Times New Roman", serif;
-  font-size: 2.5rem;
-  line-height: 1;
+  font-size: clamp(2.05rem, 8vw, 2.5rem);
+  line-height: 1.06;
+  letter-spacing: -0.025em;
+  text-wrap: balance;
 }
 
 .dialog-shell > p {
@@ -1771,9 +1836,41 @@ dialog::backdrop {
 
 .coupon-result img {
   width: min(100%, 25rem);
+  height: auto;
   margin: 1rem auto;
   border: 1px solid var(--line);
   border-radius: 1rem;
+  object-fit: contain;
+}
+
+.coupon-result [data-coupon-result-title] {
+  max-width: 18ch;
+  margin-inline: auto;
+  font-size: clamp(2rem, 9vw, 2.5rem);
+  line-height: 1.08;
+}
+
+.coupon-result [data-coupon-result-title]:focus {
+  outline: none;
+}
+
+.coupon-state-notice {
+  width: fit-content;
+  max-width: 100%;
+  margin: 0.85rem auto 0;
+  padding: 0.65rem 0.85rem;
+  border: 2px solid var(--teal-dark);
+  border-radius: 0.75rem;
+  background: color-mix(in srgb, var(--teal) 12%, white);
+  color: var(--teal-dark);
+  font-size: 0.9rem;
+  font-weight: 900;
+  line-height: 1.25;
+}
+
+.coupon-result[data-coupon-state="duplicate"] img,
+.coupon-result[data-coupon-state="remembered"] img {
+  opacity: 0.82;
 }
 
 .coupon-code {
@@ -1788,6 +1885,22 @@ dialog::backdrop {
   margin: 0.65rem auto 1rem;
   color: var(--muted);
   font-size: 0.9rem;
+}
+
+.coupon-next-actions {
+  justify-content: center;
+  margin-top: 1rem;
+}
+
+.coupon-updates-link {
+  margin: 0.8rem 0 0;
+  font-size: 0.9rem;
+  font-weight: 750;
+}
+
+.coupon-updates-link a {
+  color: var(--teal-dark);
+  text-underline-offset: 0.2em;
 }
 
 .legal-main {
@@ -1858,6 +1971,10 @@ dialog::backdrop {
   .visit-map-copy,
   .product-hero-grid,
   .savings-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .take-home-tea-options {
     grid-template-columns: 1fr;
   }
 
@@ -2050,6 +2167,8 @@ dialog::backdrop {
 
   .mega-kit-order .inline-actions,
   .mega-kit-order .button,
+  .take-home-tea-card .inline-actions,
+  .take-home-tea-card .button,
   .visit-map-copy .inline-actions,
   .visit-map-copy .button {
     width: 100%;

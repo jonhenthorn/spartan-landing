@@ -1,10 +1,17 @@
 {
-  "lastReviewed": "2026-08-10",
-  "eyebrow": "Make a Spartan tea at home",
-  "title": "Mega Tea Kits Sold Here",
-  "description": "Make a Spartan tea at home with a single-serving Mega Tea Kit. Choose from 112 flavor and named-tea options, add an optional Liftoff flavor, and customize with available packet add-ins.",
+  "lastReviewed": "2026-08-16",
+  "eyebrow": "Take-home tea options",
+  "title": "Choose your take-home tea.",
+  "description": "Mix one when you’re ready: start with a $5 To-Go Tea or choose a fuller $10.75 Mega Tea Kit, then pick from Spartan’s flavors and named recipes.",
   "availabilityNote": "Kits are $10.75 before optional paid add-ins. Current choices, prices and availability may vary. Order online to see today’s pickup options.",
   "orderUrl": "https://cash.app/$spartannutritionok",
+  "toGoTea": {
+    "title": "$5 To-Go Tea",
+    "description": "A simple single-serving tea to mix when you’re ready. Choose one tea concentrate and one flavor or named Spartan recipe. Add Liftoff for $3.25 if you want it.",
+    "basePrice": 5.00,
+    "baseChoices": ["Chai", "Lemon", "Peach", "Raspberry", "Sweet Ginger"],
+    "optionalLiftoffPrice": 3.25
+  },
   "basePrice": 10.75,
   "currency": "USD",
   "fixedBase": [

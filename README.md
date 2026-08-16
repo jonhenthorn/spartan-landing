@@ -9,7 +9,7 @@ This repository contains the static website published at [spartandrink.com](http
 - `products-at-home/index.html` — shipped-product, independent-reordering and optional member-savings journey.
 - `assets/site.css` and `assets/site.js` — shared presentation and interactions.
 - `data/menu.json` — structured special-menu feature and full menu source.
-- `data/mega-tea-kits.json` — structured source for Mega Tea Kit choices, optional Liftoff flavors, add-ins and prices.
+- `data/mega-tea-kits.json` — structured source for To-Go Tea and Mega Tea Kit choices, optional Liftoff flavors, add-ins and prices.
 - `assets/current-release-menu.webp` — the replaceable featured special-menu image.
 - `privacy.html` — website and subscriber privacy disclosures.
 - `offer-terms.html` — first-drink offer rules.
@@ -49,20 +49,20 @@ Replacing the file with the same name changes which special-menu artwork is feat
 
 The same build step refreshes the featured special menu and our menu on both public pages, plus the homepage Mega Tea Kit section from its separate data file.
 
-### Update Mega Tea Kits
+### Update To-Go Teas and Mega Tea Kits
 
-Use the current live Square Ordering Profile as the source of truth before changing kit options or prices.
+Use the current live Square Ordering Profile as the source of truth before changing either take-home option or its price.
 
 1. Edit `data/mega-tea-kits.json` rather than editing the generated kit lists in `index.html`.
 2. Keep the three main selection groups separate: build-your-own flavors, Spartan favorites and special-menu recipes.
-3. Update the optional Liftoff list, paid add-ins, base price and `lastReviewed` date only when the live Square setup changes.
+3. Update the To-Go Tea base choices, optional Liftoff price, Mega Tea Kit Liftoff list, paid add-ins, prices and `lastReviewed` date only when the live Square setup changes.
 4. Generate the accessible website section:
 
    ```sh
    node scripts/build-menu.mjs
    ```
 
-5. Run `node scripts/validate-site.mjs`. The validator confirms 51 build-your-own flavors, 15 Spartan favorites, 46 additional named recipes, 8 optional Liftoff flavors and 30 paid add-ins, checks for duplicate entries, and confirms that every data-file choice appears on the page.
+5. Run `node scripts/validate-site.mjs`. The validator confirms the $5 To-Go Tea configuration, 51 build-your-own flavors, 15 Spartan favorites, 46 additional named recipes, 8 optional Liftoff flavors and 30 paid add-ins, checks for duplicate entries, and confirms that every data-file choice appears on the page.
 6. Preview the collapsed and expanded lists on both phone and desktop. Confirm the online-pickup button reaches the current Spartan ordering profile before publishing.
 
 The website includes current catalog choices for discovery, but availability can change. Keep the visible availability note and avoid promising inventory that has not been verified in Square.
@@ -124,13 +124,14 @@ No customer data, API keys, spreadsheet IDs or provider credentials should be co
 - **Square:** source of completed prepared-drink sales and coupon redemptions. The live variable-percentage discount is named `50% Off First Drink — Enter 50%`; staff applies it only to one eligible prepared-drink line and enters `50` when the website coupon is shown. The next genuine redemption should verify exact half-off, no stacking, receipt/report visibility and the transaction ID. This provides an aggregate directional redemption rate without a custom Square integration.
 - **Online ordering:** the existing Square/Cash App ordering profile remains linked at `https://cash.app/$spartannutritionok`. Its public availability is separate from full checkout, tax, discount, receipt and inventory QA.
 - **Our menu:** `data/menu.json`, because the Square catalog does not represent all prepared-drink flavors clearly enough for customers.
-- **Mega Tea Kits:** `data/mega-tea-kits.json`, reconciled to the current live Square kit, modifier choices and prices. The generated section links to the existing online-pickup profile and keeps an availability caveat because live choices and inventory can change.
+- **To-Go Teas and Mega Tea Kits:** `data/mega-tea-kits.json`, reconciled to the current live Square items, modifier choices and prices. The generated section links to the existing online-pickup profile and keeps an availability caveat because live choices and inventory can change.
 - **Featured special menu:** `assets/current-release-menu.webp`, replaced as one owner-managed image while its recipes remain available.
 - **Home-product shipping:** the owner-attributed external storefront is `https://get-started.herbalife.com/en-us/u`. The public website links to its stable Shop All and Wellness Rewards routes. Herbalife is merchant of record and handles account creation, payment, taxes, shipping, subscriptions, returns and membership terms. Spartan does not collect enrollment/payment/shipping data or fulfill these orders.
 - **Home-product measurement:** `home_products_view`, `home_delivery_click` and `member_savings_click` are anonymous GA4 website-intent events only. The product-shipping page does not load Meta Pixel, and health-adjacent product-interest events are withheld from Meta. A click is not a completed order or membership. Reconcile completions from authenticated Herbalife owner reporting; do not invent a cross-domain conversion or upload customer data without an approved privacy/consent basis.
 - **Meta:** current homepage/menu analytics are retained for general menu, call, directions, coupon and Mega Tea Kit actions. The shipped-products page does not load Meta Pixel, and `assets/site.js` blocks health-adjacent at-home product-interest event names from Meta.
 - **Google Analytics:** GA4 property `Spartan Nutrition Website` uses web stream `Spartan Nutrition Website` and measurement ID `G-C3R237CCQ7`. The production-host-only loader disables automatic page views and advertising signals; `assets/site.js` removes form-result parameters before sending one page view and the site’s anonymous action events. It preserves only allowlisted campaign and click-identification parameters so approved Facebook, Instagram, TikTok, Google Business Profile and Brevo links can be attributed without putting names, email addresses or phone numbers into analytics. Enhanced Measurement retains page loads and scrolls only; history-change page views and the automatic click, form, search, video and download events are off. Google signals and user-provided-data collection remain off, event/user retention remains at 2/14 months, and `script.google.com` is excluded as a referral so a native fallback return does not overwrite the visitor’s original source. `email_doi_requested` records provider acceptance of a confirmation-email request. `email_confirmation_return` is only a directional redirect signal because its URL can be revisited; it is not a confirmed-subscriber count or key event. `coupon_confirmed` is the website key event. Brevo list membership remains the authoritative email-confirmation source. Do not send form field values or other personal information.
 - **Email delivery:** the Sheet remains the consent audit source. Only rows with `email_consent_status=granted` may sync to the dedicated Brevo list. Provider suppressions and unsubscribes must never be cleared by the website sync.
+- **Owner submission alerts:** each newly appended coupon or email-signup row enters a Sheet-backed notification queue. A separate 15-minute Apps Script trigger sends one counts-only message to the owner inbox and records delivery state; customer details remain in the restricted Sheet, and mail failure cannot block the public form.
 
 The Sheet includes optional owner-managed fields for coupon redemption status, redemption date and Square transaction ID. Phase 1 does not automatically join Square transactions to website contacts; that would require credentials, API design and a reliable staff/POS identifier.
 
