@@ -2,7 +2,7 @@
 
 Last reviewed: August 16, 2026
 
-Status: **Project 2 — next active project.** Nothing in this document changes live Square settings or customer records until the live account verification and controlled test are completed.
+Status: **Project 2 — active.** The reviewed empty ledger foundation is live. No customer event is recorded and no Square setting or customer record changes until the controlled POS test is completed.
 
 ## Outcome
 
