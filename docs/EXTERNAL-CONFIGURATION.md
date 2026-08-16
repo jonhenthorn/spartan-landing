@@ -4,6 +4,18 @@ This file records external configuration that cannot be inferred from GitHub alo
 
 ## Verified August 16, 2026
 
+### Brevo welcome and content-interest flow
+
+- The dedicated confirmed-subscriber list remains `Spartan Updates - Website Opt-ins` (list `#3`). Brevo list membership is the authoritative confirmed-subscriber state; current sendability also depends on Brevo unsubscribe, bounce and suppression status.
+- A multiple-choice contact attribute named `CONTENT_INTERESTS` stores the subscriber's current selections. Its nine choices cover menus and flavors; holiday/special hours; events, announcements and Spartan Games; promotions and rewards; Mega Tea Kits, make-at-home drinks and shipped products; product/nutrition education; fitness/workout education; free recipes/guides/tools/wellness ideas; and evidence-based health, nutrition and fitness research news.
+- Profile-update form `Spartan Content Interests v1` (`6a82189758ceea94e31b307d`) asks subscribers to optionally choose up to three topics. The choices guide future content but do not limit general Spartan Updates. Brevo requires an identifier field, so Email remains on the form. No confirmation email is sent after a preference update, and the form hides after a successful save.
+- An owner-controlled test updated the same Brevo contact twice, preserved its membership on list `#3`, retained the latest selections and created no duplicate contact.
+- Automation `Spartan Updates — Welcome + Interests v1` (automation `#1`) triggers when a contact is added to list `#3`, waits two minutes, and sends message `#6`. Re-entry is off.
+- The welcome message links to the contact-specific Brevo profile-update form, not to a public or reusable form URL. It also links to the Spartan website with approved campaign labels and retains Brevo's unsubscribe controls.
+- Two owner-only automation tests were processed and delivered. The delivered messages had passing DKIM, SPF and DMARC results, a working one-click unsubscribe header and the intended reply-to address.
+- The current Gmail From address is rewritten by Brevo to an authenticated `brevosend.com` sender address. This is functional but less branded; an authenticated `@spartandrink.com` sender is a later deliverability/branding improvement.
+- The automation remained inactive while the matching website privacy disclosure was being published. Activate it only after that disclosure is live; activation applies to future list additions and does not retroactively welcome existing contacts.
+
 ### Google Search Console refresh
 
 - The existing `https://spartandrink.com/sitemap.xml` submission remains successful and now reports five submitted URLs discovered. It was not duplicated or replaced.
