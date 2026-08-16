@@ -45,7 +45,10 @@ const REQUIRED_HEADERS = [
   'email_provider_requested_at',
   'email_provider_synced_at',
   'email_provider_contact_id',
-  'email_provider_error'
+  'email_provider_error',
+  'owner_notification_status',
+  'owner_notification_attempted_at',
+  'owner_notification_sent_at'
 ];
 
 const HISTORIC_HEADERS = ['timestamp', 'name', 'phone', 'email', 'source_ip'];
@@ -55,6 +58,8 @@ const FORM_CONTRACT_VERSION = 'spartan-form-contract-v3-2026-08-10';
 const WORKER_FORM_CONTRACT_VERSION = 'spartan-worker-form-v1-2026-08-15';
 const EMAIL_CONSENT_VERSION = 'email-updates-v1-2026-07-31';
 const EMAIL_CONSENT_LANGUAGE = 'Email me Spartan Nutrition Updates including new menus, holiday hours, products, store announcements, and occasional promotions. Usually 1–4 emails per month. I can unsubscribe at any time.';
+const OWNER_NOTIFICATION_VERSION = 'spartan-owner-notifications-v1-2026-08-16';
+const OWNER_NOTIFICATION_BATCH_LIMIT = 50;
 const SITE_URL = 'https://spartandrink.com/';
 const DOI_CONFIRMATION_URL = 'https://spartandrink.com/?updates=confirmed#updates';
 const ALLOWED_RETURN_HOSTS = [
@@ -114,6 +119,8 @@ function doGet(e) {
       form_contract_version: FORM_CONTRACT_VERSION,
       worker_form_contract_version: WORKER_FORM_CONTRACT_VERSION,
       worker_json_configured: isWorkerJsonConfigured_(),
+      owner_notification_version: OWNER_NOTIFICATION_VERSION,
+      owner_notifications_configured: isOwnerNotificationConfigured_(),
       consent_version: EMAIL_CONSENT_VERSION,
       legacy_get_compatibility: legacyState.enabled,
       legacy_get_state: legacyState.state,
@@ -537,7 +544,10 @@ function buildRecord_(context) {
     email_provider_requested_at: '',
     email_provider_synced_at: '',
     email_provider_contact_id: '',
-    email_provider_error: ''
+    email_provider_error: '',
+    owner_notification_status: 'pending',
+    owner_notification_attempted_at: '',
+    owner_notification_sent_at: ''
   };
 }
 
@@ -578,6 +588,433 @@ function getLeadSheet_() {
     throw new Error('The configured lead Sheet tab was not found.');
   }
   return configuredSheet;
+}
+
+function getOwnerNotificationConfig_() {
+  const properties = PropertiesService.getScriptProperties();
+  const enabled = String(properties.getProperty('OWNER_NOTIFICATION_ENABLED') || '')
+    .trim()
+    .toLowerCase() === 'true';
+  const email = normalizeStoredEmail_(properties.getProperty('OWNER_NOTIFICATION_EMAIL'));
+  const spreadsheetId = cleanText_(properties.getProperty('SPREADSHEET_ID'), 200);
+  const sheetName = cleanText_(properties.getProperty('SHEET_NAME'), 100);
+  const propertiesComplete = Boolean(isEmail_(email) && spreadsheetId && sheetName);
+  let sheetTabFound = false;
+  let sheetId = '';
+  let sheetUrl = '';
+  let sheetResolution = propertiesComplete ? 'sheet_not_found' : 'missing_properties';
+
+  if (spreadsheetId && sheetName) {
+    try {
+      const spreadsheet = SpreadsheetApp.openById(spreadsheetId);
+      const sheet = spreadsheet.getSheetByName(sheetName);
+      if (sheet) {
+        const resolvedSheetId = String(sheet.getSheetId());
+        sheetTabFound = true;
+        sheetId = resolvedSheetId;
+        sheetUrl = `https://docs.google.com/spreadsheets/d/${encodeURIComponent(spreadsheetId)}/edit#gid=${encodeURIComponent(sheetId)}`;
+        sheetResolution = 'ready';
+      }
+    } catch (error) {
+      sheetResolution = 'spreadsheet_unavailable';
+    }
+  }
+
+  return {
+    enabled,
+    email,
+    spreadsheetId,
+    sheetName,
+    propertiesComplete,
+    sheetTabFound,
+    sheetId,
+    sheetUrl,
+    sheetResolution,
+    valid: propertiesComplete && sheetTabFound
+  };
+}
+
+function isOwnerNotificationConfigured_() {
+  const config = getOwnerNotificationConfig_();
+  return config.enabled && config.valid;
+}
+
+/**
+ * Owner-run authorization preflight. This requests MailApp permission and
+ * reports quota without sending a message or reading customer fields.
+ */
+function authorizeOwnerNotificationMailAccess() {
+  const result = {
+    notification_version: OWNER_NOTIFICATION_VERSION,
+    remaining_daily_quota: MailApp.getRemainingDailyQuota(),
+    message_sent: false
+  };
+  console.log(JSON.stringify(result));
+  return result;
+}
+
+function getOwnerNotificationTriggersForCurrentAccount_() {
+  return ScriptApp.getProjectTriggers()
+    .filter(trigger => trigger.getHandlerFunction() === 'processPendingOwnerNotifications');
+}
+
+/**
+ * Owner-run trigger installer. It replaces only current-account triggers for
+ * this exact handler so repeated setup by the durable owner cannot duplicate
+ * alert emails.
+ */
+function installOwnerNotificationTrigger() {
+  const config = getOwnerNotificationConfig_();
+  if (!config.enabled || !config.valid) {
+    throw new Error('Owner notification Script Properties must be complete and enabled.');
+  }
+
+  const existingTriggers = getOwnerNotificationTriggersForCurrentAccount_();
+  existingTriggers.forEach(trigger => ScriptApp.deleteTrigger(trigger));
+
+  ScriptApp.newTrigger('processPendingOwnerNotifications')
+    .timeBased()
+    .everyMinutes(15)
+    .create();
+
+  const currentAccountTriggerCount = getOwnerNotificationTriggersForCurrentAccount_().length;
+
+  const result = {
+    notification_version: OWNER_NOTIFICATION_VERSION,
+    handler: 'processPendingOwnerNotifications',
+    interval_minutes: 15,
+    installed: currentAccountTriggerCount === 1,
+    removed_current_account_trigger_count: existingTriggers.length,
+    current_account_trigger_count: currentAccountTriggerCount
+  };
+  console.log(JSON.stringify(result));
+  return result;
+}
+
+/**
+ * Owner-run, no-send queue diagnostic. Counts only delivery states and never
+ * returns customer names, phone numbers, email addresses, or coupon codes.
+ */
+function diagnoseOwnerNotifications() {
+  const config = getOwnerNotificationConfig_();
+  const currentAccountTriggerCount = getOwnerNotificationTriggersForCurrentAccount_().length;
+  let counts = null;
+
+  if (config.valid) {
+    const sheet = getLeadSheet_();
+    const headers = ensureHeaders_(sheet);
+    const lastRow = sheet.getLastRow();
+    counts = { pending: 0, attempting: 0, sent: 0, failed: 0, blank: 0 };
+
+    if (lastRow >= 2) {
+      const statusIndex = headers.indexOf('owner_notification_status');
+      const rows = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+      rows.forEach(row => {
+        const status = String(row[statusIndex] || '').trim().toLowerCase();
+        if (Object.prototype.hasOwnProperty.call(counts, status)) counts[status] += 1;
+        else counts.blank += 1;
+      });
+    }
+  }
+
+  const result = {
+    notification_version: OWNER_NOTIFICATION_VERSION,
+    delivery_enabled: config.enabled,
+    properties_complete: config.propertiesComplete,
+    sheet_tab_found: config.sheetTabFound,
+    configuration_valid: config.valid,
+    sheet_resolution: config.sheetResolution,
+    sheet_url: config.sheetUrl,
+    current_account_trigger_count: currentAccountTriggerCount,
+    current_account_trigger_present: currentAccountTriggerCount > 0,
+    operational: config.enabled && config.valid && currentAccountTriggerCount === 1,
+    remaining_daily_quota: MailApp.getRemainingDailyQuota(),
+    queue: counts
+  };
+  console.log(JSON.stringify(result));
+  return result;
+}
+
+/**
+ * Time-driven owner alert worker. Form requests only queue rows; this separate
+ * batch sends a counts-only message so mail outages never block a coupon or
+ * permission record. Claimed rows are never automatically reclaimed after an
+ * ambiguous send/finalize failure, preventing duplicate owner messages.
+ */
+function processPendingOwnerNotifications() {
+  const config = getOwnerNotificationConfig_();
+  const summary = {
+    notification_version: OWNER_NOTIFICATION_VERSION,
+    state: 'disabled',
+    claimed: 0,
+    coupon_claims: 0,
+    email_consent_grants: 0,
+    finalized: 0,
+    mail_call_completed: false,
+    sent: false
+  };
+
+  if (!config.enabled) {
+    console.log(JSON.stringify(summary));
+    return summary;
+  }
+  if (!config.valid) {
+    throw new Error('Owner notification Script Properties are invalid.');
+  }
+  if (MailApp.getRemainingDailyQuota() < 1) {
+    throw new Error('Owner notification mail quota is exhausted.');
+  }
+
+  const claimed = claimPendingOwnerNotifications_();
+  summary.claimed = claimed.length;
+  summary.coupon_claims = claimed.filter(record => record.isNewCouponClaim).length;
+  summary.email_consent_grants = claimed.filter(record => record.hasGrantedEmailConsent).length;
+
+  if (!claimed.length) {
+    summary.state = 'idle';
+    console.log(JSON.stringify(summary));
+    return summary;
+  }
+
+  try {
+    sendOwnerNotificationBatch_(config, summary);
+    summary.mail_call_completed = true;
+  } catch (error) {
+    try {
+      updateOwnerNotificationRecords_(claimed, 'attempting', {
+        owner_notification_status: 'failed'
+      });
+    } catch (statusError) {
+      console.error(statusError && statusError.stack ? statusError.stack : statusError);
+    }
+    throw error;
+  }
+
+  try {
+    summary.finalized = updateOwnerNotificationRecords_(claimed, 'attempting', {
+      owner_notification_status: 'sent',
+      owner_notification_sent_at: new Date()
+    }, {
+      owner_notification_status: 'attempting'
+    });
+  } catch (error) {
+    summary.state = 'finalization_error';
+    console.error(JSON.stringify(summary));
+    throw error;
+  }
+
+  if (summary.finalized !== summary.claimed) {
+    summary.state = 'finalization_incomplete';
+    console.error(JSON.stringify(summary));
+    throw new Error(
+      `Owner notification finalization was incomplete (${summary.finalized}/${summary.claimed}); attempting rows remain quarantined.`
+    );
+  }
+
+  summary.state = 'sent';
+  summary.sent = true;
+  console.log(JSON.stringify(summary));
+  return summary;
+}
+
+function claimPendingOwnerNotifications_() {
+  const lock = LockService.getScriptLock();
+  let lockAcquired = false;
+
+  try {
+    lock.waitLock(LOCK_TIMEOUT_MS);
+    lockAcquired = true;
+    const sheet = getLeadSheet_();
+    const headers = ensureHeaders_(sheet);
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return [];
+
+    const rows = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+    const candidates = collectOwnerNotificationRecordsByStatus_(rows, headers, 'pending')
+      .slice(0, OWNER_NOTIFICATION_BATCH_LIMIT);
+    const attemptedAt = new Date();
+
+    candidates.forEach(record => {
+      updateRecordFields_(sheet, headers, record.rowNumber, {
+        owner_notification_status: 'attempting',
+        owner_notification_attempted_at: attemptedAt
+      });
+    });
+    if (candidates.length) SpreadsheetApp.flush();
+    return candidates;
+  } finally {
+    if (lockAcquired) lock.releaseLock();
+  }
+}
+
+function collectOwnerNotificationRecordsByStatus_(rows, headers, requiredStatus) {
+  const indexes = {
+    status: headers.indexOf('owner_notification_status'),
+    recordType: headers.indexOf('record_type'),
+    submissionId: headers.indexOf('submission_id'),
+    emailConsentStatus: headers.indexOf('email_consent_status'),
+    tags: headers.indexOf('tags')
+  };
+  if (Object.values(indexes).some(index => index < 0)) {
+    throw new Error('Required owner-notification columns are missing.');
+  }
+
+  const candidates = [];
+  rows.forEach((row, index) => {
+    if (String(row[indexes.status] || '').trim().toLowerCase() !== requiredStatus) return;
+    const recordType = String(row[indexes.recordType] || '').trim().toLowerCase();
+    if (!['coupon_claim', 'email_signup'].includes(recordType)) return;
+    const submissionId = normalizeStoredSubmissionId_(row[indexes.submissionId]);
+    if (!submissionId) return;
+    const tags = String(row[indexes.tags] || '')
+      .split(',')
+      .map(tag => tag.trim().toLowerCase())
+      .filter(Boolean);
+    candidates.push({
+      rowNumber: index + 2,
+      recordType,
+      submissionId,
+      isNewCouponClaim: recordType === 'coupon_claim' && !tags.includes('repeat_claim'),
+      hasGrantedEmailConsent: String(row[indexes.emailConsentStatus] || '')
+        .trim()
+        .toLowerCase() === 'granted'
+    });
+  });
+  return candidates;
+}
+
+/**
+ * Owner-run recovery for synchronous MailApp failures. It requeues at most one
+ * bounded batch of explicit failed rows and never touches attempting rows,
+ * whose delivery outcome may be ambiguous.
+ */
+function requeueFailedOwnerNotifications() {
+  const config = getOwnerNotificationConfig_();
+  if (!config.valid) {
+    throw new Error('Owner notification Script Properties or Sheet tab are invalid.');
+  }
+
+  const lock = LockService.getScriptLock();
+  let lockAcquired = false;
+
+  try {
+    lock.waitLock(LOCK_TIMEOUT_MS);
+    lockAcquired = true;
+    const sheet = getLeadSheet_();
+    const headers = ensureHeaders_(sheet);
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) {
+      const emptyResult = {
+        requeued: 0,
+        remaining_failed: 0,
+        limit: OWNER_NOTIFICATION_BATCH_LIMIT
+      };
+      console.log(JSON.stringify(emptyResult));
+      return emptyResult;
+    }
+
+    const rows = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+    const failedRecords = collectOwnerNotificationRecordsByStatus_(rows, headers, 'failed');
+    const recordsToRequeue = failedRecords.slice(0, OWNER_NOTIFICATION_BATCH_LIMIT);
+    recordsToRequeue.forEach(record => {
+      updateRecordFields_(sheet, headers, record.rowNumber, {
+        owner_notification_status: 'pending'
+      });
+    });
+    if (recordsToRequeue.length) SpreadsheetApp.flush();
+
+    const result = {
+      requeued: recordsToRequeue.length,
+      remaining_failed: failedRecords.length - recordsToRequeue.length,
+      limit: OWNER_NOTIFICATION_BATCH_LIMIT
+    };
+    console.log(JSON.stringify(result));
+    return result;
+  } finally {
+    if (lockAcquired) lock.releaseLock();
+  }
+}
+
+function updateOwnerNotificationRecords_(records, expectedStatus, fields, retryableMismatchFields) {
+  const lock = LockService.getScriptLock();
+  let lockAcquired = false;
+
+  try {
+    lock.waitLock(LOCK_TIMEOUT_MS);
+    lockAcquired = true;
+    const sheet = getLeadSheet_();
+    const headers = ensureHeaders_(sheet);
+    const indexes = {
+      status: headers.indexOf('owner_notification_status'),
+      recordType: headers.indexOf('record_type'),
+      submissionId: headers.indexOf('submission_id')
+    };
+    if (Object.values(indexes).some(index => index < 0)) {
+      throw new Error('Required owner-notification columns are missing.');
+    }
+
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return 0;
+    const rows = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+    const updatedRowNumbers = new Set();
+    let updatedCount = 0;
+    let writeCount = 0;
+
+    records.forEach(record => {
+      const rowNumber = Number(record.rowNumber);
+      if (!Number.isInteger(rowNumber) || rowNumber < 2 || rowNumber > lastRow) return;
+      if (updatedRowNumbers.has(rowNumber)) return;
+      const row = rows[rowNumber - 2];
+      const currentStatus = String(row[indexes.status] || '').trim().toLowerCase();
+      if (
+        String(row[indexes.recordType] || '').trim().toLowerCase() !== record.recordType
+        || normalizeStoredSubmissionId_(row[indexes.submissionId]) !== record.submissionId
+      ) return;
+
+      if (currentStatus !== expectedStatus) {
+        if (retryableMismatchFields && ['pending', 'failed'].includes(currentStatus)) {
+          updateRecordFields_(sheet, headers, rowNumber, retryableMismatchFields);
+          updatedRowNumbers.add(rowNumber);
+          writeCount += 1;
+        }
+        return;
+      }
+
+      updateRecordFields_(sheet, headers, rowNumber, fields);
+      updatedRowNumbers.add(rowNumber);
+      updatedCount += 1;
+      writeCount += 1;
+    });
+    if (writeCount) SpreadsheetApp.flush();
+    return updatedCount;
+  } finally {
+    if (lockAcquired) lock.releaseLock();
+  }
+}
+
+function sendOwnerNotificationBatch_(config, summary) {
+  const total = summary.claimed;
+  const subject = total === 1
+    ? 'Spartan website: 1 new submission'
+    : `Spartan website: ${total} new submissions`;
+  const body = [
+    'New Spartan website activity is ready for review.',
+    '',
+    `First-drink coupon claims: ${summary.coupon_claims}`,
+    `Rows with granted email consent: ${summary.email_consent_grants}`,
+    `Total saved rows in this alert: ${total}`,
+    '',
+    `Review the restricted Google Sheet: ${config.sheetUrl}`,
+    '',
+    'This notification contains counts only. Customer details remain in the restricted Sheet.'
+  ].join('\n');
+
+  MailApp.sendEmail({
+    to: config.email,
+    subject,
+    body,
+    name: 'Spartan Nutrition Website'
+  });
 }
 
 /**

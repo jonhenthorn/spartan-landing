@@ -11,6 +11,7 @@ This is the low-maintenance operating routine for making the website, Google Bus
 - First-visit offer section: `https://spartandrink.com/#first-visit`
 - Direct coupon form: `https://spartandrink.com/?claim=first-drink#first-visit`
 - Mega Tea Kits: `https://spartandrink.com/#mega-tea-kits`
+- $5 To-Go Teas: `https://spartandrink.com/#to-go-teas`
 - Google profile: `https://www.google.com/maps?cid=1058402923204900530`
 - Google review request: `https://g.page/r/CbL23NrZM7AOEBE/review`
 - Facebook: `https://www.facebook.com/bixbyspartannutrition/`
@@ -53,7 +54,7 @@ Monthly, or whenever facts change:
 - Add the featured special-menu image and several honest, current store or drink photos.
 - Ask real customers for an honest Google review using the direct review link or a QR code. Do not reward, gate or script positive reviews.
 - Reply briefly and authentically to new reviews, especially questions or service concerns.
-- Confirm the website still naturally describes energy teas, protein shakes, nutrition shakes, protein coffee, Mega Tea Kits, Bixby, South Tulsa and the 151st & Memorial location.
+- Confirm the website still naturally describes energy teas, protein shakes, nutrition shakes, protein coffee, To-Go Teas, Mega Tea Kits, Bixby, South Tulsa and the 151st & Memorial location.
 - Keep unsupported nutrition, dietary, medical or weight claims off the site even if they appear attractive as keywords.
 
 Quarterly:

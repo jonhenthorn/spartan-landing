@@ -94,6 +94,8 @@ const selectionCount = megaTeaKits.selectionGroups.reduce(
   (total, group) => total + group.items.length,
   0
 );
+const toGoTea = megaTeaKits.toGoTea;
+if (!toGoTea) throw new Error("data/mega-tea-kits.json is missing toGoTea");
 
 const megaTeaKitGroups = megaTeaKits.selectionGroups.map((group) => `
             <details class="mega-kit-group" data-mega-kit-group="${escapeHtml(group.id)}">
@@ -140,10 +142,38 @@ const generatedMegaTeaKits = `${megaTeaKitsStartMarker}
               <h2 id="mega-tea-kits-title">${escapeHtml(megaTeaKits.title)}</h2>
               <p>${escapeHtml(megaTeaKits.description)}</p>
             </div>
-            <div class="mega-kit-price" aria-label="Base kit price ${escapeHtml(formatCurrency(megaTeaKits.basePrice))}">
-              <span>Base kit</span>
-              <strong>${escapeHtml(formatCurrency(megaTeaKits.basePrice))}</strong>
-            </div>
+          </div>
+
+          <div class="take-home-tea-options" aria-label="Single-serving take-home tea options">
+            <article class="take-home-tea-card" id="to-go-teas" data-track-view="to_go_tea_view">
+              <div class="take-home-tea-card-heading">
+                <div>
+                  <p class="eyebrow">Simple single serving</p>
+                  <h3>${escapeHtml(toGoTea.title)}</h3>
+                </div>
+                <strong>${escapeHtml(formatCurrency(toGoTea.basePrice))}</strong>
+              </div>
+              <p>${escapeHtml(toGoTea.description)}</p>
+              <p class="take-home-tea-detail"><strong>Tea concentrate choices:</strong> ${toGoTea.baseChoices.map(escapeHtml).join(", ")}.</p>
+              <div class="inline-actions">
+                <a class="button button-secondary" href="${escapeHtml(megaTeaKits.orderUrl)}" target="_blank" rel="noopener noreferrer" data-track="to_go_tea_order_click" data-track-location="to_go_tea">Order a To-Go Tea</a>
+                <a class="button button-ghost" href="tel:+19189289755" data-track="to_go_tea_call_click" data-track-location="to_go_tea">Call about one</a>
+              </div>
+            </article>
+            <article class="take-home-tea-card take-home-tea-card-mega">
+              <div class="take-home-tea-card-heading">
+                <div>
+                  <p class="eyebrow">Fuller single-serving kit</p>
+                  <h3>Mega Tea Kits Sold Here</h3>
+                </div>
+                <strong>${escapeHtml(formatCurrency(megaTeaKits.basePrice))}</strong>
+              </div>
+              <p>Raspberry tea concentrate, Original N-R-G tea, one flavor or named Spartan recipe, and up to one included Liftoff flavor.</p>
+              <p class="take-home-tea-detail"><strong>${selectionCount} flavor and named-tea choices</strong> plus optional paid add-ins.</p>
+              <div class="inline-actions">
+                <a class="button button-secondary" href="#mega-kit-options" data-track="mega_tea_kits_view_click" data-track-location="take_home_comparison">See all kit options</a>
+              </div>
+            </article>
           </div>
 
           <div class="mega-kit-includes" aria-label="What every Mega Tea Kit includes">
@@ -151,7 +181,7 @@ const generatedMegaTeaKits = `${megaTeaKitsStartMarker}
             <p>Then choose exactly one of ${selectionCount} build-your-own or named-tea options.</p>
           </div>
 
-          <div class="mega-kit-groups">${megaTeaKitGroups}${liftoffGroup}${addInsGroup}
+          <div class="mega-kit-groups" id="mega-kit-options">${megaTeaKitGroups}${liftoffGroup}${addInsGroup}
           </div>
 
           <div class="mega-kit-order">
