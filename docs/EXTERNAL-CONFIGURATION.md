@@ -4,6 +4,15 @@ This file records external configuration that cannot be inferred from GitHub alo
 
 ## Verified August 16, 2026
 
+### Google owner submission alerts
+
+- The existing Apps Script web-app deployment was updated in place to Version 13 without changing its public `/exec` URL, form contract, Worker route, Brevo double-opt-in state or legacy cutoff.
+- The owner-alert mail scope was authorized by the durable Spartan business Google account before permanent trigger activation.
+- A controlled coupon submission created one Sheet row with a pending alert; manual processing sent one counts-only owner email. An exact replay created no row or second alert, and a second processor run returned idle.
+- Exactly one permanent time-based trigger owned by the Spartan business account now runs `processPendingOwnerNotifications` every 15 minutes from the Head deployment.
+- The trigger completed an automatic run on August 16 with a 0% error rate. The final diagnostic reported `operational: true`, one current-account trigger, zero pending, zero attempting and zero failed alerts.
+- Historic rows with blank alert status were not backfilled. Customer names, phone numbers and email addresses remain in the restricted Sheet and are not included in owner-alert emails.
+
 ### Brevo welcome and content-interest flow
 
 - The dedicated confirmed-subscriber list remains `Spartan Updates - Website Opt-ins` (list `#3`). Brevo list membership is the authoritative confirmed-subscriber state; current sendability also depends on Brevo unsubscribe, bounce and suppression status.
