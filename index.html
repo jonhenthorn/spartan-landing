@@ -13,7 +13,7 @@
     <meta name="theme-color" content="#18302a" />
     <link rel="canonical" href="https://spartandrink.com/" />
     <link rel="icon" href="assets/favicon.ico" sizes="any" />
-    <link rel="stylesheet" href="assets/site.css?v=20260816a" />
+    <link rel="stylesheet" href="assets/site.css?v=20260816b" />
 
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Spartan Nutrition" />
@@ -995,6 +995,47 @@
             <p class="form-status" id="updates-status" role="status" aria-live="polite"></p>
             <button class="form-fallback" type="button" data-native-submit hidden>Open secure confirmation</button>
           </form>
+
+          <div
+            class="updates-confirmation-card"
+            data-updates-confirmation
+            role="region"
+            aria-labelledby="updates-confirmation-title"
+            hidden
+          >
+            <div class="updates-confirmation-mark" aria-hidden="true">✓</div>
+            <p class="eyebrow">Spartan Updates</p>
+            <h3 id="updates-confirmation-title" tabindex="-1" data-updates-confirmation-title>You’re confirmed!</h3>
+            <p class="updates-confirmation-lead">Your Spartan Updates subscription is confirmed.</p>
+            <p>
+              You’re ready for new menus, special hours, store announcements, occasional offers and make-at-home ideas. Nothing else is required, and you can unsubscribe from any email.
+            </p>
+            <div class="inline-actions">
+              <a class="button button-secondary" href="/menu/" data-track="menu_click" data-track-location="updates_confirmation">View the menu</a>
+              <a
+                class="button button-ghost"
+                href="https://www.google.com/maps/dir/?api=1&amp;destination=Spartan+Nutrition%2C+15020+S+Memorial+Dr+Suite+C%2C+Bixby%2C+OK+74008"
+                target="_blank"
+                rel="noopener noreferrer"
+                data-track="directions_click"
+                data-track-location="updates_confirmation"
+              >Get directions</a>
+            </div>
+            <div class="updates-confirmation-social">
+              <span>Follow Spartan for what’s happening now</span>
+              <div class="social-profile-links social-profile-links-compact" aria-label="Follow Spartan Nutrition">
+                <a href="https://www.facebook.com/bixbyspartannutrition/" target="_blank" rel="me noopener noreferrer" data-track="facebook_click" data-track-location="updates_confirmation">
+                  <svg aria-hidden="true"><use href="#icon-facebook"></use></svg><span>Facebook</span>
+                </a>
+                <a href="https://www.instagram.com/bixbyspartannutrition/" target="_blank" rel="me noopener noreferrer" data-track="instagram_click" data-track-location="updates_confirmation">
+                  <svg aria-hidden="true"><use href="#icon-instagram"></use></svg><span>Instagram</span>
+                </a>
+                <a href="https://www.tiktok.com/@spartan_nutrition" target="_blank" rel="me noopener noreferrer" data-track="tiktok_click" data-track-location="updates_confirmation">
+                  <svg aria-hidden="true"><use href="#icon-tiktok"></use></svg><span>TikTok</span>
+                </a>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -1242,6 +1283,6 @@
       <button class="primary" type="button" data-open-coupon>50% off</button>
     </nav>
 
-    <script src="assets/site.js?v=20260816a" defer></script>
+    <script src="assets/site.js?v=20260816b" defer></script>
   </body>
 </html>
