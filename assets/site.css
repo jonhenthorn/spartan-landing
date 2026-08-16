@@ -1962,6 +1962,97 @@ dialog::backdrop {
   font-size: 0.9rem;
 }
 
+.coupon-discovery {
+  margin-top: 1.15rem;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  background: #f8faf8;
+  text-align: left;
+}
+
+.coupon-discovery fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.coupon-discovery legend {
+  width: 100%;
+  padding: 0;
+  color: var(--ink);
+  font-size: 1rem;
+  font-weight: 900;
+  line-height: 1.25;
+}
+
+.coupon-discovery #coupon-discovery-help {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.coupon-discovery-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.55rem;
+  margin-top: 0.85rem;
+}
+
+.coupon-discovery-options label {
+  min-height: 2.85rem;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid #b9c8c1;
+  border-radius: 0.7rem;
+  background: #fff;
+  color: var(--ink);
+  font-size: 0.82rem;
+  font-weight: 750;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.coupon-discovery-options label:has(input:checked) {
+  border-color: var(--teal);
+  background: color-mix(in srgb, var(--teal) 10%, white);
+}
+
+.coupon-discovery-options label:focus-within {
+  outline: 3px solid rgba(8, 120, 107, 0.2);
+  outline-offset: 1px;
+}
+
+.coupon-discovery-options input {
+  flex: 0 0 auto;
+  width: 1.1rem;
+  height: 1.1rem;
+  margin: 0;
+  accent-color: var(--teal);
+}
+
+.coupon-discovery-actions {
+  margin-top: 0.85rem;
+}
+
+.coupon-discovery-actions .button {
+  min-height: 2.75rem;
+  padding-block: 0.7rem;
+}
+
+.coupon-discovery-status {
+  margin-top: 0.65rem;
+}
+
+.coupon-discovery[data-complete="true"] #coupon-discovery-help,
+.coupon-discovery[data-complete="true"] .coupon-discovery-options,
+.coupon-discovery[data-complete="true"] .coupon-discovery-actions {
+  display: none;
+}
+
 .coupon-next-actions {
   justify-content: center;
   margin-top: 1rem;
@@ -2293,6 +2384,12 @@ dialog::backdrop {
     border-radius: 0.75rem;
     background: var(--coral);
     color: #fff;
+  }
+}
+
+@media (max-width: 520px) {
+  .coupon-discovery-options {
+    grid-template-columns: 1fr;
   }
 }
 

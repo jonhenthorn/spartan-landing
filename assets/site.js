@@ -12,6 +12,10 @@
   const couponStateNotice = document.querySelector("[data-coupon-state-notice]");
   const couponResultInstruction = document.querySelector("[data-coupon-result-instruction]");
   const couponResultMessage = document.querySelector("[data-coupon-result-message]");
+  const couponDiscoveryForm = document.querySelector("[data-coupon-discovery]");
+  const couponDiscoveryStatus = document.querySelector("[data-discovery-status]");
+  const couponDiscoverySkip = document.querySelector("[data-discovery-skip]");
+  const couponResultNextAction = document.querySelector(".coupon-next-actions a");
   const couponForm = document.getElementById("coupon-form");
   const updatesForm = document.getElementById("updates-form");
   const updatesStatus = document.getElementById("updates-status");
@@ -28,6 +32,8 @@
     expectedHandlerVersion
   ]);
   const confirmationEndpoint = "/api/forms";
+  const discoveryEndpoint = "/api/forms/discovery";
+  const discoveryContractVersion = "spartan-discovery-v1-2026-08-16";
   const confirmationTimeoutMs = 30000;
   const pendingSubmissionMaxAge = 30 * 60 * 1000;
   const pendingKeys = {
@@ -87,12 +93,26 @@
     "email_consent"
   ];
   const metaBlockedEvents = new Set([
+    "discovery_source_saved",
     "home_products_view",
     "home_delivery_click",
     "member_savings_click",
     "home_shipping_page_click",
     "product_interest_click"
   ]);
+  const discoverySources = new Set([
+    "google_search",
+    "google_maps",
+    "facebook",
+    "instagram",
+    "tiktok",
+    "other_social_media",
+    "friend_family",
+    "drive_by_nearby",
+    "community_event_local_group",
+    "other"
+  ]);
+  let activeDiscoverySubmissionId = "";
 
   const sanitizeCampaignValue = (name, value) => {
     const candidate = String(value || "").trim().slice(0, 180);
@@ -178,7 +198,34 @@
     }
   };
 
+  const resetDiscoveryPrompt = () => {
+    activeDiscoverySubmissionId = "";
+    if (!couponDiscoveryForm) return;
+    couponDiscoveryForm.reset();
+    couponDiscoveryForm.hidden = true;
+    couponDiscoveryForm.removeAttribute("aria-busy");
+    delete couponDiscoveryForm.dataset.complete;
+    couponDiscoveryForm.querySelectorAll("input, button").forEach((control) => {
+      control.disabled = false;
+    });
+    if (couponDiscoveryStatus) couponDiscoveryStatus.textContent = "";
+  };
+
+  const showDiscoveryPrompt = (submissionId) => {
+    if (!couponDiscoveryForm || !/^[A-Za-z0-9][A-Za-z0-9-]{7,79}$/.test(submissionId)) return;
+    couponDiscoveryForm.reset();
+    couponDiscoveryForm.hidden = false;
+    couponDiscoveryForm.removeAttribute("aria-busy");
+    delete couponDiscoveryForm.dataset.complete;
+    couponDiscoveryForm.querySelectorAll("input, button").forEach((control) => {
+      control.disabled = false;
+    });
+    if (couponDiscoveryStatus) couponDiscoveryStatus.textContent = "";
+    activeDiscoverySubmissionId = submissionId;
+  };
+
   const showCouponResult = (code = "FIRST-VISIT", message = "", state = "success") => {
+    resetDiscoveryPrompt();
     const content = couponResultContent[state] || couponResultContent.success;
     couponFormStep?.setAttribute("hidden", "");
     couponResult?.removeAttribute("hidden");
@@ -513,6 +560,7 @@
         }
         track("coupon_confirmed");
       });
+      showDiscoveryPrompt(submissionId);
     }
 
     if (updatesResult === "requested") {
@@ -546,6 +594,96 @@
       trackConfirmedOnce("email", submissionId, () => track("email_doi_requested"));
     }
   };
+
+  const discoveryResponseMatches = (result, submissionId) => {
+    if (!result || typeof result !== "object" || Array.isArray(result)) return false;
+    const expectedKeys = [
+      "discovery_contract_version",
+      "discovery_result",
+      "ok",
+      "record_type",
+      "submission_id"
+    ];
+    const actualKeys = Object.keys(result).sort();
+    return actualKeys.length === expectedKeys.length
+      && expectedKeys.every((key, index) => actualKeys[index] === key)
+      && result.ok === true
+      && result.record_type === "discovery_source"
+      && result.submission_id === submissionId
+      && ["saved", "already_saved"].includes(result.discovery_result)
+      && result.discovery_contract_version === discoveryContractVersion;
+  };
+
+  const requestDiscoverySave = async (submissionId, discoverySource) => {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), confirmationTimeoutMs);
+    try {
+      const response = await fetch(discoveryEndpoint, {
+        method: "POST",
+        credentials: "omit",
+        headers: {
+          "Accept": "application/json",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          submission_id: submissionId,
+          discovery_source: discoverySource
+        }),
+        signal: controller.signal
+      });
+      const result = await response.json();
+      if (!response.ok || !discoveryResponseMatches(result, submissionId)) {
+        throw new Error("Unconfirmed discovery response");
+      }
+      return result;
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  };
+
+  couponDiscoveryForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const selectedSource = String(new FormData(couponDiscoveryForm).get("discovery_source") || "");
+    const submissionId = activeDiscoverySubmissionId;
+    if (!discoverySources.has(selectedSource)) {
+      if (couponDiscoveryStatus) couponDiscoveryStatus.textContent = "Choose one answer, or select No thanks.";
+      couponDiscoveryForm.querySelector('input[name="discovery_source"]')?.focus();
+      return;
+    }
+    if (!/^[A-Za-z0-9][A-Za-z0-9-]{7,79}$/.test(submissionId)) {
+      if (couponDiscoveryStatus) couponDiscoveryStatus.textContent = "We couldn’t save this answer. Your coupon is still ready to use.";
+      return;
+    }
+
+    couponDiscoveryForm.setAttribute("aria-busy", "true");
+    couponDiscoveryForm.querySelectorAll("input, button").forEach((control) => {
+      control.disabled = true;
+    });
+    if (couponDiscoveryStatus) couponDiscoveryStatus.textContent = "Saving your answer…";
+
+    try {
+      const result = await requestDiscoverySave(submissionId, selectedSource);
+      couponDiscoveryForm.removeAttribute("aria-busy");
+      couponDiscoveryForm.dataset.complete = "true";
+      if (couponDiscoveryStatus) couponDiscoveryStatus.textContent = "Thanks—your answer is saved.";
+      activeDiscoverySubmissionId = "";
+      if (result.discovery_result === "saved") track("discovery_source_saved");
+      couponDiscoveryStatus?.focus({ preventScroll: true });
+    } catch (error) {
+      couponDiscoveryForm.removeAttribute("aria-busy");
+      couponDiscoveryForm.querySelectorAll("input, button").forEach((control) => {
+        control.disabled = false;
+      });
+      if (couponDiscoveryStatus) {
+        couponDiscoveryStatus.textContent = "We couldn’t save this answer. Your coupon is still ready to use—you can try again or choose No thanks.";
+      }
+    }
+  });
+
+  couponDiscoverySkip?.addEventListener("click", () => {
+    resetDiscoveryPrompt();
+    couponResultNextAction?.focus({ preventScroll: true });
+  });
 
   const showUnconfirmedState = (form, status, kind) => {
     if (status) {

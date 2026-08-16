@@ -79,7 +79,7 @@ Run the dependency-free validation script after changing content, forms, menu da
 node scripts/validate-site.mjs
 ```
 
-It checks local page and asset references, anchor targets, structured data, JavaScript syntax, our-menu and Mega Tea Kit data/rendering parity, Google Sheet headers, coupon behavior and email-consent behavior. It does not replace visual browser testing, live Square availability checks or a real Apps Script deployment test.
+It checks local page and asset references, anchor targets, structured data, JavaScript syntax, our-menu and Mega Tea Kit data/rendering parity, Google Sheet headers, coupon behavior, email-consent behavior and the optional post-coupon discovery contract. It does not replace visual browser testing, live Square availability checks or a real Apps Script deployment test.
 
 ### Preview before publishing
 
@@ -101,6 +101,14 @@ The native Apps Script POST-and-redirect remains as a visible recovery option if
 
 Coupon claims do not create marketing permission unless the visitor separately selects the optional, unchecked email-updates box. The dedicated email signup remains available for visitors who do not claim the offer. SMS signup is not included in Phase 1.
 
+After the server confirms a genuinely new coupon, the result card may show one optional question: “How did you first hear about Spartan?” No answer is preselected, **No thanks** dismisses it, and the coupon is already available before the question appears. The answer updates the matching coupon row for aggregate source attribution; it does not append another lead, change coupon eligibility or redemption, create marketing permission, alter provider status, or queue another owner alert. Existing, duplicate and device-remembered claims never receive the question.
+
+### Post-coupon discovery rollout and rollback
+
+This feature must deploy backend first so an older browser remains compatible throughout: publish the reviewed Apps Script version and verify its internal discovery contract, then deploy and verify the Worker `/api/forms/discovery` route, and only then publish the frontend that can reveal the question. Complete an owner-controlled new-coupon test and reconcile its submission ID to the same Sheet row before treating the rollout as complete.
+
+For a safe rollback, hide/remove the frontend question first. The unused Worker route and Apps Script handler may remain temporarily because existing coupon and subscriber behavior does not call them. If the backend must also be removed, take down the Worker discovery route second and the Apps Script discovery handler last. Never roll back by deleting a Sheet row, clearing an existing answer or changing coupon/consent evidence.
+
 ## Approved staged deployment checklist
 
 1. Confirm the featured special-menu image and accompanying drink names are accurate.
@@ -115,6 +123,7 @@ Coupon claims do not create marketing permission unless the visitor separately s
 10. Confirm a newly granted email opt-in reaches the approved Brevo list while an unchecked coupon does not.
 11. Review the privacy and offer terms against the final provider configuration.
 12. Verify the active Cloudflare rules still force HTTPS, redirect `/index.html` to `/`, redirect legacy pages to `/`, preserve query strings and avoid redirect chains.
+13. For the post-coupon discovery release, verify Apps Script first, then `/api/forms/discovery`, then the frontend. Prove that only a new coupon shows the optional question and that one answer updates the same row without changing coupon, consent, provider or owner-alert fields.
 
 No customer data, API keys, spreadsheet IDs or provider credentials should be committed to this repository.
 
@@ -126,6 +135,7 @@ No customer data, API keys, spreadsheet IDs or provider credentials should be co
 - **Our menu:** `data/menu.json`, because the Square catalog does not represent all prepared-drink flavors clearly enough for customers.
 - **To-Go Teas and Mega Tea Kits:** `data/mega-tea-kits.json`, reconciled to the current live Square items, modifier choices and prices. The generated section links to the existing online-pickup profile and keeps an availability caveat because live choices and inventory can change.
 - **Featured special menu:** `assets/current-release-menu.webp`, replaced as one owner-managed image while its recipes remain available.
+- **Discovery-source learning:** after a newly confirmed website coupon only, the optional question records one of ten fixed source categories on that same Sheet row. The first saved answer wins. The answer is for aggregate attribution and future marketing decisions; it is not required, does not delay or change the coupon, and does not create or modify email/SMS permission. GA4 receives only the generic `discovery_source_saved` event, never the selected answer. The event is blocked from Meta.
 - **Home-product shipping:** the owner-attributed external storefront is `https://get-started.herbalife.com/en-us/u`. The public website links to its stable Shop All and Wellness Rewards routes. Herbalife is merchant of record and handles account creation, payment, taxes, shipping, subscriptions, returns and membership terms. Spartan does not collect enrollment/payment/shipping data or fulfill these orders.
 - **Home-product measurement:** `home_products_view`, `home_delivery_click` and `member_savings_click` are anonymous GA4 website-intent events only. The product-shipping page does not load Meta Pixel, and health-adjacent product-interest events are withheld from Meta. A click is not a completed order or membership. Reconcile completions from authenticated Herbalife owner reporting; do not invent a cross-domain conversion or upload customer data without an approved privacy/consent basis.
 - **Meta:** current homepage/menu analytics are retained for general menu, call, directions, coupon and Mega Tea Kit actions. The shipped-products page does not load Meta Pixel, and `assets/site.js` blocks health-adjacent at-home product-interest event names from Meta.

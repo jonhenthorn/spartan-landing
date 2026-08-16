@@ -13,7 +13,7 @@
     <meta name="theme-color" content="#18302a" />
     <link rel="canonical" href="https://spartandrink.com/" />
     <link rel="icon" href="assets/favicon.ico" sizes="any" />
-    <link rel="stylesheet" href="assets/site.css?v=20260816b" />
+    <link rel="stylesheet" href="assets/site.css?v=20260816c" />
 
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Spartan Nutrition" />
@@ -1268,6 +1268,29 @@
           <p data-coupon-result-instruction>Save or screenshot this coupon and show it to staff when ordering.</p>
           <p class="coupon-code">Claim: <span data-coupon-code>FIRST-VISIT</span></p>
           <p class="coupon-result-message" data-coupon-result-message hidden></p>
+          <form class="coupon-discovery" id="coupon-discovery-form" data-coupon-discovery hidden>
+            <fieldset aria-describedby="coupon-discovery-help">
+              <legend>One quick question—how did you first hear about Spartan?</legend>
+              <p id="coupon-discovery-help">Optional—your coupon is already ready.</p>
+              <div class="coupon-discovery-options">
+                <label><input type="radio" name="discovery_source" value="google_search" /> <span>Google Search</span></label>
+                <label><input type="radio" name="discovery_source" value="google_maps" /> <span>Google Maps</span></label>
+                <label><input type="radio" name="discovery_source" value="facebook" /> <span>Facebook</span></label>
+                <label><input type="radio" name="discovery_source" value="instagram" /> <span>Instagram</span></label>
+                <label><input type="radio" name="discovery_source" value="tiktok" /> <span>TikTok</span></label>
+                <label><input type="radio" name="discovery_source" value="other_social_media" /> <span>Other social media</span></label>
+                <label><input type="radio" name="discovery_source" value="friend_family" /> <span>Friend or family</span></label>
+                <label><input type="radio" name="discovery_source" value="drive_by_nearby" /> <span>Drove by / nearby</span></label>
+                <label><input type="radio" name="discovery_source" value="community_event_local_group" /> <span>Community event or local group</span></label>
+                <label><input type="radio" name="discovery_source" value="other" /> <span>Other</span></label>
+              </div>
+              <div class="inline-actions coupon-discovery-actions">
+                <button class="button button-primary" type="submit">Save answer</button>
+                <button class="button button-ghost" type="button" data-discovery-skip>No thanks</button>
+              </div>
+              <p class="form-status coupon-discovery-status" role="status" aria-live="polite" tabindex="-1" data-discovery-status></p>
+            </fieldset>
+          </form>
           <div class="inline-actions coupon-next-actions">
             <a class="button button-secondary" href="/menu/" data-track="menu_click" data-track-location="coupon_result" data-close-dialog>View the menu</a>
             <a class="button button-ghost" href="https://www.google.com/maps/dir/?api=1&amp;destination=Spartan+Nutrition%2C+15020+S+Memorial+Dr+Suite+C%2C+Bixby%2C+OK+74008" target="_blank" rel="noopener noreferrer" data-track="directions_click" data-track-location="coupon_result" data-close-dialog>Get directions</a>
@@ -1283,6 +1306,6 @@
       <button class="primary" type="button" data-open-coupon>50% off</button>
     </nav>
 
-    <script src="assets/site.js?v=20260816b" defer></script>
+    <script src="assets/site.js?v=20260816c" defer></script>
   </body>
 </html>
