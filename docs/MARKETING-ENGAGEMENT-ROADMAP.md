@@ -36,75 +36,19 @@ The always-on journey must keep working when a social tool, reward pilot or Spar
 - Use ChatGPT for research, creative preparation and analysis, not unsupervised publishing or autonomous health/customer replies.
 - Begin with a measured manual referral pilot before building a custom rewards platform.
 - Preserve the current website, form, Brevo, Google Sheet, GA4 and Cloudflare foundation unless a project explicitly requires a bounded change.
+- Use the owner's accepted offer/reward channel interpretation as the operating assumption: a customer-initiated website request begins an individualized invitation journey, and Spartan may operate its own customer rewards. Optional wording review may refine future copy, but it does not block journey measurement, referral design or the current project sequence.
 
-## Project 0 — Offer channel and reward-rule decision
+## Offer and reward operating assumption — owner accepted, non-blocking
 
-### Business problem
+The owner has directed the portfolio to proceed on this operating basis:
 
-Spartan needs a profitable first-visit/referral program, but the current published rules do not confirm that a public website click becomes a private invitation or support public numeric/free offer wording without an exception.
+- Public website language may invite a first-time customer or current customer to begin a journey.
+- After the customer clicks or submits, the resulting coupon, message or next step is treated as an individualized invitation.
+- Spartan may operate its own deterministic customer rewards and referral journey.
+- This owner decision governs planning and implementation; it is not presented here as an independent legal conclusion.
+- Any later optional wording review is advisory and may produce a bounded copy change, but it is not a portfolio gate unless the owner changes this decision or a specific platform/account issue arises.
 
-### Confirmed current rule boundary
-
-Current U.S. Herbalife guidance expressly permits public terms such as `discount`, `deal`, `offer`, `sale`, `special` and `coupon` for prepared consumptions and single-serve kits. It does not expressly confirm `customer reward` as approved public wording. Public promotion must not display dollar amounts, percentage amounts or wording implying `free`. Herbalife's current interactive guide describes private price communication to existing customers and prospects after qualifying prior personal contact or expressed interest; whether Spartan's public form creates that qualifying relationship remains unresolved and is therefore included in the written questions below.
-
-A public click by itself is **not documented as converting a public webpage into a personal invitation**. Current price-advertising guidance says a clickable public promotion may only take the user to a private chat or DM page and may not take the user to a discount page. Herbalife separately permits a public Google Form without pricing to collect prospective-customer information. Whether a promotional website CTA may open such a form and then deliver the numeric offer through an individualized automated response remains an unresolved interpretation requiring written confirmation.
-
-Therefore the answer to “are we good?” is:
-
-- **Yes, proceed with the internal journey, measurement and rewards design.**
-- **No, do not call the public-to-private implementation fully cleared yet.** Obtain one written case response before launching new public reward language or assuming a click is a personal invitation.
-- Safer published-rule wording is `First-time customer drink offer`, `Request your first-visit coupon`, or `Message us about our prepared-drink special`. Keep `customer reward` wording provisional until Herbalife answers it in writing.
-- Exact numeric or `free` reward language belongs in a rule-approved private channel or individualized response.
-- Absent a retained written exception or official-program approval, current published guidance does not support publicly displaying `50% off` or `$5 To-Go Tea`. Treat both as urgent compliance-remediation decisions while obtaining the case response. Do not change them silently, but do not describe continued public display as cleared.
-
-Primary references:
-
-- [Herbalife U.S. Rules of the Road, revised June 12, 2026](https://assets.herbalifenutrition.com/content/dam/regional/nam/en_us/consumable_content/marketing_materials/guides/2020/11-Nov/RulesofConduct_EN.pdf/_jcr_content/renditions/original)
-- [Herbalife U.S. Price Advertising Guidelines, March 4, 2026](https://assets.herbalifenutrition.com/content/dam/regional/nam/en_us/consumable_content/policy-and-compliance/2024/10-oct/Price_Advertising_Guidelines_USEN.pdf/_jcr_content/renditions/original)
-- [Herbalife Price Advertising Interactive Guide](https://hnx.myherbalife.com/price-advertising)
-- [Nutrition Clubs: What is allowed and not allowed, May 2026](https://assets.herbalifenutrition.com/content/dam/regional/nam/en_us/consumable_content/policy-and-compliance/2026/05-may/MPC_AllowedAndNotAllowed_NAM_USEN.pdf/_jcr_content/renditions/original)
-
-### Written questions to retain with the project
-
-Ask Herbalife Compliance for a case number and written answers to these exact implementation questions:
-
-1. May the public Spartan website say `First-time customer drink offer` or `Claim your first-visit reward` without showing an amount, percentage or `free`?
-2. Does clicking that public call to action constitute prior personal contact or an expression of interest?
-3. Must the call to action open a private SMS, Facebook Messenger or Instagram DM, or may it open a public form that contains no price and collects a prospect's request and contact information?
-4. After submission, may an automated one-to-one email, SMS or DM state `50% off your first prepared drink`?
-5. May that private response link to an individualized, non-indexed, single-customer coupon page?
-6. May Spartan operate a deterministic reward in which an existing customer earns a prepared-drink reward only after a referred first-time customer redeems in store?
-7. May the public website say only `Earn Spartan rewards` while exact reward values appear privately?
-8. May a customer publicly share a tracked referral link if the post contains no numeric/free language and discloses that the customer may earn a Spartan reward?
-9. Is a complete-task-and-earn-reward program outside game-promotion rules when there is no chance, drawing, judging or competitive winner?
-10. Must the current public `50% off your first drink` and `$5 To-Go Tea` wording be moved to private communication?
-
-### Scope
-
-Scope is limited to obtaining and operationalizing the current written channel/wording answer. It is not a legal opinion or permission to redesign the full website.
-
-### Constraints and blockers
-
-- Public-click/private-invitation treatment is unresolved in the published materials.
-- Current public numeric offer/price wording requires an urgent explicit decision.
-- The implementation cannot be finalized from an internal interpretation alone; retain the official written response and case number.
-- This project does not authorize a website, social, email or reward launch by itself.
-
-### Deliverables
-
-- Herbalife case number and retained written response.
-- Decision table for public website, indexed pages, non-indexed result pages, email, SMS and social DM wording.
-- Explicit keep/change decision for current first-visit and To-Go Tea copy.
-- Approved public invitation, private offer, referral and reward vocabulary.
-- Dated note identifying who approved the business implementation.
-
-### Definition of done
-
-- All ten questions have written answers or clearly marked unresolved items.
-- Public numeric/free language is either supported by retained guidance or moved to the approved private channel.
-- The website/social/email implementation test proves the numeric offer cannot leak into an unapproved public/indexable surface.
-- Staff and owner use the same current offer/reward terms.
-- Any later rule change can be traced to this decision record without guessing.
+The separate no-incentivized-review rule, clear referral disclosures, consent boundaries and measurement controls remain in force. Those are operational safeguards, not a reason to keep re-opening this decision.
 
 ## Current confirmed foundation
 
@@ -112,40 +56,41 @@ Scope is limited to obtaining and operationalizing the current written channel/w
 - Brevo handles double opt-in, unsubscribe and suppression. Confirmed Brevo list membership is the subscriber source of truth.
 - GA4 measures cleaned anonymous website actions and campaign attribution. The replayable Brevo return URL is directional, not proof of list membership.
 - The current GA4 implementation does not provide an apples-to-apples pre-rebuild visitor baseline. Make forward decisions from comparable post-launch periods and business outcomes rather than raw legacy-versus-new page-view totals.
-- One permanent 15-minute Apps Script trigger sends counts-only owner submission alerts. Customer details remain in the restricted Sheet.
+- The live confirmation return card says `You’re confirmed!` and clearly indicates that the Spartan Updates subscription is confirmed.
+- Brevo has the live `CONTENT_INTERESTS` profile-update form and an active two-minute welcome automation for new confirmed list members. Re-entry is off.
+- Owner alerts are working: one permanent 15-minute Apps Script trigger sends counts-only submission alerts. Production QA confirmed that an eligible new claim produced one alert and its discovery update produced no second alert.
 - Search Console, GA4, Google Business Profile, Cloudflare redirects, social links, the menu pages and the shipped-product handoff are deployed.
 - The website can measure outbound home-product and VIP interest. It cannot currently prove a completed Herbalife signup, VIP enrollment or shipped order.
 - Square is the operational source for prepared-drink sales and redemptions, but there is no reliable automated customer-level join between Square and website submissions yet.
-- The active website/data contract supports `coupon_claim` and `email_signup`. It does not yet support interest research, discovery-source updates, referral codes, rewards or lifecycle milestones.
+- Apps Script Version `14`, internal contract `spartan-discovery-contract-v1-2026-08-16` and Worker public contract `spartan-discovery-v1-2026-08-16` are live. A new claimant may answer one optional ten-choice discovery question; the first valid answer updates the same claim row and wins on retry. The system does not create a second lead, change consent or create another owner alert.
+- The active website/data contract supports `coupon_claim`, `email_signup` and `discovery_source`. Referral codes, rewards and purchase/lifecycle milestones remain planned.
 
 ## Portfolio priority
 
 Priority is based on expected business value, time to learning, build/maintenance cost, owner involvement and dependency risk. Scores are provisional decision aids, not measured performance.
 
-| Rank | Project | Planning score | Expected value | Effort | Maintenance | Owner burden after setup | Timing |
-| ---: | --- | ---: | --- | --- | --- | --- | --- |
-| 0 | Offer-channel and reward-rule decision | Gate | Critical risk control | Low | Very low | One-time | Start now; blocks public reward launch |
-| 1 | Customer insight and confirmation foundation | 93 | High | Low-medium | Low | Very low | Build first |
-| 2 | Journey measurement and identity foundation | 91 | Very high | Medium | Low-medium | Low | Design with Project 1; implement in stages |
-| 3 | Referral and Spartan Rewards MVP | 88 | Very high potential | Medium | Medium during pilot | Low after proof | After Projects 0–2 |
-| 4 | Lifecycle email and re-engagement | 84 | High | Medium | Low | Very low | After reliable redemption/return signals |
-| 5 | Social content and engagement operating system | 82 | High | Low initially | Medium | 75–100 min/week initially | Begin in parallel at no added cost |
-| 6 | Local reviews and reputation loop | 79 | High | Low | Low | Low | Begin in parallel, no incentives |
-| 7 | Home-delivery and Wellness Rewards/VIP handoff | 76 | Medium-high | Medium | Low | Low | Improve after completion reporting is verified |
-| 8 | Spartan Games campaign framework | 68 | Medium/experimental | Low-medium | Medium while active | 45–75 min/week | After journey tracking works |
+| Rank/status | Project | Planning score | Expected value | Effort | Maintenance | Owner burden after setup | Timing |
+| --- | --- | ---: | --- | --- | --- | --- | --- |
+| **Live** | **Project 1 — Customer insight and confirmation foundation** | 93 | High | Complete | Low | Very low | Operate and measure |
+| **1 — Next** | **Project 2 — Journey measurement and identity foundation** | 91 | Very high | Medium | Low-medium | Low | Start now; implement in stages |
+| 2 | Project 3 — Referral and Spartan Rewards MVP | 88 | Very high potential | Medium | Medium during pilot | Low after proof | After Project 2 can verify redemption |
+| 3 | Project 4 — Lifecycle email and re-engagement | 84 | High | Medium | Low | Very low | Welcome is live; purchase messages follow Project 2 |
+| 4 | Project 5 — Social content and engagement operating system | 82 | High | Low initially | Medium | 75–100 min/week initially | May begin in parallel at no added cost |
+| 5 | Project 6 — Local reviews and reputation loop | 79 | High | Low | Low | Low | May begin in parallel, no incentives |
+| 6 | Project 7 — Home-delivery and Wellness Rewards/VIP handoff | 76 | Medium-high | Medium | Low | Low | Improve after completion reporting is verified |
+| 7 | Project 8 — Spartan Games campaign framework | 68 | Medium/experimental | Low-medium | Medium while active | 45–75 min/week | After journey tracking works |
 | Later | SMS, managed data hub and reusable product | — | Unknown until evidence | High | Medium-high | Varies | Explicit later-stage gates |
 
-Projects 1 and 2 share event names and data definitions, but they should not ship as one large risky release. Project 5 may run in parallel because it can use the current tracked links without changing the customer database. Projects 3, 4, 7 and 8 depend on trustworthy Project 2 milestones.
+Project 1 is complete and live. Project 2 is the active next project because Projects 3, 4, 7 and 8 depend on trustworthy redemption, return and identity milestones. Projects 5 and 6 may run in parallel because they can use current tracked links without changing the customer database.
 
 ### Operating register
 
 | Project | Status | Business owner | Dependency/blocker | Next action | Target release | One-time/monthly cost | Owner-time ceiling | Stop gate |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 0 Offer/rule decision | External answer required | Owner | Written Herbalife interpretation | Submit ten questions and retain case response | Immediate | `$0` internal; outside review TBD | One-time | Do not launch new public reward language without answer |
-| 1 Insight/confirmation | Ready to implement in three releases | Owner with technical support | Brevo profile-form capability; bounded source endpoint | Confirmation card first | Next website release | Current tools; build time TBD | ~15 min/month after launch | Roll back any question that reduces claim/signup completion |
-| 2 Measurement/identity | Design ready; implementation gated | Owner with technical support | Reliable Square identifier; provider report fields | Define Square SOP and 30-day baseline | Parallel design, staged delivery | Pilot `$0`; future data store TBD | ≤15 min/week | Defer automation if match coverage/owner burden fails |
-| 3 Referral/Rewards MVP | Planned, not live | Owner | Projects 0–2 | Finalize terms and manual 60-day pilot | After gates | Reward economics TBD; software `$0` pilot | ≤30 min/week pilot | Stop for fraud, weak observed contribution or excess work |
-| 4 Lifecycle email | Planned | Owner | Trusted redemption/return signal | Welcome automation, then one measured reminder | After Project 2 signal | Current Brevo limits; upgrades TBD | ~15 min/month | Pause on consent errors, complaints or no directional value |
+| 1 Insight/confirmation | **Live** | Owner with technical support | No release blocker; first 30-day learning window is in progress | Monitor interest/source response and form health | Live August 16, 2026 | Current tools | ~15 min/month | Roll back any question that reduces claim/signup completion |
+| 2 Measurement/identity | **Next** | Owner with technical support | Reliable Square identifier and redemption procedure | Define Square SOP, baseline and manual reconciliation ledger | Staged implementation starts now | Pilot `$0`; future data store TBD | ≤15 min/week | Defer automation if match coverage/owner burden fails |
+| 3 Referral/Rewards MVP | Planned, not live | Owner | Project 2 redemption measurement | Finalize terms and manual 60-day pilot | After measurement gate | Reward economics TBD; software `$0` pilot | ≤30 min/week pilot | Stop for fraud, weak observed contribution or excess work |
+| 4 Lifecycle email | Welcome/interest automation live; purchase lifecycle planned | Owner | Trusted redemption/return signal | Measure welcome flow; add one return message after Project 2 | Welcome live; later messages staged | Current Brevo limits; upgrades TBD | ~15 min/month | Pause on consent errors, complaints or no directional value |
 | 5 Social operating system | Ready for Stage 0 | Owner | Source pack and approval routine | Run four-week native-tools baseline | Start in parallel | `$0`; paid tool only after test | 75–100 min/week initially | No paid tool without ≥30 min/week saved or better actions |
 | 6 Reviews/reputation | Ready, no incentives | Owner | Current QR/link and neutral copy | Build digital/in-store request assets | Start in parallel | `$0` digital; printing TBD | ~15 min/month | Stop any selective/incentivized practice immediately |
 | 7 Home/VIP handoff | Partly live; reporting blocked | Owner | Site Builder AEM issue; BizWorks fields | Verify reports and resolve cart/profile backlog | After report verification | Provider tools; support cost TBD | 5–10 min/month | Do not report clicks as completions |
@@ -155,32 +100,17 @@ Projects 1 and 2 share event names and data definitions, but they should not shi
 
 ## Project 1 — Customer insight and confirmation foundation
 
-### Business problem
+**Status: complete and live as of August 16, 2026.** The release solved three separate gaps without adding another required step to the coupon or signup journey.
 
-Subscribers do not get an obvious confirmation experience, and Spartan cannot yet answer why people discovered the site or what future content they would value.
+### Live confirmation experience
 
-### Scope
+- The confirmation return card now says `You’re confirmed!` and `Your Spartan Updates subscription is confirmed.`
+- It does not show the signup form as though another registration is required.
+- Brevo confirmed-list membership, unsubscribe and suppression state remain the authoritative sendability controls; a GA4 return event is directional only.
 
-Deliver three bounded releases:
+### Live content-interest research
 
-1. **Confirmation return card:** make the Brevo return visually unmistakable without falsely claiming that a replayable URL itself proves list membership.
-2. **Content-interest research:** use a Brevo contact-specific profile-update form after double opt-in.
-3. **Discovery source:** ask one optional question after a new coupon is already confirmed and visible.
-
-### Confirmation experience
-
-Recommended page state:
-
-- Eyebrow: `Spartan Updates`
-- Heading: `Thanks for checking your email.`
-- Body: `Your confirmation link was opened. If Brevo completed the confirmation successfully and your address remains subscribed, you're set to receive Spartan Updates. Watch for menus, special hours, announcements, occasional offers and make-at-home updates. You can unsubscribe in any email.`
-- Next actions: `View the menu`, `Get directions`, `Follow Spartan`
-
-Brevo confirmed-list membership remains authoritative. The URL return event must not become a key conversion or subscriber count. Show a definitive `Subscription confirmed` state only if the backend verifies current Brevo membership without exposing contact identity in the URL, or if a signed, bounded confirmation receipt is implemented and independently tested.
-
-### Content-interest research
-
-Recommended prompt:
+The contact-specific Brevo profile-update form asks:
 
 > Help shape Spartan Updates. Which topics would you most enjoy seeing? Optional—choose up to three. This helps us decide what to create; it does not limit the general Spartan Updates you may receive.
 
@@ -198,26 +128,24 @@ Options:
 
 Rules:
 
-- Optional; Skip is always available.
-- Ask for zero to three selections; no preselection. If Brevo's current profile-form control cannot enforce a maximum, accept extra choices rather than blocking the response, and record that limitation in the launch evidence.
+- Optional and unselected by default.
+- The form asks for up to three selections. Brevo does not enforce the maximum, so an extra choice is accepted rather than blocking the response.
 - It is research/segmentation, not consent and not an exclusive delivery preference.
 - Keep one general Spartan Updates list rather than nine lists.
-- Store current choices in a Brevo `CONTENT_INTERESTS` multiple-choice attribute. The Phase 1 profile form updates current selections; it is not append-only history.
+- Current choices are stored in the Brevo `CONTENT_INTERESTS` multiple-choice attribute. The profile form updates the existing contact; it is not append-only history.
 - Document the profile-form/question version and monthly aggregate snapshot date. If per-contact response history is later required, add a separate versioned first-party research event rather than claiming the overwritten Brevo attribute is an audit log.
 - Invite people to update the answer no more than every 6–12 months.
 - Do not ask whether a person uses GLP-1 medication, peptides or supplements; has a diagnosis; or wants a specific medical/weight outcome.
 - If research news ranks highly, pilot one monthly evidence digest using primary research, systematic reviews or authoritative guidance, with source links, study limitations, no individualized advice and human review.
 - General research content must not be translated into a disease, therapeutic or product-benefit claim. Do not connect a study to a Spartan or Herbalife product unless the exact claim is supported by the current product label or retained Herbalife-approved material. Treat health/research interests as potentially sensitive, use aggregate demand first and cover their use in the privacy notice.
 
-Use Brevo's contact-specific [profile-update form](https://help.brevo.com/hc/en-us/articles/360003644360-Update-your-contacts-details-and-preferences-profile-update-form) after confirmation. Do not place this question inside the current coupon form.
+The active `Spartan Updates — Welcome + Interests v1` automation begins when a new contact joins the confirmed subscriber list, waits two minutes and sends one welcome message with the contact-specific profile link. Re-entry is off. Existing subscribers were not entered retroactively.
 
-Configure the profile form to change only `CONTENT_INTERESTS`. Test that it updates the existing contact, does not change email/phone/list membership, does not resubscribe an unsubscribed contact, and behaves safely on replay. Verify live whether the builder can enforce `choose up to three`; treat it as guidance unless enforcement is proven.
+### Live discovery-source research
 
-### Discovery-source research
+After a genuinely new coupon is confirmed and already visible, the site asks:
 
-Recommended prompt after the coupon is already shown:
-
-> One quick question—how did you first hear about Spartan? Optional.
+> One quick question—how did you first hear about Spartan? Optional—your coupon is already ready.
 
 Choices:
 
@@ -226,40 +154,33 @@ Choices:
 - Facebook
 - Instagram
 - TikTok
+- Other social media
 - Friend or family
 - Drove by / nearby
 - Community event or local group
 - Other
 
-Store self-reported source separately from referrer and UTM values; disagreement is valid information. Save to the already-confirmed record or a linked research record, never as a second lead. Send only a generic anonymous completion event to GA4.
+Apps Script Version `14` and the Worker contracts accept only these ten choices. The first valid answer updates four discovery fields on the same claim row and wins on retry. It does not append a lead, change the coupon or consent, call Brevo or queue an owner alert. Duplicate, existing and device-remembered claims do not receive the question. GA4 receives only the generic `discovery_source_saved` event after a first save, never the selected answer.
 
-### Constraints and blockers
+### Launch and QA evidence
 
-- A replayable confirmation URL cannot securely identify a subscriber. Use Brevo's contact-specific link for interest updates.
-- The discovery answer requires a narrowly allowlisted Worker/Apps Script contract change and Sheet fields.
-- No PII, interest choice or discovery response goes to GA4 or Meta.
-- Confirmation, coupon delivery and signup can never depend on answering research questions.
+- The Brevo profile form updated the same owner-controlled contact twice, preserved confirmed-list membership and created no duplicate.
+- Two owner-only welcome-flow tests delivered successfully with DKIM, SPF and DMARC passing; unsubscribe controls remained present.
+- Backend and browser validation covered allowlisted fields, exact response shapes, retries, malformed/extra-field requests, accessibility state and the rule that discovery cannot create a second lead or alert.
+- One owner-controlled production QA claim created one labeled test row. Its first discovery answer updated that row; a different retry returned `already_saved` and did not overwrite it.
+- The corresponding counts-only owner alert reached `sent` and arrived in Gmail. The discovery update generated no second alert.
+- The live Apps Script health reports the internal discovery contract, and the Worker health reports public contract `spartan-discovery-v1-2026-08-16` while retaining the existing coupon and email routes.
 
-### Deliverables
+### Operating follow-up
 
-- Accessible confirmation-return card.
-- Brevo `CONTENT_INTERESTS` multiple-choice attribute and profile-update form.
-- Welcome-email link to the interest form.
-- Post-coupon discovery control and bounded storage path.
-- Topic/source report with question versions and response counts.
-- Monthly aggregate interest snapshot; no claim of per-contact history unless a first-party research ledger is later approved.
-- Privacy-copy update and automated tests.
-
-### Definition of done
-
-- Confirmation return is obvious on 320, 390 and 430 pixel mobile widths and desktop.
-- The form is not shown as though another signup is required on that return.
-- Interest and discovery questions are optional, unselected by default and never reduce coupon/subscription completion.
-- Contact-specific interest changes update the existing contact rather than creating duplicates.
-- An operational status is produced after 30 days. Treat content decisions as directional only after at least 50 responses; report the selection bias that interests represent confirmed subscribers who received/used the profile opportunity and discovery answers represent new coupon claimants, not all visitors or store customers.
-- Brevo remains authoritative for confirmed subscribers; no personal data reaches analytics.
+- Keep the live flow stable while Project 2 begins.
+- Produce the first operational interest/source status after 30 days. Do not make content decisions until at least 50 valid responses; always show counts and selection bias.
+- Report interests as responses from confirmed subscribers who received and used the profile opportunity. Report discovery answers as responses from eligible new website coupon claimants, not all visitors or store customers.
+- Authenticate an `@spartandrink.com` Brevo sender later as a bounded deliverability/branding improvement; it is not a Project 2 blocker.
 
 ## Project 2 — Journey measurement and identity foundation
+
+**Status: next active project.** Project 1 is live; the immediate need is to connect website claims to reliable Square redemption and return evidence without building a new database first.
 
 ### Business problem
 
@@ -288,13 +209,22 @@ This is a milestone model, not a rigid one-way funnel. A current customer may su
 ### Phase 1 scope
 
 - Keep Google Sheets as the website/consent audit source.
-- Define stable internal contact/customer/referral identifiers.
-- Require a reliable Square procedure for attaching the offer/referral to a customer or transaction.
+- Define stable internal contact/customer/referral identifiers and document current match coverage.
+- Establish one owner-maintained Square procedure for attaching the first-visit offer and a stable customer identifier to the qualifying transaction.
 - Price and test Square Loyalty/customer profiles before building a second local points engine. Prefer the native POS workflow if it can represent the approved Spartan rules, customer linkage and audit trail at acceptable cost; keep the referral attribution and cross-system measurement logic provider-neutral. See [Square Loyalty API overview](https://developer.squareup.com/docs/loyalty-api/overview).
-- Maintain a small append-only redemption/referral ledger instead of editing historical events.
-- Reconcile Brevo confirmations and unsubscribes.
-- Import or reconcile authenticated MyHerbalife/BizWorks completion reports on a monthly basis if export fields allow it.
+- Maintain a small append-only redemption/return ledger for a 30-day baseline instead of editing historical events.
+- Reconcile the live Brevo confirmation, delivery, unsubscribe and suppression states needed for the weekly scorecard.
 - Publish a weekly aggregate scorecard and exception list; do not ask the owner to monitor every person manually.
+- Keep authenticated home-product outcome reconciliation as a later Project 2 lane after the local claim-to-redemption join works; it does not block the Square baseline.
+
+### Immediate next deliverable
+
+1. Write and test the Square redemption/customer-link SOP using an owner-controlled transaction.
+2. Record 30 days of new claims, discovery answers, linked redemptions, second visits, unmatched records and owner minutes.
+3. Publish the first weekly scorecard with denominators, match coverage and exclusions shown.
+4. Decide from evidence whether the current Sheet/manual ledger is sufficient or whether a managed event store has reached its documented trigger.
+
+The exact Phase 0 account checks, staff workflow, two-tab ledger, matching rules and acceptance gates are specified in [`SQUARE-JOURNEY-PILOT.md`](SQUARE-JOURNEY-PILOT.md).
 
 ### Phase 2 trigger
 
@@ -335,7 +265,7 @@ Word of mouth appears to be Spartan's highest-ROI acquisition channel, but it is
 
 ### Scope
 
-Run a deterministic 60-day pilot only after the offer/reward wording is cleared and Project 2 can verify a redemption:
+Run a deterministic 60-day pilot after Project 2 can verify a redemption. Use the owner's accepted offer/reward operating assumption for the customer journey; optional wording review may refine copy without blocking the pilot design.
 
 ```text
 Existing customer receives a unique, non-sequential referral code or QR
@@ -362,13 +292,13 @@ Rules:
 - Reward only after a new friend's verified in-store redemption, never for a click or unredeemed lead.
 - Friend supplies their own information. Do not let a referrer upload someone else's phone/email.
 - Tell the friend the referrer may earn a Spartan reward.
-- Do not activate a rewarded public-share task until the retained Herbalife response confirms the public/private channel design. Any approved share must omit numeric/free language, use the approved destination, disclose the material connection clearly—for example, `I may earn a Spartan reward if you use my link`—and satisfy the platform's promotion/endorsement rules.
+- A rewarded public share must use the owner-approved destination, disclose the material connection clearly—for example, `I may earn a Spartan reward if you use my link`—and satisfy the platform's promotion/endorsement rules.
 - No self-referrals, cash value, stacking or duplicate first-time customers.
 - Use one reward per transaction, 60-day expiry and a provisional cap of ten earned rewards per customer/month until fraud and profitability are understood.
 - Keep referral participation independent of email/SMS consent, reviews and Wellness Rewards/VIP enrollment.
 - Give non-marketing-consented customers access to their referral code in store, on an eligible receipt or through a customer-initiated result page. Deliver referral messages by email/SMS only when current permission for that channel exists.
-- Exact public and private reward wording/value remain pending the written Herbalife decision.
-- Every qualifying prepared-drink redemption, including a zero-price or discounted reward if approved, must be separately and accurately documented through the applicable Herbalife receipting process with the actual price paid. The Square ledger does not replace required Herbalife receipting.
+- Final reward wording/value is an owner decision to record before the pilot goes customer-facing; optional external wording review is non-blocking.
+- Every qualifying prepared-drink redemption or reward must be accurately recorded in Square and any other current store record, including the amount actually paid.
 
 ### Task/reward policy
 
@@ -379,16 +309,15 @@ Potential later tasks, each requiring its own economics and policy check:
 - Complete a second tracked visit.
 - Try a new drink category.
 - Participate in a future deterministic poll/feedback reward only as a separate Project 3/8 experiment with its own economics and rule review. The first Spartan Games pilot remains no-prize and offers no participation reward.
-- Share a tracked public referral with the required disclosure only after the retained Herbalife response clears the channel design.
+- Share a tracked public referral only with the required material-connection disclosure and the owner-approved channel design.
 
 Never reward a Google review, a positive rating, marketing consent, health outcome or membership enrollment. Do not award value merely for a social like/comment because it is easy to game and weakly tied to revenue.
 
 ### Constraints and blockers
 
-- Requires Project 0's written public/private offer and reward-wording decision.
-- Requires a reliable Square customer/order/referral link and required Herbalife receipting.
+- Requires a reliable Square customer/order/referral link and a simple store redemption procedure.
 - Reward amount, COGS, margin, fraud cap, expiry and staff procedure remain to be finalized.
-- Public sharing remains blocked until the retained Herbalife response clears the channel and disclosure design.
+- Public sharing requires the owner-approved channel, clear referral-reward disclosure and tracked destination.
 - Twenty matured referred claims are only a workflow smoke test; the pilot needs more matured evidence before scaling.
 
 ### Deliverables
@@ -397,16 +326,16 @@ Never reward a Google review, a positive rating, marketing consent, health outco
 - Public invitation copy, private offer message and material-connection disclosure.
 - Eligibility, expiry, exclusions, cap, fraud and support terms.
 - Manual referral/reward ledger with state transitions.
-- Square redemption, Herbalife receipting and reconciliation procedure plus staff quick guide.
+- Square redemption and reconciliation procedure plus staff quick guide.
 - Referral cohort report and reward-cost/profitability model.
 
 ### Definition of done
 
-- Written rule interpretation and final offer/reward language are retained.
+- The owner's operating assumption and final offer/reward language are retained with the pilot record.
 - Twenty or more matured referred claims complete the workflow/abuse/reconciliation smoke test; profitability/scaling waits for a larger cohort or multiple pilot periods.
 - The referrer is rewarded only once after a verified qualifying redemption.
 - Self-referrals, duplicates, reversals and expired rewards are handled.
-- Required Herbalife consumption receipts reconcile to the actual amount paid and the Square/reward record.
+- Store records reconcile to the actual amount paid and the Square/reward record.
 - Referred customers can be compared with non-referral customers on redemption and 30/60-day repeat behavior.
 - Continue only if observed attributable contribution—net collected revenue excluding tax/tips/refunds, less estimated COGS, reward value, software and valued owner/staff time—exceeds reward and operating cost by the agreed margin. Use `incremental` only with a documented holdout or credible experiment.
 
@@ -710,16 +639,15 @@ All thresholds are provisional until Spartan has a clean baseline. Change them w
 
 ## Execution sequence
 
-1. Submit the offer/reward channel questions and retain the written case answer.
-2. Implement Project 1's confirmation card.
-3. Configure Brevo content-interest research and welcome-email link.
-4. Implement the post-coupon discovery-source question as its own bounded backend release.
-5. Finalize the Project 2 event/identity model and Square redemption-link procedure; collect a 30-day baseline.
-6. Start the no-added-cost social operating system and neutral review loop in parallel.
-7. Run the manual referral MVP only after the rule and measurement gates pass.
-8. Add lifecycle automation only after redemption/return signals are trustworthy.
-9. Reconcile authenticated Wellness Rewards/VIP outcomes and improve that handoff.
-10. Run the first no-prize Spartan Games campaign after campaign attribution is proven.
+1. **Complete:** Project 1 confirmation, Brevo interest/welcome flow and post-coupon discovery are live; monitor the first 30-day learning window.
+2. **Next:** execute Project 2's Square redemption/customer-link SOP, manual ledger and weekly scorecard; collect a comparable 30-day baseline.
+3. Start the no-added-cost social operating system and neutral review loop in parallel.
+4. Run the manual referral MVP after the Project 2 redemption-measurement gate passes.
+5. Add purchase-based lifecycle automation after redemption/return signals are trustworthy; keep the live welcome flow operating.
+6. Reconcile authenticated Wellness Rewards/VIP outcomes and improve that handoff.
+7. Run the first no-prize Spartan Games campaign after campaign attribution is proven.
+
+Optional external wording review is outside the critical path and should be scheduled only if the owner wants it or a specific issue arises.
 
 ## Portfolio definition of done
 

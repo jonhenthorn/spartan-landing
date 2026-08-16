@@ -16,6 +16,15 @@ Answer five business questions without creating another owner job:
 4. Which subscribers, content and campaigns produce store or home-product action?
 5. How many people become verified home-product customers or VIP members and reorder independently?
 
+## Current live measurement foundation
+
+- The website confirmation return card is live and clearly shows the confirmed state. Its GA4 return event remains directional; Brevo list/suppression state determines send eligibility.
+- Brevo `CONTENT_INTERESTS`, the contact-specific profile-update form and the active welcome automation are live. Current selections are available in Brevo; normalized response history and recurring aggregate snapshots are not yet implemented.
+- Apps Script Version `14`, internal contract `spartan-discovery-contract-v1-2026-08-16` and Worker public contract `spartan-discovery-v1-2026-08-16` are live. The optional ten-choice source question appears only after a genuinely new coupon is confirmed.
+- The first valid discovery answer writes to the existing claim row and wins on retry. It does not append a lead, change permission/provider state or queue another owner alert.
+- Production QA confirmed a new test claim, same-row discovery save, `already_saved` retry, one counts-only owner alert and no discovery-generated second alert. Negative contract tests did not create leads.
+- Project 2 is next: establish the Square redemption/customer join and a 30-day baseline before reporting claim-to-redemption, repeat purchase or referral value.
+
 ## Source-of-truth hierarchy
 
 | Fact | Authoritative source | Supporting source | Must not be reported as proof |
@@ -28,6 +37,7 @@ Answer five business questions without creating another owner job:
 | Referral conversion | Verified referral code tied to friend's paid first visit | Self-reported discovery source | Share click, referral landing or claim alone |
 | Reward earned/redeemed | Append-only reward ledger plus Square redemption | Customer message | Referral form or social post |
 | Content interest | Brevo contact-specific profile response | Versioned research record | Email open/click inference |
+| Self-reported discovery source | Four versioned discovery fields on the eligible coupon-claim row; first answer wins | Bounded Worker response and labeled production QA | UTM/referrer, question render or GA4 completion event |
 | Home-product intent | Anonymous website outbound-click event | UTM/link log | Completed signup/order |
 | Wellness Rewards/VIP/order completion | Authenticated MyHerbalife/BizWorks report | Exact permitted provider-ID match | Storefront click or public return URL |
 | Traffic/source | GA4 cleaned anonymous event plus UTMs/referrer | Self-reported source | Raw PageView count without deduplication/context |
@@ -105,15 +115,15 @@ Store timestamps in UTC and preserve the provider/source timestamp. Enforce uniq
 | `coupon_submit_attempted` | `coupon_submit` | Browser submits offer form; not proof of server acceptance | GA4 available |
 | `coupon_claim_confirmed` | `coupon_confirmed` | Newly saved server-authenticated claim with `coupon_result=success`; duplicate/remembered retrieval does not qualify | Available |
 | `coupon_existing_retrieved` | None | Existing/duplicate/remembered coupon shown without a new claim | Planned only if needed |
-| `discovery_question_offered` | None | Optional question successfully rendered after an eligible new claim | Planned |
-| `discovery_source_submitted` | None | Optional source answer stored once/question version | Planned |
+| `discovery_question_offered` | None | Optional question successfully rendered after an eligible new claim | Live UI, but no persisted offered event; do not use as an exact denominator |
+| `discovery_source_submitted` | Same-row Sheet discovery fields; anonymous GA4 `discovery_source_saved` is supporting only | First valid allowlisted answer stored once with question/form version and recorded timestamp; retry is `already_saved` | Available |
 | `email_doi_requested` | `email_doi_requested` | Brevo accepts DOI request | Available; not confirmation |
 | `standalone_email_signup_submitted` | `email_signup_submit` | Browser submits dedicated Updates form | GA4 available; one of two DOI entry routes |
 | `email_consent_request_attempted` | Server form record/source | Versioned request counted by `form_id` for standalone versus coupon-bundled routes | Planned normalized event |
 | `email_confirmation_returned` | `email_confirmation_return` | Replayable provider redirect returns to site | Available; directional only |
-| `email_subscription_confirmed` | Brevo list/webhook event | Matching recorded website email-permission evidence **and** active dedicated-list membership **and** no unsubscribe/suppression | Reconciliation/webhook planned |
-| `content_interest_opportunity_delivered` | Brevo delivery event | Unique confirmed contact receives the profile-update opportunity | Planned |
-| `content_interests_submitted` | Brevo current attribute plus optional first-party history event | Contact-specific optional poll saved | Planned |
+| `email_subscription_confirmed` | Brevo list/webhook event | Matching recorded website email-permission evidence **and** active dedicated-list membership **and** no unsubscribe/suppression | Available in Brevo; normalized reconciliation/webhook planned |
+| `content_interest_opportunity_delivered` | Brevo welcome-email delivery | Unique confirmed contact receives the profile-update opportunity | Live provider flow; normalized delivery reconciliation planned |
+| `content_interests_submitted` | Brevo `CONTENT_INTERESTS` current attribute plus optional first-party history event | Contact-specific optional poll saved | Current state available; aggregate snapshots/history planned |
 | `order_completed` | Square paid order | Completed, net-positive, non-refunded paid order linked to contact | Reliable customer join required |
 | `order_refunded` | Square refund | Provider confirms partial/full refund | Reliable customer join required |
 | `coupon_redeemed` | Derived from Square order/discount | Paid order shows qualifying website-offer redemption | Reliable customer join required |
@@ -224,7 +234,7 @@ Report two separate series now: anonymous `home_delivery_click`/`member_savings_
 | DOI request rate | Brevo-accepted DOI requests ÷ server-recorded `email_consent_request_attempted`, deduplicated by contact and split by standalone Updates form versus coupon-bundled consent before any combined rate |
 | DOI confirmation rate | Subset of mature eligible DOI-request contacts who became active on the dedicated list within seven days ÷ unique contacts whose latest eligible DOI request has a mature seven-day window |
 | Interest research completion | Unique valid responses ÷ unique confirmed contacts whose welcome/profile email delivery containing the opportunity was confirmed; delivery is not proof the question was read |
-| Discovery response | Stored optional source answers ÷ eligible new claims with a recorded `discovery_question_offered` event; exclude duplicate/existing claims |
+| Discovery response among eligible new claims | Unique rows with a valid stored discovery answer ÷ unique server-confirmed new coupon-claim rows created while the discovery release was live; exclude duplicate/existing claims and labeled internal QA. This is an operational eligibility proxy, not an exact question-view rate, because no authoritative `discovery_question_offered` event is stored. Report save failures separately when evidence exists. |
 | Referral landing-to-claim | Valid referred claims ÷ bot-filtered unique referral sessions; reloads are not new prospects |
 | Referral claim-to-redemption | Verified referred qualifying redemptions within the selected 7/14/30-day window ÷ valid referred claims old enough for that same window |
 | Reward redemption | Redeemed rewards ÷ issued rewards old enough for the selected window |
@@ -246,10 +256,12 @@ Minimum acquisition cohorts:
 5. Facebook.
 6. Instagram.
 7. TikTok.
-8. Drove by/nearby.
-9. Community event/local group.
-10. Observed direct/non-referral.
-11. Unknown/unclassified.
+8. Other social media.
+9. Drove by/nearby.
+10. Community event/local group.
+11. Other self-reported source.
+12. Observed direct/non-referral.
+13. Unknown/unclassified.
 
 Keep observed UTM/referrer and reported discovery columns separate. A customer who reports a friend but arrives through Google is not an error; it may show how word of mouth and search reinforce each other.
 
@@ -361,7 +373,7 @@ Targets should be reset after four to eight weeks of comparable production data.
 - Historic unknown-consent contacts remain quarantined.
 - Referral friends provide their own information.
 - No reward for a review, regardless of online or physical presentation.
-- Do not activate a rewarded public-share task until the retained Herbalife response confirms the public/private channel design. Any approved share must omit numeric/free language, use the approved destination, disclose the material connection clearly and satisfy platform promotion/endorsement rules.
+- A rewarded public share must use the owner-approved channel and destination, disclose the material connection clearly and satisfy platform promotion/endorsement rules. Optional wording review is non-blocking unless the owner changes that operating decision or a specific platform/account issue arises.
 - No diagnosis, medication/GLP-1 use, weight, income or individualized health-goal collection.
 - No PII, provider IDs or interest/referral details in GA4/Meta.
 - Query consent/suppression at send time, not only when an automation was scheduled.

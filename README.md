@@ -17,6 +17,7 @@ This repository contains the static website published at [spartandrink.com](http
 - `worker/` — the dependency-free Cloudflare Worker that confirms Sheet-backed form results on the Spartan page.
 - `docs/SEO-SOCIAL-PLAYBOOK.md` — the owner routine for local search, social links and campaign attribution.
 - `docs/MARKETING-ENGAGEMENT-ROADMAP.md` — the staged plan for confirmation UX, subscriber interests, acquisition-source learning, referrals, reviews, gamification and social automation.
+- `docs/SQUARE-JOURNEY-PILOT.md` — the manual-first Project 2 plan for linking website claims to Square redemptions and repeat visits before referral/reward automation.
 - `docs/MARKETING-MEASUREMENT-DICTIONARY.md` — canonical customer milestones, source-of-truth boundaries, KPI formulas, cohorts, alerts and staged data architecture for the marketing portfolio.
 - `docs/EXTERNAL-CONFIGURATION.md` — dated, non-secret evidence of the current Cloudflare, Google and social-link configuration.
 - `spartan-landing/index.html` and `index_updated.html` — noindex browser fallbacks retained behind the active Cloudflare redirects.
