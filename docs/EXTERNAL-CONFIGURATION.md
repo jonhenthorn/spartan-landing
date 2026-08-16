@@ -14,7 +14,7 @@ This file records external configuration that cannot be inferred from GitHub alo
 - The welcome message links to the contact-specific Brevo profile-update form, not to a public or reusable form URL. It also links to the Spartan website with approved campaign labels and retains Brevo's unsubscribe controls.
 - Two owner-only automation tests were processed and delivered. The delivered messages had passing DKIM, SPF and DMARC results, a working one-click unsubscribe header and the intended reply-to address.
 - The current Gmail From address is rewritten by Brevo to an authenticated `brevosend.com` sender address. This is functional but less branded; an authenticated `@spartandrink.com` sender is a later deliverability/branding improvement.
-- The automation remained inactive while the matching website privacy disclosure was being published. Activate it only after that disclosure is live; activation applies to future list additions and does not retroactively welcome existing contacts.
+- The automation was activated on August 16 after the matching website privacy disclosure was verified live. Contact re-entry remained off. Future contacts added to list `#3` enter the flow; existing list members were not entered retroactively.
 
 ### Google Search Console refresh
 
