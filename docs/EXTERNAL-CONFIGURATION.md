@@ -110,6 +110,16 @@ This file records external configuration that cannot be inferred from GitHub alo
 - One recent paid transaction exposed stable transaction/order/receipt references but no visible customer-profile link. This sample is not a coverage estimate.
 - No customer, plan, discount, transaction or account setting was changed. Physical POS customer attachment, fixed-discount behavior, export fields and a controlled redemption/return/reversal path remain to test.
 
+### Customer-journey ledger foundation
+
+- A private recovery copy named `Spartan Leads — pre-journey-ledger backup 2026-08-16` was created before the workbook change. Its private file ID is intentionally not stored in the repository.
+- The reviewed Apps Script Head code was saved without updating the public web-app deployment. The active production deployment remains Version `14`, with the same deployment ID, public `/exec` URL and handler contracts.
+- The read-only preflight reported both `Identity Links` and `Journey Events` missing, the configured `spartan leads` tab valid, zero lead-tab writes and zero journey rows appended.
+- `setupJourneyLedgerSheets()` created exactly those two tabs. `Identity Links` has 15 reviewed headers; `Journey Events` has 28. Both contain zero data rows, freeze and bold row 1, and use plain-text formatting for identifiers.
+- A post-setup diagnosis returned `ready: true` for both tabs. A second setup returned two verified tabs with zero creations, zero header writes, zero formatting changes, zero protection changes, zero lead-tab writes and zero appended events.
+- The existing `spartan leads` view still showed 41 columns and row 247 after setup. Owner-alert diagnosis remained operational with one permanent trigger and no pending, attempting or failed alert. Public Apps Script and Worker health remained unchanged.
+- This is schema only. No Square customer, website contact, identity link, journey event, redemption, return, reward or message was created. Event entry remains blocked until the controlled POS proof and append-only writer are completed.
+
 ### Meta privacy setting still to verify
 
 - A fresh attempt to inspect Events Manager redirected to Facebook login, so automatic advanced matching and automatic form-event collection were not verified in this session.
