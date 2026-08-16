@@ -2,7 +2,7 @@
 
 This dependency-free Cloudflare Worker removes the extra Google Saved-page click from the normal website flow without returning to the old false-success behavior. The browser submits JSON to `https://spartandrink.com/api/forms`; the Worker validates the request, signs the bounded payload, and forwards it to the existing Google Apps Script. The browser receives a coupon only after Apps Script confirms the Sheet-backed result.
 
-The existing native HTML POST remains a fallback. This Worker does not replace the Sheet, coupon rules, consent evidence, or Brevo double opt-in.
+The existing native HTML POST remains a fallback. This Worker does not replace the Sheet, coupon rules, consent evidence, or Brevo double opt-in. A second, narrowly bounded route saves one optional discovery answer on an already confirmed new-coupon row.
 
 ## Secrets and variables
 
@@ -77,7 +77,63 @@ No error includes customer data, upstream response bodies, Sheet details, provid
 
 `GET /api/forms/health` returns only the safe Worker and contract versions. It does not prove the Apps Script deployment, Sheet write, Brevo delivery, or full browser flow.
 
+## Optional post-coupon discovery contract
+
+`POST /api/forms/discovery` is separate from the lead form. It accepts only same-origin `application/json`, no query string and exactly these two string fields:
+
+```json
+{
+  "submission_id": "matching-original-coupon-submission-id",
+  "discovery_source": "google_search"
+}
+```
+
+The answer must be exactly one of these ten stable values:
+
+```text
+google_search
+google_maps
+facebook
+instagram
+tiktok
+other_social_media
+friend_family
+drive_by_nearby
+community_event_local_group
+other
+```
+
+The Worker rejects missing fields, unknown or extra fields, non-string values, leading/trailing whitespace, control characters, invalid identifiers, unreviewed values, cross-origin requests, wrong methods and URL query parameters before forwarding. It adds fixed question/form metadata, an internal contract version, `response_mode=discovery_json`, timestamp, nonce and a separate HMAC-SHA256 signature. Apps Script accepts only that exact signed contract and updates only an eligible original website coupon row.
+
+Browser success is HTTP 200 with **exactly** these five fields:
+
+```json
+{
+  "ok": true,
+  "record_type": "discovery_source",
+  "submission_id": "matching-original-coupon-submission-id",
+  "discovery_result": "saved",
+  "discovery_contract_version": "spartan-discovery-v1-2026-08-16"
+}
+```
+
+`discovery_result` is `saved` for the first answer or `already_saved` after an answer already exists. The first answer wins. Neither success nor error returns the selected answer, contact data, coupon details, consent/provider state, Sheet location or exception text. An unknown/ineligible identifier is a bounded `discovery_not_saved` failure. A public 200 is accepted by the browser only when all five keys, the public contract version, record type and pending submission ID match exactly.
+
+The question is displayed only after a newly confirmed coupon is already visible. Skipping it causes no request. The save does not append a lead, affect coupon use, create marketing permission, call Brevo or create an owner alert. The browser sends GA4 only the generic `discovery_source_saved` event after a first save; it never sends the selected answer, and this event is blocked from Meta.
+
 ## Deployment order and rollback
+
+### Discovery incremental release
+
+1. Run both repository validators.
+2. Publish Apps Script first and verify its health reports internal discovery contract `spartan-discovery-contract-v1-2026-08-16`.
+3. Deploy this Worker and verify health reports public discovery contract `spartan-discovery-v1-2026-08-16`.
+4. Test invalid, cross-origin, extra-field, unknown-ID, first-save and retry cases before exposing the question.
+5. Publish the frontend last, then reconcile one owner-controlled new-coupon submission to the same Sheet row.
+
+Rollback by hiding the frontend question first. The unused route can remain without affecting existing forms. If necessary, remove the Worker discovery route second and the Apps Script discovery handler last. Do not delete the customer's row or clear a saved answer as a rollback technique.
+
+### Original form-service deployment
 
 1. Run `node scripts/validate-form-backend.mjs` from the repository root.
 2. Publish a compatibility frontend that requires v3.2 plus this Worker contract for JSON results but temporarily accepts both v3.1 and v3.2 native fallback returns. Keep the existing form `action` and native POST behavior. Until the Worker exists, JSON attempts fail closed and visitors may use the visible fallback.
@@ -97,4 +153,5 @@ Rollback by removing or disabling the two Worker routes. The unchanged form acti
 - The upstream URL must be HTTPS, use a `google.com` host, and match the Apps Script `/macros/s/.../exec` path shape.
 - Responses are `no-store`; cross-origin browser requests, unexpected keys, non-string values, control characters, oversized bodies, and mismatched upstream results are rejected.
 - Submission IDs make signed retries idempotent. The Sheet remains authoritative; a 200 response alone is not a reason to erase or rewrite consent evidence.
-- Origin checks are browser protections, not bot authentication. Before production, apply a conservative Cloudflare rate limit to `POST /api/forms`, monitor Worker/Apps Script/Brevo quotas, and retain the honeypot. The public native Apps Script fallback still requires abuse monitoring.
+- Discovery has its own request allowlist, signed-field list, internal upstream contract and exact five-field public response. It cannot reuse the broader lead-form payload or return an answer echo.
+- Origin checks are browser protections, not bot authentication. Before production, apply a conservative Cloudflare rate limit to both `POST /api/forms` and `POST /api/forms/discovery`, monitor Worker/Apps Script/Brevo quotas, and retain the honeypot. The public native Apps Script fallback still requires abuse monitoring.

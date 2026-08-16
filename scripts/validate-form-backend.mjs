@@ -48,6 +48,22 @@ const couponPayload = {
   email: "test@example.com",
   email_consent: "",
 };
+const discoveryPayload = {
+  submission_id: couponPayload.submission_id,
+  discovery_source: "google_search",
+};
+const discoverySourceValues = [
+  "google_search",
+  "google_maps",
+  "facebook",
+  "instagram",
+  "tiktok",
+  "other_social_media",
+  "friend_family",
+  "drive_by_nearby",
+  "community_event_local_group",
+  "other",
+];
 
 try {
   const health = await worker.fetch(new Request("https://spartandrink.com/api/forms/health"), env);
@@ -57,6 +73,7 @@ try {
     service: "spartan-form-proxy",
     handler_version: "spartan-forms-v3.2-2026-08-15",
     worker_form_contract_version: "spartan-worker-form-v1-2026-08-15",
+    discovery_contract_version: "spartan-discovery-v1-2026-08-16",
   });
 
   const missingOrigin = await worker.fetch(websiteRequest(couponPayload, {
@@ -86,6 +103,46 @@ try {
     phone: "",
   }), env);
   assert.equal(missingEmailPermission.status, 400);
+
+  const missingDiscoverySource = await worker.fetch(websiteRequest({
+    submission_id: discoveryPayload.submission_id,
+  }, { url: "https://spartandrink.com/api/forms/discovery" }), env);
+  assert.equal(missingDiscoverySource.status, 400);
+
+  for (const invalidSource of ["", "linkedin", "Google Search", "google_search\n"]) {
+    const invalidDiscovery = await worker.fetch(websiteRequest({
+      ...discoveryPayload,
+      discovery_source: invalidSource,
+    }, { url: "https://spartandrink.com/api/forms/discovery" }), env);
+    assert.equal(invalidDiscovery.status, 400, `Discovery must reject ${JSON.stringify(invalidSource)}`);
+    const invalidDiscoveryBody = await invalidDiscovery.json();
+    if (invalidSource) {
+      assert.equal(JSON.stringify(invalidDiscoveryBody).includes(invalidSource), false);
+    }
+  }
+
+  const discoveryExtraField = await worker.fetch(websiteRequest({
+    ...discoveryPayload,
+    email: couponPayload.email,
+  }, { url: "https://spartandrink.com/api/forms/discovery" }), env);
+  assert.equal(discoveryExtraField.status, 400);
+
+  const discoveryCrossOrigin = await worker.fetch(websiteRequest(discoveryPayload, {
+    url: "https://spartandrink.com/api/forms/discovery",
+    headers: { Origin: "https://example.com", "Sec-Fetch-Site": "cross-site" },
+  }), env);
+  assert.equal(discoveryCrossOrigin.status, 403);
+
+  const discoveryQuery = await worker.fetch(websiteRequest(discoveryPayload, {
+    url: "https://spartandrink.com/api/forms/discovery?discovery_source=google_search",
+  }), env);
+  assert.equal(discoveryQuery.status, 400);
+
+  const discoveryGet = await worker.fetch(websiteRequest(discoveryPayload, {
+    url: "https://spartandrink.com/api/forms/discovery",
+    method: "GET",
+  }), env);
+  assert.equal(discoveryGet.status, 405);
 
   let forwardedParams;
   globalThis.fetch = async (url, options) => {
@@ -170,11 +227,130 @@ try {
   assert.equal(mismatch.status, 502);
   assert.equal((await mismatch.json()).code, "invalid_form_service_response");
 
+  let forwardedDiscoveryParams;
+  const discoveryUpstreamResult = {
+    ok: true,
+    record_type: "discovery_source",
+    submission_id: discoveryPayload.submission_id,
+    discovery_result: "saved",
+    discovery_contract_version: "spartan-discovery-contract-v1-2026-08-16",
+  };
+  globalThis.fetch = async (url, options) => {
+    assert.equal(url, appsScriptUrl);
+    assert.equal(options.method, "POST");
+    assert.equal(options.redirect, "follow");
+    forwardedDiscoveryParams = new URLSearchParams(options.body);
+    return new Response(JSON.stringify(discoveryUpstreamResult), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+  const discoverySuccess = await worker.fetch(websiteRequest(discoveryPayload, {
+    url: "https://spartandrink.com/api/forms/discovery",
+  }), env);
+  assert.equal(discoverySuccess.status, 200);
+  const discoverySuccessBody = await discoverySuccess.json();
+  assert.deepEqual(discoverySuccessBody, {
+    ok: true,
+    record_type: "discovery_source",
+    submission_id: discoveryPayload.submission_id,
+    discovery_result: "saved",
+    discovery_contract_version: "spartan-discovery-v1-2026-08-16",
+  });
+  assert.deepEqual(Object.keys(discoverySuccessBody).sort(), [
+    "discovery_contract_version",
+    "discovery_result",
+    "ok",
+    "record_type",
+    "submission_id",
+  ]);
+  assert.equal(JSON.stringify(discoverySuccessBody).includes(discoveryPayload.discovery_source), false);
+  assert.equal(forwardedDiscoveryParams.get("record_type"), "discovery_source");
+  assert.equal(forwardedDiscoveryParams.get("submission_id"), discoveryPayload.submission_id);
+  assert.equal(forwardedDiscoveryParams.get("discovery_source"), discoveryPayload.discovery_source);
+  assert.equal(
+    forwardedDiscoveryParams.get("discovery_source_question_version"),
+    "spartan-discovery-source-question-v1-2026-08-16",
+  );
+  assert.equal(forwardedDiscoveryParams.get("discovery_source_form_id"), "post-coupon-discovery-v1");
+  assert.equal(forwardedDiscoveryParams.get("response_mode"), "discovery_json");
+  assert.equal(
+    forwardedDiscoveryParams.get("discovery_contract_version"),
+    "spartan-discovery-contract-v1-2026-08-16",
+  );
+  assert.match(forwardedDiscoveryParams.get("worker_signature"), /^[a-f0-9]{64}$/);
+  assert.match(forwardedDiscoveryParams.get("worker_nonce"), /^[a-f0-9-]{36}$/i);
+  assert.equal(forwardedDiscoveryParams.toString().includes(sharedSecret), false);
+  assert.deepEqual(
+    [...forwardedDiscoveryParams.keys()].sort(),
+    [
+      "discovery_contract_version",
+      "discovery_source",
+      "discovery_source_form_id",
+      "discovery_source_question_version",
+      "record_type",
+      "response_mode",
+      "submission_id",
+      "worker_nonce",
+      "worker_signature",
+      "worker_timestamp",
+    ].sort(),
+  );
+
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    ...discoveryUpstreamResult,
+    discovery_result: "already_saved",
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+  const discoveryAlreadySaved = await worker.fetch(websiteRequest({
+    ...discoveryPayload,
+    discovery_source: "instagram",
+  }, { url: "https://spartandrink.com/api/forms/discovery" }), env);
+  assert.equal(discoveryAlreadySaved.status, 200);
+  assert.equal((await discoveryAlreadySaved.json()).discovery_result, "already_saved");
+
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    ...discoveryUpstreamResult,
+    discovery_source: discoveryPayload.discovery_source,
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+  const discoveryAnswerEcho = await worker.fetch(websiteRequest(discoveryPayload, {
+    url: "https://spartandrink.com/api/forms/discovery",
+  }), env);
+  assert.equal(discoveryAnswerEcho.status, 502, "An upstream answer echo must fail the exact contract");
+
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    ...discoveryUpstreamResult,
+    submission_id: "unknown-coupon-id",
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+  const discoveryMismatchedId = await worker.fetch(websiteRequest(discoveryPayload, {
+    url: "https://spartandrink.com/api/forms/discovery",
+  }), env);
+  assert.equal(discoveryMismatchedId.status, 502);
+
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    ok: false,
+    code: "discovery_not_saved",
+    discovery_contract_version: "spartan-discovery-contract-v1-2026-08-16",
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+  const unknownDiscoveryId = await worker.fetch(websiteRequest({
+    ...discoveryPayload,
+    submission_id: "unknown-coupon-id",
+  }, { url: "https://spartandrink.com/api/forms/discovery" }), env);
+  assert.equal(unknownDiscoveryId.status, 422);
+  const unknownDiscoveryBody = await unknownDiscoveryId.json();
+  assert.equal(unknownDiscoveryBody.code, "discovery_not_saved");
+  assert.equal(JSON.stringify(unknownDiscoveryBody).includes(discoveryPayload.discovery_source), false);
+
   const codeGs = fs.readFileSync(new URL("../apps-script/Code.gs", import.meta.url), "utf8");
   const mockProperties = new Map([["WORKER_SHARED_SECRET", sharedSecret]]);
   const appsScript = vm.runInNewContext(`(() => {
     ${codeGs}
-    return { canonicalWorkerPayload_, verifyWorkerRequest_ };
+    return {
+      canonicalWorkerPayload_,
+      verifyWorkerRequest_,
+      canonicalDiscoveryWorkerPayload_,
+      verifyDiscoveryWorkerRequest_,
+      discoverySourceValues: DISCOVERY_SOURCE_VALUES
+    };
   })()`, {
     Date,
     encodeURIComponent,
@@ -210,9 +386,36 @@ try {
   };
   assert.equal(appsScript.verifyWorkerRequest_(expiredParams), false);
 
-  assert.equal(/console\.(?:log|error|warn)/.test(
-    fs.readFileSync(new URL("../worker/src/index.mjs", import.meta.url), "utf8"),
-  ), false, "Worker source must not log request or upstream data");
+  const signedDiscoveryParams = Object.fromEntries(forwardedDiscoveryParams.entries());
+  assert.equal(appsScript.verifyDiscoveryWorkerRequest_(signedDiscoveryParams), true);
+  assert.deepEqual(Array.from(appsScript.discoverySourceValues), discoverySourceValues);
+  assert.equal(
+    appsScript.canonicalDiscoveryWorkerPayload_(signedDiscoveryParams),
+    [
+      "record_type", "submission_id", "discovery_source",
+      "discovery_source_question_version", "discovery_source_form_id",
+      "response_mode", "discovery_contract_version", "worker_timestamp", "worker_nonce",
+    ].map((field) => `${field}=${encodeURIComponent(forwardedDiscoveryParams.get(field) || "")}`).join("&"),
+  );
+  assert.equal(appsScript.verifyDiscoveryWorkerRequest_({
+    ...signedDiscoveryParams,
+    discovery_source: "instagram",
+  }), false, "A changed answer must invalidate the discovery signature");
+
+  const workerSource = fs.readFileSync(new URL("../worker/src/index.mjs", import.meta.url), "utf8");
+  const workerDiscoveryValuesBlock = workerSource.match(
+    /const DISCOVERY_SOURCE_VALUES = new Set\(\[([\s\S]*?)\n\]\);/,
+  )?.[1] || "";
+  assert.deepEqual(
+    [...workerDiscoveryValuesBlock.matchAll(/"([a-z_]+)"/g)].map((match) => match[1]),
+    discoverySourceValues,
+    "Worker and Apps Script discovery enums must stay synchronized",
+  );
+  assert.equal(
+    /console\.(?:log|error|warn)/.test(workerSource),
+    false,
+    "Worker source must not log request or upstream data",
+  );
 
   console.log("Form backend validation passed.");
 } finally {

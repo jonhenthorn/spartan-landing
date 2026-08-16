@@ -43,6 +43,10 @@ const menuPage = pageSources.get("menu/index.html");
 const productsPage = pageSources.get("products-at-home/index.html");
 const privacyPolicy = pageSources.get("privacy.html");
 assert.match(privacyPolicy, /https:\/\/policies\.google\.com\/technologies\/partner-sites/);
+assert.match(privacyPolicy, /Optional discovery-source question/);
+assert.match(privacyPolicy, /use it for aggregate marketing attribution and planning/);
+assert.match(privacyPolicy, /Answering or skipping does not change the coupon/);
+assert.match(privacyPolicy, /We do not send the selected answer to Google Analytics or Meta\./);
 
 for (const page of ["index.html", "menu/index.html", "products-at-home/index.html", "privacy.html", "offer-terms.html"]) {
   const source = pageSources.get(page);
@@ -311,6 +315,7 @@ assert.match(siteScript, /data-track-view/);
 assert.match(siteScript, /link_location:/);
 const metaBlockedList = siteScript.match(/const metaBlockedEvents = new Set\(\[([\s\S]*?)\n  \]\);/)?.[1] || "";
 for (const eventName of [
+  "discovery_source_saved",
   "home_products_view",
   "home_delivery_click",
   "member_savings_click",
@@ -320,6 +325,63 @@ for (const eventName of [
   assert.match(metaBlockedList, new RegExp(`"${eventName}"`), `${eventName} must remain blocked from Meta`);
 }
 assert.match(siteScript, /typeof window\.fbq === "function" && !metaBlockedEvents\.has\(eventName\)/);
+const discoverySourceValues = [
+  "google_search",
+  "google_maps",
+  "facebook",
+  "instagram",
+  "tiktok",
+  "other_social_media",
+  "friend_family",
+  "drive_by_nearby",
+  "community_event_local_group",
+  "other"
+];
+const discoveryFormBlock = homepage.match(
+  /<form class="coupon-discovery" id="coupon-discovery-form" data-coupon-discovery hidden>([\s\S]*?)<\/form>/
+)?.[1];
+assert.ok(discoveryFormBlock, "The initially hidden post-coupon discovery form is missing");
+assert.match(discoveryFormBlock, /One quick question—how did you first hear about Spartan\?/);
+assert.match(discoveryFormBlock, /Optional—your coupon is already ready\./);
+assert.match(discoveryFormBlock, /type="button" data-discovery-skip>No thanks<\/button>/);
+assert.match(discoveryFormBlock, /role="status" aria-live="polite" tabindex="-1" data-discovery-status/);
+assert.doesNotMatch(discoveryFormBlock, /\b(?:checked|required)\b/, "Discovery must have no default or required answer");
+assert.deepEqual(
+  [...discoveryFormBlock.matchAll(/name="discovery_source" value="([^"]+)"/g)].map((match) => match[1]),
+  discoverySourceValues,
+  "The optional discovery question must expose exactly the reviewed ten choices"
+);
+const scriptDiscoveryValues = siteScript.match(
+  /const discoverySources = new Set\(\[([\s\S]*?)\n  \]\);/
+)?.[1] || "";
+assert.deepEqual(
+  [...scriptDiscoveryValues.matchAll(/"([a-z_]+)"/g)].map((match) => match[1]),
+  discoverySourceValues,
+  "Browser validation and visible discovery choices must stay synchronized"
+);
+assert.match(siteScript, /const discoveryEndpoint = "\/api\/forms\/discovery"/);
+assert.match(siteScript, /const discoveryContractVersion = "spartan-discovery-v1-2026-08-16"/);
+assert.match(siteScript, /body: JSON\.stringify\(\{\s*submission_id: submissionId,\s*discovery_source: discoverySource\s*\}\)/);
+assert.match(siteScript, /const expectedKeys = \[\s*"discovery_contract_version",\s*"discovery_result",\s*"ok",\s*"record_type",\s*"submission_id"\s*\]/);
+assert.match(siteScript, /actualKeys\.length === expectedKeys\.length/);
+assert.match(siteScript, /\["saved", "already_saved"\]\.includes\(result\.discovery_result\)/);
+assert.match(siteScript, /if \(couponStatus === "success"\) \{[\s\S]*?showDiscoveryPrompt\(submissionId\);[\s\S]*?\n    \}/);
+assert.equal(
+  (siteScript.match(/showDiscoveryPrompt\(submissionId\);/g) || []).length,
+  1,
+  "Only a newly confirmed coupon may reveal the discovery question"
+);
+assert.match(siteScript, /showCouponResult\(rememberedCode, "", "remembered"\)/);
+assert.match(siteScript, /couponStatus === "duplicate" \? "duplicate" : "success"/);
+assert.match(siteScript, /couponDiscoverySkip\?\.addEventListener\("click", \(\) => \{\s*resetDiscoveryPrompt\(\);/);
+assert.match(siteScript, /if \(result\.discovery_result === "saved"\) track\("discovery_source_saved"\);/);
+assert.match(siteScript, /couponDiscoveryForm\.removeAttribute\("aria-busy"\);[\s\S]*?couponDiscoveryStatus\?\.focus\(\{ preventScroll: true \}\);/);
+assert.match(siteScript, /couponDiscoverySkip\?\.addEventListener\("click", \(\) => \{\s*resetDiscoveryPrompt\(\);\s*couponResultNextAction\?\.focus\(\{ preventScroll: true \}\);/);
+assert.doesNotMatch(
+  siteScript,
+  /track\("discovery_source_saved"\s*,/,
+  "Discovery analytics must remain a generic saved event without the selected answer"
+);
 assert.match(siteScript, /crypto\.randomUUID/);
 assert.match(siteScript, /prepareSubmission\(couponForm, "coupon"\)/);
 assert.match(siteScript, /returnedSubmissionId === pendingSubmission\.id/);
@@ -638,7 +700,99 @@ assert.equal(rows.at(-1)[indexOf("submission_id")], "validation-p1");
 assert.equal(rows.at(-1)[indexOf("handler_version")], "spartan-forms-v3.2-2026-08-15");
 assert.equal(rows.at(-1)[indexOf("owner_notification_status")], "pending");
 assert.deepEqual(rows[0].slice(0, 5), ["timestamp", "name", "phone", "email", "source_ip"]);
-assert.equal(rows[0].length, 37);
+assert.equal(rows[0].length, 41);
+const discoveryHeaders = [
+  "discovery_source",
+  "discovery_source_question_version",
+  "discovery_source_form_id",
+  "discovery_source_recorded_at"
+];
+assert.deepEqual(rows[0].slice(-4), discoveryHeaders);
+
+const discoveryWriteBlock = appsScriptSource.match(
+  /updateRecordFields_\(sheet, headers, target\.rowNumber, \{([\s\S]*?)\n    \}\);/
+)?.[1] || "";
+assert.ok(discoveryWriteBlock, "Discovery evidence write block is missing");
+assert.ok(
+  discoveryWriteBlock.indexOf("discovery_source_recorded_at")
+    < discoveryWriteBlock.indexOf("discovery_source: discoverySource"),
+  "Discovery source must remain the final idempotency-sentinel write"
+);
+
+const p1Row = rows.at(-1);
+const p1RowBeforeDiscovery = Array.from(p1Row);
+const rowCountBeforeDiscovery = rows.length;
+const providerRequestCountBeforeDiscovery = brevoRequests.length;
+const ownerMailCountBeforeDiscovery = ownerNotificationMails.length;
+const savedDiscovery = context.processDiscoverySource_({
+  submission_id: "validation-p1",
+  discovery_source: "google_search"
+});
+assert.equal(savedDiscovery.submissionId, "validation-p1");
+assert.equal(savedDiscovery.discoveryResult, "saved");
+assert.equal(rows.length, rowCountBeforeDiscovery, "A discovery answer must update the coupon row, not append a row");
+assert.equal(p1Row[indexOf("discovery_source")], "google_search");
+assert.equal(
+  p1Row[indexOf("discovery_source_question_version")],
+  "spartan-discovery-source-question-v1-2026-08-16"
+);
+assert.equal(p1Row[indexOf("discovery_source_form_id")], "post-coupon-discovery-v1");
+assert.ok(p1Row[indexOf("discovery_source_recorded_at")] instanceof Date);
+for (const header of rows[0]) {
+  if (discoveryHeaders.includes(header)) continue;
+  assert.deepEqual(
+    p1Row[indexOf(header)],
+    p1RowBeforeDiscovery[indexOf(header)],
+    `Discovery must not mutate ${header}`
+  );
+}
+assert.equal(brevoRequests.length, providerRequestCountBeforeDiscovery, "Discovery must not call Brevo");
+assert.equal(ownerNotificationMails.length, ownerMailCountBeforeDiscovery, "Discovery must not send an owner alert");
+
+// Simulate a failure after evidence cells were written but before the source
+// sentinel. The retry must finish the same row rather than treating it as done.
+p1Row[indexOf("discovery_source")] = "";
+p1Row[indexOf("discovery_source_question_version")] = "spartan-discovery-source-question-v1-2026-08-16";
+p1Row[indexOf("discovery_source_form_id")] = "post-coupon-discovery-v1";
+p1Row[indexOf("discovery_source_recorded_at")] = new Date("2026-08-16T12:00:00Z");
+const completedPartialDiscovery = context.processDiscoverySource_({
+  submission_id: "validation-p1",
+  discovery_source: "google_search"
+});
+assert.equal(completedPartialDiscovery.discoveryResult, "saved");
+assert.equal(p1Row[indexOf("discovery_source")], "google_search");
+
+const p1RowAfterFirstDiscovery = Array.from(p1Row);
+const repeatedDiscovery = context.processDiscoverySource_({
+  submission_id: "validation-p1",
+  discovery_source: "instagram"
+});
+assert.equal(repeatedDiscovery.discoveryResult, "already_saved");
+assert.deepEqual(p1Row, p1RowAfterFirstDiscovery, "The first discovery answer must win on every retry");
+assert.throws(
+  () => context.processDiscoverySource_({
+    submission_id: "validation-p1",
+    discovery_source: "not_a_reviewed_source"
+  }),
+  /Invalid discovery source/
+);
+assert.throws(
+  () => context.processDiscoverySource_({
+    submission_id: "validation-unknown-coupon",
+    discovery_source: "google_maps"
+  }),
+  /Eligible coupon claim not found/
+);
+assert.throws(
+  () => context.processDiscoverySource_({
+    submission_id: "validation-historic-consent",
+    discovery_source: "friend_family"
+  }),
+  /Eligible coupon claim not found/,
+  "A repeat/historic coupon row must not become eligible for the new-only question"
+);
+assert.equal(rows.length, rowCountBeforeDiscovery);
+assert.deepEqual(p1Row, p1RowAfterFirstDiscovery);
 
 const countBeforeP1Retry = rows.length;
 const p1Retry = submit(p1Parameters);
@@ -799,6 +953,7 @@ assert.deepEqual(JSON.parse(healthResponse.text), {
   handler_version: "spartan-forms-v3.2-2026-08-15",
   form_contract_version: "spartan-form-contract-v3-2026-08-10",
   worker_form_contract_version: "spartan-worker-form-v1-2026-08-15",
+  discovery_contract_version: "spartan-discovery-contract-v1-2026-08-16",
   worker_json_configured: false,
   owner_notification_version: "spartan-owner-notifications-v1-2026-08-16",
   owner_notifications_configured: false,
@@ -806,7 +961,7 @@ assert.deepEqual(JSON.parse(healthResponse.text), {
   legacy_get_compatibility: true,
   legacy_get_state: "enabled",
   legacy_get_until: "2099-09-10T00:00:00.000Z",
-  supported_record_types: ["coupon_claim", "email_signup"]
+  supported_record_types: ["coupon_claim", "email_signup", "discovery_source"]
 });
 
 scriptProperties.LEGACY_GET_UNTIL = "2020-01-01T00:00:00.000Z";
@@ -904,8 +1059,9 @@ rows[0][0] = originalFirstHeader;
 const customRows = [["timestamp", "name", "phone", "email", "source_ip", "owner_note"]];
 const customHeaders = context.ensureHeaders_(makeSheet(customRows));
 assert.deepEqual(customRows[0].slice(0, 6), ["timestamp", "name", "phone", "email", "source_ip", "owner_note"]);
-assert.equal(Array.from(customHeaders).length, 38);
-assert.equal(customRows[0].at(-1), "owner_notification_sent_at");
+assert.equal(Array.from(customHeaders).length, 42);
+assert.deepEqual(customRows[0].slice(-4), discoveryHeaders);
+assert.ok(customRows[0].indexOf("owner_notification_sent_at") < customRows[0].indexOf("discovery_source"));
 
 const notificationRows = [["timestamp", "name", "phone", "email", "source_ip"]];
 const notificationSheet = makeSheet(notificationRows, 24680);

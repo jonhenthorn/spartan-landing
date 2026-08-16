@@ -1,6 +1,6 @@
 # Spartan website form handler
 
-This Google Apps Script is the Sheet-backed service for Spartan Nutrition's first-drink offer and permission-based email signup. It preserves the existing Sheet's five historical columns, records auditable consent evidence, and asks Brevo to send a double-opt-in confirmation only for a new affirmative email request. Version 3.2 also supports the authenticated same-origin Cloudflare Worker in `../worker/`, so a confirmed coupon can appear on the Spartan page without an extra Google Saved-page click.
+This Google Apps Script is the Sheet-backed service for Spartan Nutrition's first-drink offer, permission-based email signup and optional post-coupon discovery question. It preserves the existing Sheet's five historical columns, records auditable consent evidence, and asks Brevo to send a double-opt-in confirmation only for a new affirmative email request. Version 3.2 also supports the authenticated same-origin Cloudflare Worker in `../worker/`, so a confirmed coupon can appear on the Spartan page without an extra Google Saved-page click.
 
 The Sheet is the evidence record for website submissions. Brevo remains responsible for confirmation delivery, list membership, unsubscribes, and suppression. A separate counts-only owner alert queue reports newly saved rows without putting customer details into email. A Brevo or owner-alert failure never erases a successful Sheet write or turns the public form response into a false failure.
 
@@ -17,6 +17,7 @@ Open the deployed `/exec` URL with no lead fields. Before the refreshed website 
   "handler_version": "spartan-forms-v3.2-2026-08-15",
   "form_contract_version": "spartan-form-contract-v3-2026-08-10",
   "worker_form_contract_version": "spartan-worker-form-v1-2026-08-15",
+  "discovery_contract_version": "spartan-discovery-contract-v1-2026-08-16",
   "worker_json_configured": true,
   "owner_notification_version": "spartan-owner-notifications-v1-2026-08-16",
   "owner_notifications_configured": true,
@@ -24,7 +25,7 @@ Open the deployed `/exec` URL with no lead fields. Before the refreshed website 
   "legacy_get_compatibility": true,
   "legacy_get_state": "enabled",
   "legacy_get_until": "2026-09-10T05:00:00.000Z",
-  "supported_record_types": ["coupon_claim", "email_signup"]
+  "supported_record_types": ["coupon_claim", "email_signup", "discovery_source"]
 }
 ```
 
@@ -35,7 +36,7 @@ Open the deployed `/exec` URL with no lead fields. Before the refreshed website 
 - `missing_cutoff`: the property is absent or blank.
 - `invalid_cutoff`: the value is not the required UTC ISO format.
 
-`worker_json_configured` proves only that a secret of the minimum length exists in Apps Script Properties; it never reveals the secret. `owner_notifications_configured` means owner delivery is enabled, the required properties are complete, and the exact configured `SHEET_NAME` tab currently resolves. It does not prove that the current account owns an operational trigger; use `diagnoseOwnerNotifications()` for that. Health proves which handler answers the endpoint. It does not prove that a POST reaches the intended Sheet, that the Worker secret matches, that Brevo can deliver the confirmation message, or that the browser result flow works.
+`worker_json_configured` proves only that a secret of the minimum length exists in Apps Script Properties; it never reveals the secret. The internal discovery contract version proves only that this handler recognizes signed discovery requests. `owner_notifications_configured` means owner delivery is enabled, the required properties are complete, and the exact configured `SHEET_NAME` tab currently resolves. It does not prove that the current account owns an operational trigger; use `diagnoseOwnerNotifications()` for that. Health proves which handler answers the endpoint. It does not prove that a POST reaches the intended Sheet, that the Worker secret matches, that Brevo can deliver the confirmation message, or that the browser result flow works.
 
 ### Verified production snapshot — August 10, 2026
 
@@ -131,6 +132,19 @@ Production already runs the v3.2 handler and Worker-v1 contract. For the August 
 
 After the incremental deployment, require the new notification health fields, run the disabled diagnostic, complete the controlled counts-only alert and exact-retry checks, enable delivery, and install exactly one 15-minute trigger from the durable business account. The broader sequence below remains the clean-install and disaster-recovery procedure.
 
+### Post-coupon discovery incremental release
+
+Deploy this addition backend first. Preserve the existing `/exec` URL, Script Properties, Brevo configuration, owner-notification trigger and current coupon/email behavior.
+
+1. Run both local validators and record the production Sheet header/row baseline.
+2. Publish the reviewed `Code.gs` as a new version of the existing deployment.
+3. Verify health reports `discovery_contract_version=spartan-discovery-contract-v1-2026-08-16` and includes `discovery_source` in `supported_record_types`.
+4. Deploy the Worker discovery route and verify its public contract by following `../worker/README.md`.
+5. Only after both backends pass, publish the frontend that reveals the optional question for a newly confirmed coupon.
+6. Use one owner-controlled, genuinely new coupon. Confirm that one answer updates that coupon's existing row, a retry returns `already_saved`, and no lead row, permission change, provider request or owner alert is created.
+
+Rollback in reverse exposure order: hide the frontend question first, then remove the Worker discovery route if needed, and remove the Apps Script discovery handler last. Leaving the unused backend route in place temporarily is safer than serving a question that has nowhere to save. Never roll back by deleting or rewriting customer rows.
+
 1. Export or copy the current Sheet and record its baseline row count, exact tab name, and full header row.
 2. Visually confirm the first five headers are exactly `timestamp`, `name`, `phone`, `email`, and `source_ip`.
 3. Open the Apps Script project currently serving the website endpoint. Preserve its current code, Script Properties, and deployment details.
@@ -177,6 +191,15 @@ The Worker rejects unexpected keys, including `return_url`, `consent_language`, 
 
 The Worker adds `response_mode=json`, a timestamp, a nonce, and an HMAC-SHA256 signature. Those server-only fields and `WORKER_SHARED_SECRET` must never be created by or exposed to browser code.
 
+The optional discovery request is deliberately separate. The browser sends only `submission_id` and `discovery_source` to same-origin `POST /api/forms/discovery`. `discovery_source` must be exactly one of:
+
+```text
+google_search, google_maps, facebook, instagram, tiktok, other_social_media,
+friend_family, drive_by_nearby, community_event_local_group, other
+```
+
+The Worker supplies and signs `record_type=discovery_source`, `discovery_source_question_version=spartan-discovery-source-question-v1-2026-08-16`, `discovery_source_form_id=post-coupon-discovery-v1`, `response_mode=discovery_json`, the internal `discovery_contract_version=spartan-discovery-contract-v1-2026-08-16`, timestamp and nonce. Apps Script rejects an unknown identifier, an ineligible row, an unreviewed value, extra or altered signed data, an expired signature and any mismatched contract metadata.
+
 The server, not a client-supplied hidden field, records the canonical evidence:
 
 - Version: `email-updates-v1-2026-07-31`
@@ -189,6 +212,8 @@ The visible consent label must retain the same meaning and frequency promise. A 
 The normal JSON result contains `ok`, `record_type`, `submission_id`, `handler_version`, `worker_form_contract_version`, `filtered`, `coupon_result`, `coupon_code`, and `updates_result`. The website must accept it only when both version strings and the pending identifier match. A matching `coupon_result=success` or `duplicate` may be displayed immediately; `coupon_confirmed` is counted only for a matching new `success`. Email outcomes are `requested` only after Brevo accepts a DOI request, `pending` when permission is saved but delivery is not accepted yet, `duplicate` when an earlier provider-accepted request exists, and `blocked` when an old identifier is superseded by a newer opt-out or equivalent state. None means the person subscribed; Brevo list membership remains authoritative.
 
 The Worker returns only bounded error codes and never returns Apps Script exception text, Sheet details, provider bodies, or customer data. The browser must show a generic retry message for any non-200 result, `ok:false`, mismatch, filtered result, timeout, or malformed response; it must never invent a coupon code.
+
+For discovery, Apps Script returns exactly five bounded fields to the Worker: `ok`, `record_type`, `submission_id`, `discovery_result` and the internal `discovery_contract_version`. `discovery_result` is `saved` or `already_saved`. It never returns the selected answer, contact details, coupon code, consent state, provider state or Sheet row number. The Worker validates that exact internal response and translates the version to the browser's public `spartan-discovery-v1-2026-08-16` contract.
 
 Apps Script HTML responses remain the fallback if the Worker route is deliberately removed. They run in Google's iframe sandbox. The handler intentionally performs no scripted navigation and no meta refresh. It renders a self-contained Saved page and a visitor-activated `target="_top"` return link.
 
@@ -231,9 +256,25 @@ email
 source_ip
 ```
 
-The v3 canonical contract contains 37 headers. Missing canonical headers are appended after every existing column. The handler never deletes, renames, shifts, compacts, or rewrites historical/custom headers or internal blank columns.
+The current canonical contract contains 41 headers. Missing canonical headers are appended after every existing column. The handler never deletes, renames, shifts, compacts, or rewrites historical/custom headers or internal blank columns. The four discovery headers are:
+
+```text
+discovery_source
+discovery_source_question_version
+discovery_source_form_id
+discovery_source_recorded_at
+```
 
 Every new row contains a `submission_id` and `handler_version`. `LockService` protects schema checks, duplicate checks, coupon lookup, consent lookup, and each write. Values beginning with `=`, `+`, `-`, or `@` receive a protective apostrophe before reaching Sheets.
+
+Discovery behavior:
+
+- Only the original `website_post` coupon row with `website_coupon`, no `repeat_claim` tag and a coupon code is eligible.
+- Existing, repeat, historic/legacy, email-signup and unknown identifiers are ineligible.
+- A valid first answer fills only the four discovery fields on that existing row. It does not append a row.
+- The first answer wins. A retry for an answered row returns `already_saved` and never changes the stored value or timestamp.
+- Discovery never changes name/contact data, coupon or redemption fields, consent/opt-out fields, Brevo/provider fields, attribution fields, tags or owner-notification fields. It never calls Brevo or queues/sends an owner alert.
+- The answer is optional aggregate attribution. It has no effect on whether the coupon is available or whether the customer requested marketing.
 
 Coupon behavior:
 
@@ -308,8 +349,14 @@ Run the P, C, E, F, and B cases first through `/api/forms` and require an HTTP 2
 | F1 | New coupon whose name begins with `=` | JSON `coupon_result=success` | +1 | Stored name begins with protective apostrophe |
 | B1 | Valid-looking POST with `company` filled | JSON `filtered=true`; no outcomes | 0 | No code, conversion, or provider request |
 | U1 | B1 with `return_url=https://example.com/` | Return falls back to Spartan | 0 | No open redirect |
+| D1 | Valid reviewed source for the new P1 identifier through `/api/forms/discovery` | Exact five-field JSON with `discovery_result=saved` | 0 | Same P1 row gets only the four discovery fields; no provider or owner-alert work |
+| D2 | Retry D1 with the same or a different reviewed answer | Exact five-field JSON with `discovery_result=already_saved` | 0 | First answer and timestamp remain unchanged |
+| D3 | Discovery for P2/P3, a historic/repeat row, an email row or an unknown ID | Bounded `discovery_not_saved` error | 0 | No row or field changes and no answer echo |
+| D4 | Missing/unreviewed answer, unknown/extra browser field, query parameter, wrong method or cross-origin request | Bounded discovery error | 0 | Worker rejects before Sheet access |
 
 Expected no-provider count for the table above is **`B + 6`**. Reconcile every written identifier, marker, code, consent field, provider status, and label; row count alone is insufficient.
+
+For D1, also verify the browser question is initially hidden, has exactly ten unselected radio choices, remains optional, and provides **No thanks**. It must appear only after a server-confirmed `coupon_result=success`, never for duplicate or device-remembered claims. GA4 may receive only the generic `discovery_source_saved` event after a new save; the selected value must not enter GA4 or Meta, and the event itself must remain blocked from Meta.
 
 Perform configuration-failure checks in an isolated Sheet copy or test deployment, not by damaging the production Sheet:
 

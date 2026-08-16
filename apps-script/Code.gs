@@ -48,7 +48,11 @@ const REQUIRED_HEADERS = [
   'email_provider_error',
   'owner_notification_status',
   'owner_notification_attempted_at',
-  'owner_notification_sent_at'
+  'owner_notification_sent_at',
+  'discovery_source',
+  'discovery_source_question_version',
+  'discovery_source_form_id',
+  'discovery_source_recorded_at'
 ];
 
 const HISTORIC_HEADERS = ['timestamp', 'name', 'phone', 'email', 'source_ip'];
@@ -56,6 +60,10 @@ const SERVICE_NAME = 'spartan-website-forms';
 const FORM_HANDLER_VERSION = 'spartan-forms-v3.2-2026-08-15';
 const FORM_CONTRACT_VERSION = 'spartan-form-contract-v3-2026-08-10';
 const WORKER_FORM_CONTRACT_VERSION = 'spartan-worker-form-v1-2026-08-15';
+const DISCOVERY_CONTRACT_VERSION = 'spartan-discovery-contract-v1-2026-08-16';
+const DISCOVERY_SOURCE_QUESTION_VERSION = 'spartan-discovery-source-question-v1-2026-08-16';
+const DISCOVERY_SOURCE_FORM_ID = 'post-coupon-discovery-v1';
+const DISCOVERY_RECORD_TYPE = 'discovery_source';
 const EMAIL_CONSENT_VERSION = 'email-updates-v1-2026-07-31';
 const EMAIL_CONSENT_LANGUAGE = 'Email me Spartan Nutrition Updates including new menus, holiday hours, products, store announcements, and occasional promotions. Usually 1–4 emails per month. I can unsubscribe at any time.';
 const OWNER_NOTIFICATION_VERSION = 'spartan-owner-notifications-v1-2026-08-16';
@@ -91,6 +99,29 @@ const WORKER_SIGNED_FIELDS = [
   'worker_timestamp',
   'worker_nonce'
 ];
+const DISCOVERY_WORKER_SIGNED_FIELDS = [
+  'record_type',
+  'submission_id',
+  'discovery_source',
+  'discovery_source_question_version',
+  'discovery_source_form_id',
+  'response_mode',
+  'discovery_contract_version',
+  'worker_timestamp',
+  'worker_nonce'
+];
+const DISCOVERY_SOURCE_VALUES = [
+  'google_search',
+  'google_maps',
+  'facebook',
+  'instagram',
+  'tiktok',
+  'other_social_media',
+  'friend_family',
+  'drive_by_nearby',
+  'community_event_local_group',
+  'other'
+];
 const RETRYABLE_PROVIDER_STATUSES = [
   'pending',
   'failed',
@@ -118,6 +149,7 @@ function doGet(e) {
       handler_version: FORM_HANDLER_VERSION,
       form_contract_version: FORM_CONTRACT_VERSION,
       worker_form_contract_version: WORKER_FORM_CONTRACT_VERSION,
+      discovery_contract_version: DISCOVERY_CONTRACT_VERSION,
       worker_json_configured: isWorkerJsonConfigured_(),
       owner_notification_version: OWNER_NOTIFICATION_VERSION,
       owner_notifications_configured: isOwnerNotificationConfigured_(),
@@ -125,7 +157,7 @@ function doGet(e) {
       legacy_get_compatibility: legacyState.enabled,
       legacy_get_state: legacyState.state,
       legacy_get_until: legacyState.until,
-      supported_record_types: ['coupon_claim', 'email_signup']
+      supported_record_types: ['coupon_claim', 'email_signup', DISCOVERY_RECORD_TYPE]
     });
   }
 
@@ -150,6 +182,9 @@ function doGet(e) {
 
 function doPost(e) {
   const params = (e && e.parameter) || {};
+  if (params.response_mode === 'discovery_json') {
+    return workerDiscoveryJsonPostResponse_(params);
+  }
   if (params.response_mode === 'json') {
     return workerJsonPostResponse_(params);
   }
@@ -204,6 +239,40 @@ function workerJsonResponse_(payload) {
   });
 }
 
+/**
+ * The optional post-coupon question has its own fixed, signed contract. It can
+ * update only the matching first-time website coupon row and never appends a
+ * lead, replays provider work, or returns the selected answer.
+ */
+function workerDiscoveryJsonPostResponse_(params) {
+  if (!verifyDiscoveryWorkerRequest_(params)) {
+    return discoveryJsonErrorResponse_('worker_auth_failed');
+  }
+
+  try {
+    const result = processDiscoverySource_(params);
+    return jsonResponse_({
+      ok: true,
+      record_type: DISCOVERY_RECORD_TYPE,
+      submission_id: result.submissionId,
+      discovery_result: result.discoveryResult,
+      discovery_contract_version: DISCOVERY_CONTRACT_VERSION
+    });
+  } catch (error) {
+    // Do not log the submission identifier, selected answer, or customer row.
+    console.error('Worker discovery submission failed.');
+    return discoveryJsonErrorResponse_('discovery_not_saved');
+  }
+}
+
+function discoveryJsonErrorResponse_(code) {
+  return jsonResponse_({
+    ok: false,
+    code,
+    discovery_contract_version: DISCOVERY_CONTRACT_VERSION
+  });
+}
+
 function isWorkerJsonConfigured_() {
   const secret = String(
     PropertiesService.getScriptProperties().getProperty('WORKER_SHARED_SECRET') || ''
@@ -234,8 +303,41 @@ function verifyWorkerRequest_(params) {
   return constantTimeEqual_(suppliedSignature, expectedSignature);
 }
 
+function verifyDiscoveryWorkerRequest_(params) {
+  const timestamp = String(params.worker_timestamp || '').trim();
+  const nonce = String(params.worker_nonce || '').trim();
+  const suppliedSignature = String(params.worker_signature || '').trim().toLowerCase();
+  const timestampSeconds = /^\d{10}$/.test(timestamp) ? Number(timestamp) : NaN;
+  const nowSeconds = Math.floor(Date.now() / 1000);
+
+  if (params.response_mode !== 'discovery_json') return false;
+  if (params.record_type !== DISCOVERY_RECORD_TYPE) return false;
+  if (params.discovery_contract_version !== DISCOVERY_CONTRACT_VERSION) return false;
+  if (params.discovery_source_question_version !== DISCOVERY_SOURCE_QUESTION_VERSION) return false;
+  if (params.discovery_source_form_id !== DISCOVERY_SOURCE_FORM_ID) return false;
+  if (!Number.isFinite(timestampSeconds)) return false;
+  if (Math.abs(nowSeconds - timestampSeconds) > WORKER_AUTH_MAX_AGE_SECONDS) return false;
+  if (!/^[a-f0-9-]{36}$/i.test(nonce)) return false;
+  if (!/^[a-f0-9]{64}$/.test(suppliedSignature)) return false;
+
+  const secret = String(
+    PropertiesService.getScriptProperties().getProperty('WORKER_SHARED_SECRET') || ''
+  );
+  if (secret.length < 32) return false;
+
+  const canonicalPayload = canonicalDiscoveryWorkerPayload_(params);
+  const expectedSignature = hmacSha256Hex_(canonicalPayload, secret);
+  return constantTimeEqual_(suppliedSignature, expectedSignature);
+}
+
 function canonicalWorkerPayload_(params) {
   return WORKER_SIGNED_FIELDS
+    .map(field => `${field}=${encodeURIComponent(String(params[field] || ''))}`)
+    .join('&');
+}
+
+function canonicalDiscoveryWorkerPayload_(params) {
+  return DISCOVERY_WORKER_SIGNED_FIELDS
     .map(field => `${field}=${encodeURIComponent(String(params[field] || ''))}`)
     .join('&');
 }
@@ -261,6 +363,100 @@ function constantTimeEqual_(left, right) {
     difference |= leftText.charCodeAt(index) ^ rightText.charCodeAt(index);
   }
   return difference === 0;
+}
+
+function processDiscoverySource_(params) {
+  const rawSubmissionId = String(params.submission_id || '');
+  const rawDiscoverySource = String(params.discovery_source || '');
+  const submissionId = rawSubmissionId.trim();
+  const discoverySource = rawDiscoverySource.trim();
+
+  if (rawSubmissionId !== submissionId || /[\u0000-\u001F\u007F]/.test(rawSubmissionId)) {
+    throw new Error('Invalid discovery submission identifier.');
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9-]{7,79}$/.test(submissionId)) {
+    throw new Error('Invalid discovery submission identifier.');
+  }
+  if (rawDiscoverySource !== discoverySource || /[\u0000-\u001F\u007F]/.test(rawDiscoverySource)) {
+    throw new Error('Invalid discovery source.');
+  }
+  if (!DISCOVERY_SOURCE_VALUES.includes(discoverySource)) {
+    throw new Error('Invalid discovery source.');
+  }
+
+  const lock = LockService.getScriptLock();
+  let lockAcquired = false;
+
+  try {
+    lock.waitLock(LOCK_TIMEOUT_MS);
+    lockAcquired = true;
+
+    const sheet = getLeadSheet_();
+    const headers = ensureHeaders_(sheet);
+    const target = findEligibleDiscoveryCouponRow_(sheet, headers, submissionId);
+    if (!target) throw new Error('Eligible coupon claim not found.');
+
+    if (target.discoverySource) {
+      return { submissionId, discoveryResult: 'already_saved' };
+    }
+
+    updateRecordFields_(sheet, headers, target.rowNumber, {
+      discovery_source_question_version: DISCOVERY_SOURCE_QUESTION_VERSION,
+      discovery_source_form_id: DISCOVERY_SOURCE_FORM_ID,
+      discovery_source_recorded_at: new Date(),
+      // This field is the idempotency sentinel, so write it last. If an
+      // earlier evidence-cell write fails, a retry can safely finish the row.
+      discovery_source: discoverySource
+    });
+    SpreadsheetApp.flush();
+
+    return { submissionId, discoveryResult: 'saved' };
+  } finally {
+    if (lockAcquired) lock.releaseLock();
+  }
+}
+
+/**
+ * Discovery answers attach only to an original website coupon row. Historic
+ * GET claims, repeat-claim audit rows, and rows without a coupon are ineligible.
+ */
+function findEligibleDiscoveryCouponRow_(sheet, headers, submissionId) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return null;
+
+  const indexes = {
+    submissionId: headers.indexOf('submission_id'),
+    recordType: headers.indexOf('record_type'),
+    submissionMethod: headers.indexOf('submission_method'),
+    tags: headers.indexOf('tags'),
+    couponCode: headers.indexOf('coupon_code'),
+    discoverySource: headers.indexOf('discovery_source')
+  };
+  if (Object.values(indexes).some(index => index < 0)) {
+    throw new Error('Required discovery columns are missing.');
+  }
+
+  const rows = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index];
+    if (normalizeStoredSubmissionId_(row[indexes.submissionId]) !== submissionId) continue;
+    if (String(row[indexes.recordType] || '').trim().toLowerCase() !== 'coupon_claim') continue;
+    if (String(row[indexes.submissionMethod] || '').trim().toLowerCase() !== 'website_post') continue;
+
+    const tags = String(row[indexes.tags] || '')
+      .split(',')
+      .map(value => value.trim().toLowerCase())
+      .filter(Boolean);
+    if (!tags.includes('website_coupon') || tags.includes('repeat_claim')) continue;
+    if (!cleanText_(row[indexes.couponCode], 40)) continue;
+
+    return {
+      rowNumber: index + 2,
+      discoverySource: String(row[indexes.discoverySource] || '').trim()
+    };
+  }
+
+  return null;
 }
 
 function processSubmission_(params, options) {
