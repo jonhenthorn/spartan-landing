@@ -101,7 +101,9 @@ Reconcile and retain:
 
 ## Phase 2 — restricted Sheet ledger
 
-Keep the existing `spartan leads` tab and its 41 current columns unchanged. Its redemption fields remain an owner-friendly current snapshot. Add two protected, owner-only tabs after Phase 1 confirms the available Square fields.
+Keep the existing `spartan leads` tab and its 41 current columns unchanged. Its redemption fields remain an owner-friendly current snapshot. The approved schema-only foundation may create the two exact, header-only tabs below before the controlled proof; it does not append contacts, identity links or events. Data entry remains gated on Phase 1 confirming the available Square fields.
+
+The current workbook is private and owner-only. The setup intentionally does not change spreadsheet sharing or add sheet protections because Apps Script cannot safely prove or preserve every existing editor through that change. Add explicit tab protection only after the durable owner verifies the workbook access list and the enforcement can be tested without removing legitimate recovery access.
 
 ### `Identity Links`
 
@@ -109,6 +111,7 @@ One row per provider identity link:
 
 ```text
 identity_link_id
+link_key
 contact_id
 website_submission_id
 provider
@@ -118,6 +121,7 @@ match_method
 match_confidence
 effective_at_utc
 verified_at_utc
+recorded_at_utc
 recorded_by
 reversal_of_link_id
 notes
@@ -138,9 +142,12 @@ occurred_at_utc
 received_at_utc
 source_system
 source_event_id
+import_batch_id
 idempotency_key
 contact_id
+identity_link_id
 website_submission_id
+coupon_code
 square_customer_id
 square_payment_id
 square_order_id
@@ -157,9 +164,23 @@ reversal_of_event_id
 notes
 ```
 
-Initial event types are `coupon_redeemed`, `order_completed`, `repeat_purchase_completed`, `order_refunded`, `redemption_reversed`, `identity_linked` and `identity_merge_corrected`.
+Initial raw event types are `coupon_redeemed`, `order_completed`, `order_refunded`, `redemption_reversed`, `identity_linked` and `identity_merge_corrected`. `repeat_purchase_completed` is a derived reporting outcome from a later qualifying `order_completed` event; it is not imported as a second raw event.
 
 The idempotency key is `source_system:source_event_id:event_type`. One Square payment cannot satisfy two redemptions or two future referral rewards. Corrections and refunds append counter-events; they never erase history.
+
+`link_key` is the normalized provider and provider-customer key used to prevent duplicate identity links. `import_batch_id` identifies the reviewed reconciliation batch, while `identity_link_id`, `website_submission_id` and `coupon_code` preserve the explicit audit path from a raw event to the website claim. Identifier, key and coupon-code columns are formatted as plain text so Google Sheets cannot silently convert their values.
+
+### Header-only setup
+
+From the Apps Script editor, run `diagnoseJourneyLedgerSetup()` first. It is read-only and reports whether both exact tabs, schemas and formats are ready. Then run `setupJourneyLedgerSheets()` once from the durable owner account. The setup:
+
+- Uses the configured existing `SPREADSHEET_ID` and validates the historic lead tab without changing it.
+- Creates only `Identity Links` and `Journey Events`, or initializes an exact-name tab only when it is truly blank.
+- Writes only the reviewed headers, bolds and freezes row 1, and applies plain-text formatting to identifier columns.
+- Rejects case-insensitive look-alike tab names, formulas, data rows, duplicate/reordered headers, extra cells and any other schema mismatch before creating either missing tab.
+- Performs zero writes on a second successful run and never appends journey data.
+
+After setup, run `diagnoseJourneyLedgerSetup()` again and require `ready=true`. Keep both tabs header-only until the controlled Square proof is reconciled and approved.
 
 ## Matching rules
 
@@ -207,7 +228,7 @@ Future reusable automation should use scoped Square OAuth and verified webhooks,
 
 - The controlled claim → redemption → later purchase → reversal path is reproducible.
 - Every qualifying offer use has stable Square IDs or a documented exception.
-- The two ledger tabs are append-only, protected and restorable.
+- The two ledger tabs are append-only, restricted through the private owner-only workbook and restorable; explicit tab protection is added only after its access effects are verified.
 - Mature-window KPIs reproduce from raw events and show match coverage.
 - One weekly scorecard identifies the largest journey bottleneck without creating customer-by-customer owner tasks.
 - Owner and staff time remain within the limits above.

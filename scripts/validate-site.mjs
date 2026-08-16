@@ -508,6 +508,7 @@ assert.doesNotMatch(homepage, /facebook\.com\/tr\?/);
 assert.equal((homepage.match(/class="honeypot" aria-hidden="true" inert/g) || []).length, 2);
 
 const appsScriptSource = await read("apps-script/Code.gs");
+const squareJourneyPilot = await read("docs/SQUARE-JOURNEY-PILOT.md");
 new Function(appsScriptSource);
 assert.doesNotMatch(
   appsScriptSource,
@@ -528,35 +529,106 @@ const rows = [
   [new Date("2025-08-16T10:10:26Z"), "Historic Lead", "(918) 555-0142", "historic@example.com", ""]
 ];
 
-const makeSheet = (sheetRows, sheetId = 123456) => ({
-  getSheetId: () => sheetId,
-  getLastColumn: () => sheetRows[0]?.length || 0,
-  getLastRow: () => sheetRows.length,
-  getRange(row, column, rowCount, columnCount) {
-    return {
+const makeSheet = (sheetRows, sheetId = 123456, sheetName = "") => {
+  let frozenRows = 0;
+  let writeOperationCount = 0;
+  const headerFontWeights = [];
+  const plainTextColumns = new Set();
+  const formulas = [];
+  const maxRows = 1000;
+
+  return {
+    getName: () => sheetName,
+    getSheetId: () => sheetId,
+    getMaxRows: () => maxRows,
+    getLastColumn: () => Math.max(0, ...sheetRows.map((row) => row.length)),
+    getLastRow: () => sheetRows.length,
+    getFrozenRows: () => frozenRows,
+    setFrozenRows: (count) => { frozenRows = count; writeOperationCount += 1; },
+    getRange(row, column, rowCount, columnCount) {
+      const range = {
       getValues: () => sheetRows
         .slice(row - 1, row - 1 + rowCount)
         .map((source) => Array.from(
           { length: columnCount },
           (_, index) => source[column - 1 + index] ?? ""
         )),
-      setValues: (values) => values.forEach((valueRow, rowOffset) => {
-        valueRow.forEach((value, columnOffset) => {
-          sheetRows[row - 1 + rowOffset] ||= [];
-          sheetRows[row - 1 + rowOffset][column - 1 + columnOffset] = value;
+      setValues: (values) => {
+        writeOperationCount += 1;
+        values.forEach((valueRow, rowOffset) => {
+          valueRow.forEach((value, columnOffset) => {
+            sheetRows[row - 1 + rowOffset] ||= [];
+            sheetRows[row - 1 + rowOffset][column - 1 + columnOffset] = value;
+          });
         });
-      })
+      },
+      getFormulas: () => Array.from(
+        { length: rowCount },
+        (_, rowOffset) => Array.from(
+          { length: columnCount },
+          (_, columnOffset) => formulas[row - 1 + rowOffset]?.[column - 1 + columnOffset] || ""
+        )
+      ),
+      getFontWeights: () => Array.from(
+        { length: rowCount },
+        (_, rowOffset) => Array.from(
+          { length: columnCount },
+          (_, columnOffset) => row + rowOffset === 1
+            ? (headerFontWeights[column - 1 + columnOffset] || "normal")
+            : "normal"
+        )
+      ),
+      setFontWeight: (weight) => {
+        writeOperationCount += 1;
+        if (row === 1) {
+          for (let index = 0; index < columnCount; index += 1) {
+            headerFontWeights[column - 1 + index] = weight;
+          }
+        }
+        return range;
+      },
+      getNumberFormats: () => Array.from(
+        { length: rowCount },
+        () => Array.from(
+          { length: columnCount },
+          (_, columnOffset) => plainTextColumns.has(column - 1 + columnOffset) ? "@" : "General"
+        )
+      ),
+      setNumberFormat: (format) => {
+        writeOperationCount += 1;
+        if (row === 1 && rowCount === maxRows && columnCount === 1 && format === "@") {
+          plainTextColumns.add(column - 1);
+        }
+        return range;
+      }
     };
-  },
-  appendRow: (row) => sheetRows.push(Array.from(row))
-});
+      return range;
+    },
+    appendRow: (row) => sheetRows.push(Array.from(row)),
+    __rows: sheetRows,
+    __headerFontWeights: headerFontWeights,
+    __plainTextColumns: plainTextColumns,
+    __formulas: formulas,
+    __getWriteOperationCount: () => writeOperationCount
+  };
+};
 
-const sheet = makeSheet(rows);
+const sheet = makeSheet(rows, 123456, "spartan leads");
 let activeSheet = sheet;
+const ledgerSheets = new Map();
+let insertedSheetId = 500000;
 
 const spreadsheet = {
-  getSheetByName: (name) => name === "spartan leads" ? activeSheet : null,
-  getSheets: () => [activeSheet]
+  getSheetByName: (name) => name === "spartan leads" ? activeSheet : (ledgerSheets.get(name) || null),
+  getSheets: () => [activeSheet, ...ledgerSheets.values()],
+  insertSheet: (name) => {
+    if (name === "spartan leads" || ledgerSheets.has(name)) {
+      throw new Error(`Sheet already exists: ${name}`);
+    }
+    const inserted = makeSheet([], ++insertedSheetId, name);
+    ledgerSheets.set(name, inserted);
+    return inserted;
+  }
 };
 
 const scriptProperties = {
@@ -640,6 +712,206 @@ const context = {
 
 vm.createContext(context);
 vm.runInContext(appsScriptSource, context);
+
+const documentedLedgerHeaders = (sheetName) => {
+  const headingIndex = squareJourneyPilot.indexOf(`### \`${sheetName}\``);
+  assert.notEqual(headingIndex, -1, `${sheetName} is missing from the Square journey pilot`);
+  const block = squareJourneyPilot.slice(headingIndex).match(/```text\n([\s\S]*?)\n```/);
+  assert.ok(block, `${sheetName} header block is missing from the Square journey pilot`);
+  return block[1].trim().split("\n");
+};
+const ledgerSpecs = JSON.parse(vm.runInContext(
+  "JSON.stringify(JOURNEY_LEDGER_SHEET_SPECS)",
+  context
+));
+assert.deepEqual(
+  ledgerSpecs.map((spec) => spec.name),
+  ["Identity Links", "Journey Events"]
+);
+ledgerSpecs.forEach((spec) => {
+  assert.deepEqual(
+    spec.headers,
+    documentedLedgerHeaders(spec.name),
+    `${spec.name} Apps Script headers must exactly match the reviewed pilot schema`
+  );
+});
+
+const leadRowsBeforeLedgerSetup = structuredClone(rows);
+const leadWritesBeforeLedgerSetup = sheet.__getWriteOperationCount();
+const missingLedgerDiagnostic = JSON.parse(JSON.stringify(context.diagnoseJourneyLedgerSetup()));
+assert.equal(missingLedgerDiagnostic.ready, false);
+assert.equal(missingLedgerDiagnostic.read_only, true);
+assert.deepEqual(
+  missingLedgerDiagnostic.sheets.map((ledgerSheet) => ledgerSheet.state),
+  ["missing", "missing"]
+);
+assert.equal(ledgerSheets.size, 0, "Read-only diagnosis must not create ledger tabs");
+assert.equal(
+  sheet.__getWriteOperationCount(),
+  leadWritesBeforeLedgerSetup,
+  "Read-only diagnosis must not write or format the lead tab"
+);
+const firstLedgerSetup = JSON.parse(JSON.stringify(context.setupJourneyLedgerSheets()));
+assert.equal(firstLedgerSetup.ready, true);
+assert.equal(firstLedgerSetup.created_count, 2);
+assert.equal(firstLedgerSetup.initialized_count, 0);
+assert.equal(firstLedgerSetup.verified_count, 0);
+assert.equal(firstLedgerSetup.writes_to_lead_sheet, 0);
+assert.equal(firstLedgerSetup.journey_rows_appended, 0);
+assert.deepEqual(rows, leadRowsBeforeLedgerSetup, "Ledger setup must not edit the existing lead tab");
+assert.equal(
+  sheet.__getWriteOperationCount(),
+  leadWritesBeforeLedgerSetup,
+  "Ledger setup must not write or format the existing lead tab"
+);
+ledgerSpecs.forEach((spec) => {
+  const ledgerSheet = ledgerSheets.get(spec.name);
+  assert.ok(ledgerSheet, `${spec.name} must be created`);
+  assert.deepEqual(ledgerSheet.__rows, [spec.headers], `${spec.name} must contain only its exact header row`);
+  assert.equal(ledgerSheet.getFrozenRows(), 1, `${spec.name} must freeze exactly one header row`);
+  assert.deepEqual(
+    ledgerSheet.__headerFontWeights.slice(0, spec.headers.length),
+    Array(spec.headers.length).fill("bold"),
+    `${spec.name} header row must be bold`
+  );
+  spec.plainTextHeaders.forEach((header) => {
+    assert.ok(
+      ledgerSheet.__plainTextColumns.has(spec.headers.indexOf(header)),
+      `${spec.name}.${header} must be formatted as plain text`
+    );
+  });
+});
+
+const ledgerRowsBeforeRepeat = new Map(
+  Array.from(ledgerSheets, ([name, ledgerSheet]) => [name, structuredClone(ledgerSheet.__rows)])
+);
+const ledgerWriteCountsBeforeDiagnostic = new Map(
+  Array.from(ledgerSheets, ([name, ledgerSheet]) => [name, ledgerSheet.__getWriteOperationCount()])
+);
+const ledgerDiagnostic = JSON.parse(JSON.stringify(context.diagnoseJourneyLedgerSetup()));
+assert.equal(ledgerDiagnostic.ready, true);
+assert.equal(ledgerDiagnostic.read_only, true);
+ledgerSpecs.forEach((spec) => {
+  assert.equal(
+    ledgerSheets.get(spec.name).__getWriteOperationCount(),
+    ledgerWriteCountsBeforeDiagnostic.get(spec.name),
+    `${spec.name} diagnosis must perform zero writes`
+  );
+});
+const repeatedLedgerSetup = JSON.parse(JSON.stringify(context.setupJourneyLedgerSheets()));
+assert.equal(repeatedLedgerSetup.created_count, 0);
+assert.equal(repeatedLedgerSetup.initialized_count, 0);
+assert.equal(repeatedLedgerSetup.verified_count, 2);
+assert.equal(repeatedLedgerSetup.header_write_count, 0);
+assert.equal(repeatedLedgerSetup.format_change_count, 0);
+assert.equal(repeatedLedgerSetup.write_operation_count, 0);
+assert.equal(repeatedLedgerSetup.protection_change_count, 0);
+ledgerSpecs.forEach((spec) => {
+  assert.deepEqual(
+    ledgerSheets.get(spec.name).__rows,
+    ledgerRowsBeforeRepeat.get(spec.name),
+    `${spec.name} setup must be idempotent`
+  );
+  assert.equal(
+    ledgerSheets.get(spec.name).__getWriteOperationCount(),
+    ledgerWriteCountsBeforeDiagnostic.get(spec.name),
+    `${spec.name} repeated setup must perform zero writes or format calls`
+  );
+});
+assert.deepEqual(rows, leadRowsBeforeLedgerSetup, "Repeated ledger setup must not edit the lead tab");
+assert.equal(sheet.__getWriteOperationCount(), leadWritesBeforeLedgerSetup);
+
+ledgerSheets.delete("Identity Links");
+ledgerSheets.set(
+  "Journey Events",
+  makeSheet([["wrong_header"]], 500099, "Journey Events")
+);
+assert.throws(
+  () => context.setupJourneyLedgerSheets(),
+  /Journey ledger preflight failed: Journey Events \(header mismatch\)/,
+  "A nonblank ledger header mismatch must fail instead of being overwritten"
+);
+assert.equal(
+  ledgerSheets.has("Identity Links"),
+  false,
+  "Both ledger tabs must pass preflight before a missing tab is created"
+);
+assert.deepEqual(
+  ledgerSheets.get("Journey Events").__rows,
+  [["wrong_header"]],
+  "A mismatched existing ledger tab must not be overwritten"
+);
+assert.deepEqual(rows, leadRowsBeforeLedgerSetup, "Mismatch failure must not edit the lead tab");
+
+const expectLedgerPreflightFailure = (sheetName, testSheet, pattern) => {
+  ledgerSheets.clear();
+  ledgerSheets.set(sheetName, testSheet);
+  assert.throws(() => context.setupJourneyLedgerSheets(), pattern);
+  assert.equal(ledgerSheets.size, 1, "Rejected preflight must not partially create another ledger tab");
+  assert.deepEqual(rows, leadRowsBeforeLedgerSetup, "Rejected preflight must not edit the lead tab");
+  assert.equal(sheet.__getWriteOperationCount(), leadWritesBeforeLedgerSetup);
+};
+
+expectLedgerPreflightFailure(
+  "identity links",
+  makeSheet([], 500100, "identity links"),
+  /Identity Links \(case-insensitive tab-name conflict\)/
+);
+
+expectLedgerPreflightFailure(
+  "Identity Links ",
+  makeSheet([], 500105, "Identity Links "),
+  /Identity Links \(case-insensitive tab-name conflict\)/
+);
+
+const duplicateIdentityHeaders = Array.from(ledgerSpecs[0].headers);
+duplicateIdentityHeaders[1] = duplicateIdentityHeaders[0];
+expectLedgerPreflightFailure(
+  "Identity Links",
+  makeSheet([duplicateIdentityHeaders], 500101, "Identity Links"),
+  /Identity Links \(duplicate header found\)/
+);
+
+const reorderedIdentityHeaders = Array.from(ledgerSpecs[0].headers);
+[reorderedIdentityHeaders[0], reorderedIdentityHeaders[1]] = [
+  reorderedIdentityHeaders[1],
+  reorderedIdentityHeaders[0]
+];
+expectLedgerPreflightFailure(
+  "Identity Links",
+  makeSheet([reorderedIdentityHeaders], 500102, "Identity Links"),
+  /Identity Links \(header mismatch\)/
+);
+
+const formulaIdentitySheet = makeSheet([Array.from(ledgerSpecs[0].headers)], 500103, "Identity Links");
+formulaIdentitySheet.__formulas[0] = ["=\"identity_link_id\""];
+expectLedgerPreflightFailure(
+  "Identity Links",
+  formulaIdentitySheet,
+  /Identity Links \(formula found in ledger tab\)/
+);
+
+expectLedgerPreflightFailure(
+  "Identity Links",
+  makeSheet(
+    [Array.from(ledgerSpecs[0].headers), ["unexpected-data"]],
+    500104,
+    "Identity Links"
+  ),
+  /Identity Links \(ledger tab contains data rows\)/
+);
+
+ledgerSheets.clear();
+ledgerSpecs.forEach((spec, index) => {
+  ledgerSheets.set(spec.name, makeSheet([], 500110 + index, spec.name));
+});
+const initializedBlankLedgers = JSON.parse(JSON.stringify(context.setupJourneyLedgerSheets()));
+assert.equal(initializedBlankLedgers.created_count, 0);
+assert.equal(initializedBlankLedgers.initialized_count, 2);
+ledgerSpecs.forEach((spec) => {
+  assert.deepEqual(ledgerSheets.get(spec.name).__rows, [spec.headers]);
+});
+assert.deepEqual(rows, leadRowsBeforeLedgerSetup, "Blank-tab initialization must not edit the lead tab");
 
 const submit = (parameters) => context.doPost({
   parameter: {
