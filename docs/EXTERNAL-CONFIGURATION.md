@@ -2,6 +2,29 @@
 
 This file records external configuration that cannot be inferred from GitHub alone. It contains no credentials or customer data. Treat every item as a dated snapshot and reverify it after account, DNS, analytics or deployment changes.
 
+## Verified August 16, 2026
+
+### Google Search Console refresh
+
+- The existing `https://spartandrink.com/sitemap.xml` submission remains successful and now reports five submitted URLs discovered. It was not duplicated or replaced.
+- URL Inspection reported **URL is on Google** and **Page is indexed** for the homepage, `/menu/` and `/products-at-home/`.
+- All three pages passed a fresh live test as available to Google and eligible for indexing.
+- Breadcrumbs validation reported one valid item for both the menu and shipped-products pages.
+- Fresh indexing was requested for all three pages. Google confirmed that each URL was added to its priority crawl queue; this is not a ranking or recrawl-time guarantee.
+
+### Google Business Profile menu state
+
+- Contact settings still show the tracked canonical website URL and the listed Facebook, Instagram and TikTok profiles.
+- **Edit menu** showed 87 items, a green selected indicator and zero menu photos; the meaning or source of the indicator was not inferred.
+- The separate **Menu link** field described in Google Business Profile help is not available in this profile's Contact settings.
+- Food ordering is enabled, but no service-provider links are configured. The website menu was not added as an ordering link because customers cannot complete an order on that page.
+- No category, menu item, ordering, website, social-profile or other profile field was changed during this check.
+- Do not change the primary category merely to unlock a menu URL. Recheck field eligibility later or contact Business Profile support if a separate website-menu link remains important.
+
+### Cloudflare route recheck
+
+- `/menu/index.html` and `/products-at-home/index.html`, on both apex and `www`, each complete one `301` redirect to the matching clean trailing-slash URL, preserve tested query parameters and finish with `200`.
+
 ## Verified August 15, 2026
 
 ### Cloudflare
