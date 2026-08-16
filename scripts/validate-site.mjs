@@ -140,6 +140,12 @@ assert.match(menuPage, /<title>Spartan Nutrition Menu \| Energy Teas &amp; Prote
 assert.match(menuPage, /data-track-view="menu_page_permanent_view"/);
 assert.match(menuPage, /data-track="current_menu_click"/);
 assert.match(menuPage, /data-track="permanent_menu_click"/);
+assert.equal(
+  (menuPage.match(/href="\/\?claim=first-drink#first-visit"/g) || []).length,
+  3,
+  "All menu-page offer links must open the existing coupon form directly"
+);
+assert.doesNotMatch(menuPage, /href="\/#first-visit"/);
 assert.match(menuPage, /<p class="eyebrow">Latest Release<\/p>/);
 assert.match(menuPage, /<h2>Megan Moroney Menu<\/h2>/);
 assert.match(menuPage, /<li>Original<\/li>/);
@@ -159,6 +165,11 @@ assert.match(productsPage, /<title>Products Shipped to You \| Spartan Nutrition 
 assert.match(productsPage, /Get your favorite products shipped to you\./);
 assert.match(productsPage, /data-track="home_delivery_click"/);
 assert.match(productsPage, /data-track="member_savings_click"/);
+assert.equal(
+  (productsPage.match(/href="\/\?claim=first-drink#first-visit"/g) || []).length,
+  1,
+  "The shipped-products offer link must open the existing coupon form directly"
+);
 assert.match(productsPage, /rel="sponsored noopener noreferrer"/);
 assert.match(productsPage, /https:\/\/get-started\.herbalife\.com\/en-us\/u\/category\/all-products/);
 assert.match(productsPage, /https:\/\/get-started\.herbalife\.com\/en-us\/u\/loyalty/);
@@ -324,6 +335,10 @@ assert.equal(
   "Confirmed analytics callback must have only one execution path"
 );
 assert.match(siteScript, /resultParameterNames\.forEach/);
+assert.match(siteScript, /const directCouponRequested = params\.get\("claim"\) === "first-drink"/);
+assert.match(siteScript, /cleanUrl\.searchParams\.delete\("claim"\)/);
+assert.match(siteScript, /if \(directCouponRequested && couponDialog && !returnMatches\) \{/);
+assert.match(siteScript, /openCoupon\(\);/);
 assert.match(siteScript, /page_location:/);
 assert.doesNotMatch(homepage, /fbq\('track','PageView'\)/);
 assert.match(siteScript, /window\.fbq\("track", "PageView"\)/);
