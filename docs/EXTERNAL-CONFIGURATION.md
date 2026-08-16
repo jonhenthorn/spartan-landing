@@ -37,6 +37,17 @@ This file records external configuration that cannot be inferred from GitHub alo
 
 - `/menu/index.html` and `/products-at-home/index.html`, on both apex and `www`, each complete one `301` redirect to the matching clean trailing-slash URL, preserve tested query parameters and finish with `200`.
 
+### Post-coupon discovery-source rollout
+
+- The existing Google Apps Script web-app deployment was updated in place to Version `14`; its deployment ID and public `/exec` URL did not change. Public health retained form handler `spartan-forms-v3.2-2026-08-15`, Worker form contract `spartan-worker-form-v1-2026-08-15`, owner alerts and Brevo configuration, and added discovery contract `spartan-discovery-contract-v1-2026-08-16` plus supported record type `discovery_source`.
+- Cloudflare Worker `spartan-form-proxy` was deployed as version `9f7cae22-90f5-4e71-a34c-2d128c73be7c`. Its health endpoint returned `200` with public discovery contract `spartan-discovery-v1-2026-08-16`; both existing form routes and secrets were retained.
+- The active rate-limiting rule `Protect Spartan website forms` now covers `POST /api/forms` and `POST /api/forms/discovery`. It remains IP-based at 10 requests in 10 seconds with a 10-second block.
+- Pull request `#12` merged as `363aeac0f93dad9bcd96951e5c3e598f2ccaf9a8`, and the live homepage serves the matching `20260816c` CSS and JavaScript release.
+- Safe negative tests returned the expected bounded errors for GET, query strings, cross-origin requests, unsupported media types, malformed JSON, extra fields and an unknown submission ID. No negative test created a lead.
+- One owner-controlled production QA claim created one new Sheet row. It was labeled `Spartan Discovery QA` with `release_qa / internal / discovery_v1` campaign fields so it can be excluded from business reporting. Email consent remained `not_requested`, Brevo sync remained `not_applicable`, and the coupon response was server-confirmed.
+- The first discovery answer updated that same row with the question version, form ID and recorded timestamp. A retry with a different answer returned `already_saved`, confirming first-answer-wins behavior without appending or overwriting another lead.
+- The row's owner-notification status reached `sent`, and Gmail received the matching counts-only `Spartan website: 1 new submission` message. The discovery update itself did not generate a second alert.
+
 ## Verified August 15, 2026
 
 ### Cloudflare
