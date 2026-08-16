@@ -47,6 +47,40 @@ Before changing the Sheet or POS workflow, verify in the signed-in Spartan accou
 
 Do not rename the existing discount in place. Preserve its reporting history; create a new fixed discount only after the controlled test proves it is safer.
 
+### Live account findings — August 16, 2026
+
+Confirmed read-only in the Spartan Square Dashboard:
+
+- Customer Directory is available and currently reports **3,539 customers**. It already exposes Square-created groups including New Customers, Regulars and Lapsed.
+- The dashboard customer form supports first name, last name, phone, email and a **Reference ID**. That Reference ID is a possible later non-PII linkage/scan field, but nothing was written during this audit.
+- Square Loyalty is **not active**. Opening it shows a 30-day trial offer, so the pilot will not depend on Loyalty.
+- The account has Square Online Free. It is also in a Square for Restaurants Plus free trial ending **September 11, 2026**. The manage screen shows the current two-countertop-POS configuration as **$139/month if subscribed**. No subscription choice was changed. Square's current restaurant guidance says an unselected trial downgrades to Free after the trial; verify that account-specific behavior before the deadline. [Square restaurant plan guidance](https://squareup.com/us/en/point-of-sale/restaurants)
+- One active location named `Spartan` is visible with Square location ID `3MDGSXS33HERT`.
+- The Discounts report identifies `50% Off First Drink — Enter 50%` separately and showed **$26.12 discounted** in the selected January 1–December 31, 2026 report view at audit time. This proves the offer is reportable by name; it does not yet prove claimant/customer linkage or usage count.
+- One recent paid-transaction detail showed stable transaction, order and receipt links but no visible customer-profile link. This is a single sample, not a customer-link coverage estimate; the controlled test and baseline must measure coverage.
+
+Still requires hands-on POS/account verification:
+
+- Staff/customer-management permissions on every checkout device.
+- Attach-before-payment behavior in the actual Restaurant POS mode.
+- Fixed-discount catalog ID, line-level scope, stacking and receipt behavior.
+- Customer, transaction and discount export columns.
+- Customer duplicate rate and the percentage of qualifying transactions with a usable customer ID.
+- One controlled qualifying redemption, later purchase and refund/reversal.
+
+No customer, discount, plan, transaction or Square setting was created or changed during this read-only audit.
+
+### Provisional plan recommendation
+
+Do not subscribe to the displayed $139/month Restaurant Plus configuration merely for Customer Directory, journey measurement or Loyalty:
+
+- Customer Directory is already available on the current account without adding another CRM subscription.
+- Loyalty is separately inactive in this account.
+- The account's manage screen shows 2.6% + 10¢ for Plus versus 2.6% + 15¢ for Free. At that displayed five-cent transaction difference, processing savings alone would require about **2,780 card transactions per month** to offset $139.
+- Keep Plus only if a tested Plus-only restaurant feature—such as the actual multi-device/KDS workflow—creates more than $139/month of operational value. Otherwise let the trial move to Free after verifying that the existing POS/menu workflow will remain usable.
+
+This is a provisional cost recommendation based on the account screen observed August 16. Square has introduced newer unified plans, so confirm the exact account offer and retained features before selecting anything.
+
 ## Phase 1 — controlled proof
 
 Use one owner-controlled customer and four auditable events:
