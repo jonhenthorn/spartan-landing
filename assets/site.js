@@ -588,6 +588,7 @@
   }
 
   const params = new URLSearchParams(window.location.search);
+  const directCouponRequested = params.get("claim") === "first-drink";
   const couponStatus = params.get("coupon");
   const updatesResult = params.get("updates");
   const returnedSubmissionId = (params.get("submission_id") || "")
@@ -608,10 +609,12 @@
     && returnedSubmissionId === pendingSubmission.id
   );
 
-  // Remove form-result details before analytics records the page URL. This keeps
-  // coupon codes and submission identifiers out of analytics destinations.
-  if (resultParameterNames.some((name) => params.has(name))) {
+  // Remove one-time navigation and form-result details before analytics records
+  // the page URL. This keeps the claim trigger, coupon codes and submission
+  // identifiers out of analytics destinations while preserving campaign tags.
+  if (directCouponRequested || resultParameterNames.some((name) => params.has(name))) {
     const cleanUrl = new URL(window.location.href);
+    cleanUrl.searchParams.delete("claim");
     resultParameterNames.forEach((name) => cleanUrl.searchParams.delete(name));
     window.history.replaceState({}, "", `${cleanUrl.pathname}${cleanUrl.search}${cleanUrl.hash}`);
   }
@@ -625,6 +628,10 @@
       page_title: document.title,
       page_location: analyticsPageLocation()
     });
+  }
+
+  if (directCouponRequested && couponDialog && !returnMatches) {
+    openCoupon();
   }
 
   if (isDoiConfirmation && updatesStatus) {

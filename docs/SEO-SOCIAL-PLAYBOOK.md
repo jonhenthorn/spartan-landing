@@ -8,7 +8,8 @@ This is the low-maintenance operating routine for making the website, Google Bus
 - Our menu: `https://spartandrink.com/menu/#our-menu`
 - Special menus: `https://spartandrink.com/menu/#special-menu`
 - Products shipped to you: `https://spartandrink.com/products-at-home/`
-- First-visit offer: `https://spartandrink.com/#first-visit`
+- First-visit offer section: `https://spartandrink.com/#first-visit`
+- Direct coupon form: `https://spartandrink.com/?claim=first-drink#first-visit`
 - Mega Tea Kits: `https://spartandrink.com/#mega-tea-kits`
 - Google profile: `https://www.google.com/maps?cid=1058402923204900530`
 - Google review request: `https://g.page/r/CbL23NrZM7AOEBE/review`
