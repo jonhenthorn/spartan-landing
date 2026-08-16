@@ -15,6 +15,9 @@
   const couponForm = document.getElementById("coupon-form");
   const updatesForm = document.getElementById("updates-form");
   const updatesStatus = document.getElementById("updates-status");
+  const updatesConfirmation = document.querySelector("[data-updates-confirmation]");
+  const updatesConfirmationTitle = document.querySelector("[data-updates-confirmation-title]");
+  const updatesGrid = updatesConfirmation?.closest(".updates-grid");
   const year = document.getElementById("current-year");
   const productionHosts = ["spartandrink.com", "www.spartandrink.com"];
   const isPreviewMode = !productionHosts.includes(window.location.hostname);
@@ -203,6 +206,21 @@
 
   const focusCouponResult = () => {
     couponResult?.querySelector("[data-coupon-result-title]")?.focus({ preventScroll: true });
+  };
+
+  const showUpdatesConfirmation = () => {
+    updatesForm?.setAttribute("hidden", "");
+    updatesConfirmation?.removeAttribute("hidden");
+    updatesGrid?.setAttribute("data-updates-confirmed", "true");
+    const focusConfirmation = () => window.requestAnimationFrame(() => {
+      updatesConfirmation?.scrollIntoView({ block: "start", behavior: "instant" });
+      updatesConfirmationTitle?.focus({ preventScroll: true });
+    });
+    if (document.readyState === "complete") {
+      focusConfirmation();
+    } else {
+      window.addEventListener("load", focusConfirmation, { once: true });
+    }
   };
 
   const openCoupon = () => {
@@ -671,8 +689,8 @@
     openCoupon();
   }
 
-  if (isDoiConfirmation && updatesStatus) {
-    updatesStatus.textContent = "Thanks—your confirmation link was opened. If confirmation completed successfully, you’re all set for Spartan Updates.";
+  if (isDoiConfirmation && updatesConfirmation) {
+    showUpdatesConfirmation();
     track("email_confirmation_return", {
       source: "brevo_doi_return",
       verification: "provider_redirect"
