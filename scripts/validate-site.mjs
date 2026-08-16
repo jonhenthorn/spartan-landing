@@ -82,7 +82,8 @@ assert.match(homepage, /A Bixby favorite since 2016/);
 assert.match(homepage, /protein shakes and other made-to-order nutrition shakes/);
 assert.match(homepage, /Visit Spartan Nutrition in Bixby—at 151st &amp; Memorial\./);
 assert.match(homepage, /\(918\) 928-9755/);
-assert.match(homepage, /The Megan Moroney menu drop is here\./);
+assert.match(homepage, /<p class="eyebrow">Latest Release<\/p>/);
+assert.match(homepage, /<h2>Megan Moroney Menu<\/h2>/);
 assert.doesNotMatch(homepage, /Golden Hour|Sunset Squeeze/);
 assert.match(homepage, /Your new favorite drink is/);
 assert.match(homepage, /Hot or iced energy teas/);
@@ -126,19 +127,33 @@ for (const flavor of [
   "Prickly Pear",
   "Sour Black Cherry"
 ]) {
-  assert.ok(homepage.includes(`<li>${flavor}</li>`), `Permanent menu is missing flavor: ${flavor}`);
+  assert.ok(homepage.includes(`<li>${flavor}</li>`), `Our menu is missing flavor: ${flavor}`);
 }
 
 const menu = JSON.parse(await read("data/menu.json"));
-assert.equal(menu.currentRelease.title, "The Megan Moroney menu drop is here.");
-assert.equal(menu.currentRelease.image, "assets/current-release-menu.webp");
-assert.equal(menu.currentRelease.imageWidth, 989);
-assert.equal(menu.currentRelease.imageHeight, 1280);
+assert.equal(menu.specialMenu.eyebrow, "Latest Release");
+assert.equal(menu.specialMenu.title, "Megan Moroney Menu");
+assert.equal(menu.specialMenu.image, "assets/current-release-menu.webp");
+assert.equal(menu.specialMenu.imageWidth, 989);
+assert.equal(menu.specialMenu.imageHeight, 1280);
 assert.match(menuPage, /<title>Spartan Nutrition Menu \| Energy Teas &amp; Protein Shakes in Bixby<\/title>/);
 assert.match(menuPage, /data-track-view="menu_page_permanent_view"/);
-assert.match(menuPage, /The Megan Moroney menu drop is here\./);
+assert.match(menuPage, /data-track="current_menu_click"/);
+assert.match(menuPage, /data-track="permanent_menu_click"/);
+assert.match(menuPage, /<p class="eyebrow">Latest Release<\/p>/);
+assert.match(menuPage, /<h2>Megan Moroney Menu<\/h2>/);
 assert.match(menuPage, /<li>Original<\/li>/);
 assert.match(menuPage, /href="\/products-at-home\/"/);
+for (const page of [homepage, menuPage]) {
+  assert.match(page, />Our menu</);
+  assert.match(page, />Special menu</);
+  assert.match(page, /Most popular tea recipes/);
+  assert.match(page, /Most popular shake flavors/);
+  assert.match(page, /recipes remain available/);
+  assert.doesNotMatch(page, />Permanent menu</);
+  assert.doesNotMatch(page, /Availability can change before the next menu/);
+}
+assert.match(homepage, /the recipes are not limited to that promotion/);
 
 assert.match(productsPage, /<title>Products Shipped to You \| Spartan Nutrition Bixby<\/title>/);
 assert.match(productsPage, /Get your favorite products shipped to you\./);
@@ -185,6 +200,22 @@ for (const group of megaTeaKits.selectionGroups) {
 const allSelections = megaTeaKits.selectionGroups.flatMap((group) => group.items);
 assert.equal(allSelections.length, 112);
 assert.equal(new Set(allSelections).size, 112, "Mega Tea Kit named/flavor choices must be unique");
+const energyTeaGroups = menu.sections.find((section) => section.id === "energy-teas")?.groups;
+assert.ok(energyTeaGroups, "Energy tea groups are missing from our menu");
+assert.deepEqual(
+  energyTeaGroups.find((group) => group.label === "Flavor options")?.items,
+  megaTeaKits.selectionGroups.find((group) => group.id === "build-your-own-flavors")?.items,
+  "Our menu flavor options and Mega Tea Kit build-your-own flavors must stay synchronized"
+);
+assert.deepEqual(
+  energyTeaGroups.find((group) => group.label === "Most popular tea recipes")?.items,
+  megaTeaKits.selectionGroups.find((group) => group.id === "spartan-favorites")?.items,
+  "Our menu most-popular tea recipes and Mega Tea Kit Spartan favorites must stay synchronized"
+);
+assert.equal(
+  megaTeaKits.selectionGroups.find((group) => group.id === "more-named-recipes")?.label,
+  "Special-menu recipes"
+);
 assert.equal(megaTeaKits.optionalLiftoffFlavors.length, 8);
 assert.equal(new Set(megaTeaKits.optionalLiftoffFlavors).size, 8, "Liftoff flavors must be unique");
 assert.equal(megaTeaKits.paidAddIns.length, 30);

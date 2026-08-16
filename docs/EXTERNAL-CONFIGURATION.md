@@ -38,6 +38,7 @@ This file records external configuration that cannot be inferred from GitHub alo
 - Facebook and Instagram profiles remain attached.
 - TikTok profile `https://www.tiktok.com/@spartan_nutrition` was submitted and was pending Google review.
 - A revised description was submitted to replace weight-loss, meal-replacement and coaching-style positioning with accurate local-store language covering energy teas, protein and nutrition shakes, protein coffee, seasonal menus, Mega Tea Kits, pickup and nearby communities. It was pending Google review.
+- Owner clarification on August 15: Spartan uses **our menu**, **special menus** and **most popular**. Special-menu recipes remain available after a different special is featured; future profile copy should not call them limited-time or contrast them with a “permanent menu.”
 
 ### Square online ordering
 

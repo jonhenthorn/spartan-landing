@@ -5,12 +5,12 @@ This repository contains the static website published at [spartandrink.com](http
 ## Phase 1 structure
 
 - `index.html` — primary landing page and canonical homepage.
-- `menu/index.html` — crawlable current and permanent menu page generated from the same structured menu source as the homepage.
+- `menu/index.html` — crawlable page for our menu, special menus and most popular recipes, generated from the same structured source as the homepage.
 - `products-at-home/index.html` — shipped-product, independent-reordering and optional member-savings journey.
 - `assets/site.css` and `assets/site.js` — shared presentation and interactions.
-- `data/menu.json` — structured current-release copy and permanent menu source.
+- `data/menu.json` — structured special-menu feature and full menu source.
 - `data/mega-tea-kits.json` — structured source for Mega Tea Kit choices, optional Liftoff flavors, add-ins and prices.
-- `assets/current-release-menu.webp` — the replaceable seasonal/current release image.
+- `assets/current-release-menu.webp` — the replaceable featured special-menu image.
 - `privacy.html` — website and subscriber privacy disclosures.
 - `offer-terms.html` — first-drink offer rules.
 - `apps-script/` — source and deployment instructions for the Google Sheet form handler.
@@ -21,7 +21,7 @@ This repository contains the static website published at [spartandrink.com](http
 
 ## Routine owner updates
 
-### Replace the current release menu
+### Replace the featured special menu
 
 1. Export the new menu as a clear portrait JPG, PNG or WebP image.
 2. Convert and resize it to WebP before uploading. From the repository folder on a Mac with `cwebp` installed:
@@ -30,13 +30,13 @@ This repository contains the static website published at [spartandrink.com](http
    cwebp -q 82 -resize 1200 0 "/path/to/new-menu.jpg" -o assets/current-release-menu.webp
    ```
 
-3. Update the `currentRelease` title, description, availability note, dimensions and image alt text in `data/menu.json`.
+3. Update the `specialMenu` title, description, continuity note, dimensions and image alt text in `data/menu.json`.
 4. Run `node scripts/build-menu.mjs` to refresh both the homepage and `/menu/` page.
 5. Preview both pages on phone and desktop before publishing.
 
-Replacing the file with the same name automatically removes the previous release from the live page while preserving a simple update workflow.
+Replacing the file with the same name changes which special-menu artwork is featured. Recipes from earlier special menus remain available and should not be described as expired or discontinued.
 
-### Update the permanent menu
+### Update our menu
 
 1. Edit `data/menu.json`.
 2. Generate the matching accessible HTML:
@@ -47,14 +47,14 @@ Replacing the file with the same name automatically removes the previous release
 
 3. Review `index.html` and `menu/index.html`, then preview both pages.
 
-The same build step refreshes the current-release copy and permanent menu on both public pages, plus the homepage Mega Tea Kit section from its separate data file.
+The same build step refreshes the featured special menu and our menu on both public pages, plus the homepage Mega Tea Kit section from its separate data file.
 
 ### Update Mega Tea Kits
 
 Use the current live Square Ordering Profile as the source of truth before changing kit options or prices.
 
 1. Edit `data/mega-tea-kits.json` rather than editing the generated kit lists in `index.html`.
-2. Keep the three main selection groups separate: build-your-own flavors, Spartan favorites and more named recipes.
+2. Keep the three main selection groups separate: build-your-own flavors, Spartan favorites and special-menu recipes.
 3. Update the optional Liftoff list, paid add-ins, base price and `lastReviewed` date only when the live Square setup changes.
 4. Generate the accessible website section:
 
@@ -79,7 +79,7 @@ Run the dependency-free validation script after changing content, forms, menu da
 node scripts/validate-site.mjs
 ```
 
-It checks local page and asset references, anchor targets, structured data, JavaScript syntax, permanent-menu and Mega Tea Kit data/rendering parity, Google Sheet headers, coupon behavior and email-consent behavior. It does not replace visual browser testing, live Square availability checks or a real Apps Script deployment test.
+It checks local page and asset references, anchor targets, structured data, JavaScript syntax, our-menu and Mega Tea Kit data/rendering parity, Google Sheet headers, coupon behavior and email-consent behavior. It does not replace visual browser testing, live Square availability checks or a real Apps Script deployment test.
 
 ### Preview before publishing
 
@@ -103,7 +103,7 @@ Coupon claims do not create marketing permission unless the visitor separately s
 
 ## Approved staged deployment checklist
 
-1. Confirm the featured menu image and accompanying drink names are current.
+1. Confirm the featured special-menu image and accompanying drink names are accurate.
 2. Confirm hours, phone, email, address and social links.
 3. Run the local validators and complete the owner preview; publish the approved compatibility frontend to GitHub before changing the form handler.
 4. Add the shared secret and publish Apps Script v3.2 at the existing `/exec` URL; verify health and the intended Sheet before routing traffic through it.
@@ -123,9 +123,9 @@ No customer data, API keys, spreadsheet IDs or provider credentials should be co
 - **Google Sheet:** source of website coupon claims and auditable email permissions.
 - **Square:** source of completed prepared-drink sales and coupon redemptions. The live variable-percentage discount is named `50% Off First Drink — Enter 50%`; staff applies it only to one eligible prepared-drink line and enters `50` when the website coupon is shown. The next genuine redemption should verify exact half-off, no stacking, receipt/report visibility and the transaction ID. This provides an aggregate directional redemption rate without a custom Square integration.
 - **Online ordering:** the existing Square/Cash App ordering profile remains linked at `https://cash.app/$spartannutritionok`. Its public availability is separate from full checkout, tax, discount, receipt and inventory QA.
-- **Permanent menu:** `data/menu.json`, because the Square catalog does not represent all prepared-drink flavors clearly enough for customers.
+- **Our menu:** `data/menu.json`, because the Square catalog does not represent all prepared-drink flavors clearly enough for customers.
 - **Mega Tea Kits:** `data/mega-tea-kits.json`, reconciled to the current live Square kit, modifier choices and prices. The generated section links to the existing online-pickup profile and keeps an availability caveat because live choices and inventory can change.
-- **Featured release:** `assets/current-release-menu.webp`, replaced as one owner-managed image.
+- **Featured special menu:** `assets/current-release-menu.webp`, replaced as one owner-managed image while its recipes remain available.
 - **Home-product shipping:** the owner-attributed external storefront is `https://get-started.herbalife.com/en-us/u`. The public website links to its stable Shop All and Wellness Rewards routes. Herbalife is merchant of record and handles account creation, payment, taxes, shipping, subscriptions, returns and membership terms. Spartan does not collect enrollment/payment/shipping data or fulfill these orders.
 - **Home-product measurement:** `home_products_view`, `home_delivery_click` and `member_savings_click` are anonymous GA4 website-intent events only. The product-shipping page does not load Meta Pixel, and health-adjacent product-interest events are withheld from Meta. A click is not a completed order or membership. Reconcile completions from authenticated Herbalife owner reporting; do not invent a cross-domain conversion or upload customer data without an approved privacy/consent basis.
 - **Meta:** current homepage/menu analytics are retained for general menu, call, directions, coupon and Mega Tea Kit actions. The shipped-products page does not load Meta Pixel, and `assets/site.js` blocks health-adjacent at-home product-interest event names from Meta.
