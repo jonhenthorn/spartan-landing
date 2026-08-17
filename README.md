@@ -18,6 +18,8 @@ This repository contains the static website published at [spartandrink.com](http
 - `docs/SEO-SOCIAL-PLAYBOOK.md` — the owner routine for local search, social links and campaign attribution.
 - `docs/MARKETING-ENGAGEMENT-ROADMAP.md` — the staged plan for confirmation UX, subscriber interests, acquisition-source learning, referrals, reviews, gamification and social automation.
 - `docs/SQUARE-JOURNEY-PILOT.md` — the manual-first Project 2 plan for linking website claims to Square redemptions and repeat visits before referral/reward automation.
+- `square-worker/` — the isolated, default-off website-to-Square connector candidate; it is not deployed or authorized for production.
+- `docs/SQUARE-CONNECTOR-ROLLOUT.md` — the connector's security, privacy, sandbox, canary and rollback gates.
 - `docs/MARKETING-MEASUREMENT-DICTIONARY.md` — canonical customer milestones, source-of-truth boundaries, KPI formulas, cohorts, alerts and staged data architecture for the marketing portfolio.
 - `docs/EXTERNAL-CONFIGURATION.md` — dated, non-secret evidence of the current Cloudflare, Google and social-link configuration.
 - `spartan-landing/index.html` and `index_updated.html` — noindex browser fallbacks retained behind the active Cloudflare redirects.
@@ -84,6 +86,16 @@ node scripts/validate-site.mjs
 
 It checks local page and asset references, anchor targets, structured data, JavaScript syntax, our-menu and Mega Tea Kit data/rendering parity, Google Sheet headers, coupon behavior, email-consent behavior and the optional post-coupon discovery contract. It does not replace visual browser testing, live Square availability checks or a real Apps Script deployment test.
 
+When Square connector files change, run the complete dependency-free contract suite:
+
+```sh
+node scripts/validate-square-connector.mjs
+node scripts/validate-square-apps-script.mjs
+node scripts/validate-square-frontend.mjs
+node scripts/validate-form-backend.mjs
+node scripts/validate-site.mjs
+```
+
 ### Preview before publishing
 
 From the repository folder, start a local preview:
@@ -112,6 +124,12 @@ This feature must deploy backend first so an older browser remains compatible th
 
 For a safe rollback, hide/remove the frontend question first. The unused Worker route and Apps Script handler may remain temporarily because existing coupon and subscriber behavior does not call them. If the backend must also be removed, take down the Worker discovery route second and the Apps Script discovery handler last. Never roll back by deleting a Sheet row, clearing an existing answer or changing coupon/consent evidence.
 
+### Square connector gate
+
+No website-to-Square connector is live. A default-off local release candidate keeps the coupon available first, then may offer a separate optional action to save only the claimant's name, mobile number and an opaque reference in Square. Skipping that action keeps the manual coupon/phone-search path and cannot affect Brevo email or SMS permission.
+
+The candidate uses a separate Cloudflare Worker, verified webhooks, D1 idempotency state, a Queue and dead-letter queue, default-off controls and a one-submission canary. Production credentials, retention, monitoring and sandbox/canary evidence remain mandatory gates in [`docs/SQUARE-CONNECTOR-ROLLOUT.md`](docs/SQUARE-CONNECTOR-ROLLOUT.md). Do not add Square credentials or webhook processing to the current form proxy.
+
 ## Approved staged deployment checklist
 
 1. Confirm the featured special-menu image and accompanying drink names are accurate.
@@ -133,7 +151,7 @@ No customer data, API keys, spreadsheet IDs or provider credentials should be co
 ## Phase 1 data and measurement boundaries
 
 - **Google Sheet:** source of website coupon claims and auditable email permissions.
-- **Square:** source of completed prepared-drink sales and coupon redemptions. The live variable-percentage discount is named `50% Off First Drink — Enter 50%`; staff applies it only to one eligible prepared-drink line and enters `50` when the website coupon is shown. The next genuine redemption should verify exact half-off, no stacking, receipt/report visibility and the transaction ID. This provides an aggregate directional redemption rate without a custom Square integration.
+- **Square:** source of completed prepared-drink sales and coupon redemptions. The live discount `50% Off First Drink — Enter 50%` is fixed at 50%. Staff opens one selected eligible prepared-drink line, confirms quantity 1, applies the discount there and verifies every other item remains full price with no stacking. If identical drinks share a quantity-two line, staff must split the eligible drink first because Square otherwise discounts both quantities. The next genuine website-linked redemption must confirm receipt/report visibility and stable IDs.
 - **Online ordering:** the existing Square/Cash App ordering profile remains linked at `https://cash.app/$spartannutritionok`. Its public availability is separate from full checkout, tax, discount, receipt and inventory QA.
 - **Our menu:** `data/menu.json`, because the Square catalog does not represent all prepared-drink flavors clearly enough for customers.
 - **To-Go Teas and Mega Tea Kits:** `data/mega-tea-kits.json`, reconciled to the current live Square items, modifier choices and prices. The generated section links to the existing online-pickup profile and keeps an availability caveat because live choices and inventory can change.
@@ -147,7 +165,7 @@ No customer data, API keys, spreadsheet IDs or provider credentials should be co
 - **Welcome and interest learning:** a confirmed subscriber may receive one automated welcome email with an optional link to update `CONTENT_INTERESTS` in Brevo. These selections are research signals for future content, not separate permission categories and not a promise to send only selected topics. The profile form must not resubscribe a contact, clear a suppression or change email/SMS permission.
 - **Owner submission alerts:** each newly appended coupon or email-signup row enters a Sheet-backed notification queue. A separate 15-minute Apps Script trigger sends one counts-only message to the owner inbox and records delivery state; customer details remain in the restricted Sheet, and mail failure cannot block the public form.
 
-The Sheet includes optional owner-managed fields for coupon redemption status, redemption date and Square transaction ID. Phase 1 does not automatically join Square transactions to website contacts; that would require credentials, API design and a reliable staff/POS identifier.
+The Sheet includes optional owner-managed fields for coupon redemption status, redemption date and Square transaction ID. Production does not automatically join Square transactions to website contacts. The local connector candidate remains undeployed, gated and default-off; documentation, an attached barcode/QR or a Square customer group does not prove deployment or redemption.
 
 Do not send campaigns directly from the Sheet. Export or synchronize only records whose `email_consent_status` is `granted` to an email platform that provides unsubscribe and suppression handling. Keep all historic unknown-consent contacts quarantined from recurring email and SMS marketing.
 

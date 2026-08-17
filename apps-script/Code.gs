@@ -122,6 +122,67 @@ const DISCOVERY_SOURCE_VALUES = [
   'community_event_local_group',
   'other'
 ];
+const SQUARE_CONNECTOR_CONTRACT_VERSION = 'spartan-square-connector-v1-2026-08-17';
+const SQUARE_CUSTOMER_PROFILE_CONSENT_VERSION = 'square-customer-profile-v1-2026-08-17';
+const SQUARE_CUSTOMER_PROFILE_CONSENT_LANGUAGE = 'Save my name and mobile number in Spartan Nutrition’s Square Customer Directory to find my first-visit offer and link my in-store purchases. This is not permission for marketing emails or texts.';
+const SQUARE_CUSTOMER_PROFILE_CONSENT_HEADERS = [
+  'square_customer_profile_consent_status',
+  'square_customer_profile_consent_timestamp',
+  'square_customer_profile_consent_language_version',
+  'square_customer_profile_consent_language'
+];
+const SQUARE_OFFER_PREPARE_RESPONSE_MODE = 'square_offer_prepare_json';
+const SQUARE_OFFER_FINALIZE_RESPONSE_MODE = 'square_offer_finalize_json';
+const SQUARE_EVENT_COMMIT_RESPONSE_MODE = 'square_event_commit_json';
+const SQUARE_OFFER_PREPARE_SIGNED_FIELDS = [
+  'operation',
+  'submission_id',
+  'coupon_code',
+  'square_customer_profile_consent',
+  'square_customer_profile_consent_version',
+  'response_mode',
+  'connector_contract_version',
+  'connector_timestamp',
+  'connector_nonce'
+];
+const SQUARE_OFFER_FINALIZE_SIGNED_FIELDS = [
+  'operation',
+  'website_submission_id',
+  'coupon_code',
+  'square_customer_id',
+  'square_group_id',
+  'group_membership_status',
+  'match_method',
+  'match_confidence',
+  'effective_at_utc',
+  'response_mode',
+  'connector_contract_version',
+  'connector_timestamp',
+  'connector_nonce'
+];
+const SQUARE_EVENT_COMMIT_SIGNED_FIELDS = [
+  'operation',
+  'square_event_id',
+  'square_event_type',
+  'occurred_at_utc',
+  'square_customer_id',
+  'square_payment_id',
+  'square_order_id',
+  'square_refund_id',
+  'square_location_id',
+  'discount_qualification',
+  'discount_catalog_object_id',
+  'discount_name',
+  'discount_amount_minor',
+  'net_amount_minor',
+  'refund_amount_minor',
+  'currency',
+  'refund_scope',
+  'response_mode',
+  'connector_contract_version',
+  'connector_timestamp',
+  'connector_nonce'
+];
 const JOURNEY_LEDGER_VERSION = 'spartan-journey-ledger-v1-2026-08-16';
 const JOURNEY_LEDGER_SHEET_SPECS = [
   {
@@ -263,6 +324,15 @@ function doGet(e) {
 
 function doPost(e) {
   const params = (e && e.parameter) || {};
+  if (params.response_mode === SQUARE_OFFER_PREPARE_RESPONSE_MODE) {
+    return squareOfferPrepareJsonPostResponse_(params);
+  }
+  if (params.response_mode === SQUARE_OFFER_FINALIZE_RESPONSE_MODE) {
+    return squareOfferFinalizeJsonPostResponse_(params);
+  }
+  if (params.response_mode === SQUARE_EVENT_COMMIT_RESPONSE_MODE) {
+    return squareEventCommitJsonPostResponse_(params);
+  }
   if (params.response_mode === 'discovery_json') {
     return workerDiscoveryJsonPostResponse_(params);
   }
@@ -1129,6 +1199,1030 @@ function setupJourneyLedgerSheets() {
   } finally {
     lock.releaseLock();
   }
+}
+
+/**
+ * Square is an optional post-confirmation service. It is deliberately gated by
+ * its own feature flag and secret so a Square configuration problem cannot
+ * disable the existing coupon, email, discovery, Brevo or owner-alert paths.
+ */
+function getSquareJourneyConfig_() {
+  const properties = PropertiesService.getScriptProperties();
+  const enabled = String(properties.getProperty('SQUARE_JOURNEY_ENABLED') || '') === 'true';
+  const sharedSecret = String(properties.getProperty('SQUARE_CONNECTOR_SHARED_SECRET') || '');
+  const locationId = cleanText_(properties.getProperty('SQUARE_LOCATION_ID'), 100);
+  const discountCatalogObjectId = cleanText_(
+    properties.getProperty('SQUARE_FIRST_DRINK_DISCOUNT_ID'),
+    192
+  );
+  const eligibleGroupId = cleanText_(properties.getProperty('SQUARE_FIRST_VISIT_GROUP_ID'), 192);
+  return {
+    enabled,
+    configured: enabled
+      && sharedSecret.length >= 32
+      && Boolean(locationId)
+      && Boolean(discountCatalogObjectId)
+      && Boolean(eligibleGroupId),
+    sharedSecret,
+    locationId,
+    discountCatalogObjectId,
+    eligibleGroupId
+  };
+}
+
+function diagnoseSquareJourneyConfiguration() {
+  const config = getSquareJourneyConfig_();
+  let ledgerReady = false;
+  let ledgerSheets = [];
+  try {
+    const ledger = diagnoseJourneyLedgerRuntime();
+    ledgerReady = ledger.ready;
+    ledgerSheets = ledger.sheets;
+  } catch (error) {
+    ledgerReady = false;
+  }
+  const result = {
+    connector_contract_version: SQUARE_CONNECTOR_CONTRACT_VERSION,
+    customer_profile_consent_version: SQUARE_CUSTOMER_PROFILE_CONSENT_VERSION,
+    enabled: config.enabled,
+    configured: config.configured,
+    location_configured: Boolean(config.locationId),
+    discount_configured: Boolean(config.discountCatalogObjectId),
+    eligible_group_configured: Boolean(config.eligibleGroupId),
+    shared_secret_configured: config.sharedSecret.length >= 32,
+    ledger_ready: ledgerReady,
+    ledger_sheets: ledgerSheets,
+    writes_performed: 0
+  };
+  console.log(JSON.stringify(result));
+  return result;
+}
+
+function squareOfferPrepareJsonPostResponse_(params) {
+  const verification = verifySquareConnectorRequest_(
+    params,
+    SQUARE_OFFER_PREPARE_SIGNED_FIELDS,
+    SQUARE_OFFER_PREPARE_RESPONSE_MODE,
+    'offer_prepare'
+  );
+  if (!verification.ok) return squareConnectorJsonErrorResponse_(verification.code);
+
+  try {
+    const result = processSquareOfferPrepare_(params);
+    return squareConnectorJsonResponse_({
+      ok: true,
+      operation: 'offer_prepare',
+      offer_prepare_result: result.offerPrepareResult,
+      profile_consent_result: result.profileConsentResult,
+      website_submission_id: result.websiteSubmissionId,
+      coupon_code: result.couponCode,
+      name: result.name,
+      phone: result.phone,
+      square_customer_id: result.squareCustomerId,
+      identity_link_id: result.identityLinkId
+    });
+  } catch (error) {
+    console.error('Square offer preparation failed.');
+    return squareConnectorJsonErrorResponse_('offer_prepare_failed');
+  }
+}
+
+function squareOfferFinalizeJsonPostResponse_(params) {
+  const verification = verifySquareConnectorRequest_(
+    params,
+    SQUARE_OFFER_FINALIZE_SIGNED_FIELDS,
+    SQUARE_OFFER_FINALIZE_RESPONSE_MODE,
+    'offer_finalize'
+  );
+  if (!verification.ok) return squareConnectorJsonErrorResponse_(verification.code);
+
+  try {
+    const result = processSquareOfferFinalize_(params, verification.config);
+    return squareConnectorJsonResponse_({
+      ok: true,
+      operation: 'offer_finalize',
+      offer_finalize_result: result.created ? 'linked' : 'already_linked',
+      website_submission_id: result.websiteSubmissionId,
+      coupon_code: result.couponCode,
+      square_customer_id: result.squareCustomerId,
+      identity_link_id: result.identityLinkId,
+      contact_id: result.contactId,
+      identity_event_id: result.identityEventId
+    });
+  } catch (error) {
+    console.error('Square offer finalization failed.');
+    return squareConnectorJsonErrorResponse_('offer_finalize_failed');
+  }
+}
+
+function squareEventCommitJsonPostResponse_(params) {
+  const verification = verifySquareConnectorRequest_(
+    params,
+    SQUARE_EVENT_COMMIT_SIGNED_FIELDS,
+    SQUARE_EVENT_COMMIT_RESPONSE_MODE,
+    'event_commit'
+  );
+  if (!verification.ok) return squareConnectorJsonErrorResponse_(verification.code);
+
+  try {
+    const result = processSquareEventCommit_(params, verification.config);
+    return squareConnectorJsonResponse_({
+      ok: true,
+      operation: 'event_commit',
+      event_commit_result: result.eventCommitResult,
+      square_event_type: result.squareEventType,
+      order_event_id: result.orderEventId,
+      redemption_event_id: result.redemptionEventId,
+      reversal_event_id: result.reversalEventId,
+      redemption_result: result.redemptionResult,
+      rows_appended: result.rowsAppended
+    });
+  } catch (error) {
+    console.error('Square event commit failed.');
+    return squareConnectorJsonErrorResponse_('event_commit_failed');
+  }
+}
+
+function squareConnectorJsonResponse_(payload) {
+  return jsonResponse_({
+    ...payload,
+    connector_contract_version: SQUARE_CONNECTOR_CONTRACT_VERSION
+  });
+}
+
+function squareConnectorJsonErrorResponse_(code) {
+  return squareConnectorJsonResponse_({ ok: false, code });
+}
+
+function verifySquareConnectorRequest_(params, signedFields, expectedMode, expectedOperation) {
+  const config = getSquareJourneyConfig_();
+  if (!config.enabled) return { ok: false, code: 'square_journey_disabled', config };
+  if (!config.configured) return { ok: false, code: 'square_journey_not_configured', config };
+
+  const timestamp = String(params.connector_timestamp || '').trim();
+  const nonce = String(params.connector_nonce || '').trim();
+  const suppliedSignature = String(params.connector_signature || '').trim().toLowerCase();
+  const timestampSeconds = /^\d{10}$/.test(timestamp) ? Number(timestamp) : NaN;
+  const nowSeconds = Math.floor(Date.now() / 1000);
+
+  if (params.response_mode !== expectedMode) return { ok: false, code: 'connector_auth_failed', config };
+  if (params.operation !== expectedOperation) return { ok: false, code: 'connector_auth_failed', config };
+  if (params.connector_contract_version !== SQUARE_CONNECTOR_CONTRACT_VERSION) {
+    return { ok: false, code: 'connector_auth_failed', config };
+  }
+  if (!Number.isFinite(timestampSeconds)) return { ok: false, code: 'connector_auth_failed', config };
+  if (Math.abs(nowSeconds - timestampSeconds) > WORKER_AUTH_MAX_AGE_SECONDS) {
+    return { ok: false, code: 'connector_auth_failed', config };
+  }
+  if (!/^[a-f0-9-]{36}$/i.test(nonce)) return { ok: false, code: 'connector_auth_failed', config };
+  if (!/^[a-f0-9]{64}$/.test(suppliedSignature)) {
+    return { ok: false, code: 'connector_auth_failed', config };
+  }
+
+  const canonicalPayload = signedFields
+    .map(field => `${field}=${encodeURIComponent(String(params[field] || ''))}`)
+    .join('&');
+  const expectedSignature = hmacSha256Hex_(canonicalPayload, config.sharedSecret);
+  return constantTimeEqual_(suppliedSignature, expectedSignature)
+    ? { ok: true, code: '', config }
+    : { ok: false, code: 'connector_auth_failed', config };
+}
+
+function ensureSquareCustomerProfileConsentHeaders_(sheet) {
+  let headers = ensureHeaders_(sheet);
+  SQUARE_CUSTOMER_PROFILE_CONSENT_HEADERS.forEach(header => {
+    const matches = headers.filter(existing => existing === header).length;
+    if (matches > 1) throw new Error('Duplicate Square consent header.');
+  });
+  const missing = SQUARE_CUSTOMER_PROFILE_CONSENT_HEADERS.filter(
+    header => !headers.includes(header)
+  );
+  if (missing.length) {
+    const lastColumn = sheet.getLastColumn();
+    sheet.getRange(1, lastColumn + 1, 1, missing.length).setValues([missing]);
+    headers = headers.concat(missing);
+  }
+  return headers;
+}
+
+function processSquareOfferPrepare_(params) {
+  const requestSubmissionId = requireExternalId_(params.submission_id, 80);
+  const couponCode = requireCouponCode_(params.coupon_code);
+  if (params.square_customer_profile_consent !== 'yes') {
+    throw new Error('Square profile consent is required.');
+  }
+  if (params.square_customer_profile_consent_version !== SQUARE_CUSTOMER_PROFILE_CONSENT_VERSION) {
+    throw new Error('Square profile consent version mismatch.');
+  }
+
+  const lock = LockService.getScriptLock();
+  let lockAcquired = false;
+  try {
+    lock.waitLock(LOCK_TIMEOUT_MS);
+    lockAcquired = true;
+    const sheet = getLeadSheet_();
+    const headers = ensureSquareCustomerProfileConsentHeaders_(sheet);
+    const target = findOriginalWebsiteCouponClaim_(sheet, headers, {
+      websiteSubmissionId: requestSubmissionId,
+      couponCode
+    });
+    if (!target) throw new Error('Original website coupon claim not found.');
+
+    if (target.redemptionStatus !== 'not_recorded') {
+      return {
+        offerPrepareResult: 'not_eligible',
+        profileConsentResult: 'not_recorded',
+        websiteSubmissionId: target.websiteSubmissionId,
+        couponCode: target.couponCode,
+        name: '',
+        phone: '',
+        squareCustomerId: '',
+        identityLinkId: ''
+      };
+    }
+
+    const profileConsentResult = recordSquareCustomerProfileConsent_(
+      sheet,
+      headers,
+      target
+    );
+    const ledger = getJourneyLedgerRuntime_();
+    const existingLink = findVerifiedSquareIdentityLink_(
+      ledger.identityLinks.sheet,
+      ledger.identityLinks.headers,
+      { websiteSubmissionId: target.websiteSubmissionId }
+    );
+    SpreadsheetApp.flush();
+
+    return {
+      offerPrepareResult: existingLink ? 'already_linked' : 'eligible',
+      profileConsentResult,
+      websiteSubmissionId: target.websiteSubmissionId,
+      couponCode: target.couponCode,
+      name: target.name,
+      phone: target.phone,
+      squareCustomerId: existingLink ? existingLink.squareCustomerId : '',
+      identityLinkId: existingLink ? existingLink.identityLinkId : ''
+    };
+  } finally {
+    if (lockAcquired) lock.releaseLock();
+  }
+}
+
+function findOriginalWebsiteCouponClaim_(sheet, headers, criteria) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return null;
+  const indexes = {
+    submissionId: headers.indexOf('submission_id'),
+    recordType: headers.indexOf('record_type'),
+    submissionMethod: headers.indexOf('submission_method'),
+    tags: headers.indexOf('tags'),
+    couponCode: headers.indexOf('coupon_code'),
+    couponRedemptionStatus: headers.indexOf('coupon_redemption_status'),
+    name: headers.indexOf('name'),
+    phone: headers.indexOf('phone'),
+    squareConsentStatus: headers.indexOf('square_customer_profile_consent_status'),
+    squareConsentTimestamp: headers.indexOf('square_customer_profile_consent_timestamp'),
+    squareConsentVersion: headers.indexOf('square_customer_profile_consent_language_version'),
+    squareConsentLanguage: headers.indexOf('square_customer_profile_consent_language')
+  };
+  if (Object.values(indexes).some(index => index < 0)) {
+    throw new Error('Required Square offer columns are missing.');
+  }
+
+  const rows = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+  const matches = [];
+  rows.forEach((row, index) => {
+    if (String(row[indexes.recordType] || '').trim().toLowerCase() !== 'coupon_claim') return;
+    if (String(row[indexes.submissionMethod] || '').trim().toLowerCase() !== 'website_post') return;
+    const tags = String(row[indexes.tags] || '')
+      .split(',')
+      .map(value => value.trim().toLowerCase())
+      .filter(Boolean);
+    if (!tags.includes('website_coupon') || tags.includes('repeat_claim')) return;
+
+    const storedSubmissionId = normalizeStoredSubmissionId_(row[indexes.submissionId]);
+    const storedCouponCode = cleanText_(row[indexes.couponCode], 40).toUpperCase();
+    if (criteria.websiteSubmissionId && storedSubmissionId !== criteria.websiteSubmissionId) return;
+    if (criteria.couponCode && storedCouponCode !== criteria.couponCode) return;
+
+    matches.push({
+      rowNumber: index + 2,
+      websiteSubmissionId: storedSubmissionId,
+      couponCode: storedCouponCode,
+      redemptionStatus: String(row[indexes.couponRedemptionStatus] || '').trim().toLowerCase(),
+      name: cleanText_(row[indexes.name], 150),
+      phone: cleanText_(row[indexes.phone], 40),
+      squareConsentStatus: String(row[indexes.squareConsentStatus] || '').trim().toLowerCase(),
+      squareConsentTimestamp: row[indexes.squareConsentTimestamp],
+      squareConsentVersion: String(row[indexes.squareConsentVersion] || '').trim(),
+      squareConsentLanguage: String(row[indexes.squareConsentLanguage] || '').trim()
+    });
+  });
+
+  if (matches.length > 1) throw new Error('Ambiguous original website coupon claim.');
+  return matches[0] || null;
+}
+
+function recordSquareCustomerProfileConsent_(sheet, headers, target) {
+  if (target.squareConsentStatus === 'granted') {
+    if (
+      target.squareConsentVersion !== SQUARE_CUSTOMER_PROFILE_CONSENT_VERSION
+      || target.squareConsentLanguage !== SQUARE_CUSTOMER_PROFILE_CONSENT_LANGUAGE
+      || !target.squareConsentTimestamp
+    ) {
+      throw new Error('Stored Square profile consent evidence is incomplete.');
+    }
+    return 'already_recorded';
+  }
+  if (target.squareConsentStatus && target.squareConsentStatus !== 'not_requested') {
+    throw new Error('Square profile consent cannot be replaced.');
+  }
+
+  const consentTimestamp = target.squareConsentTimestamp || new Date();
+  updateRecordFields_(sheet, headers, target.rowNumber, {
+    square_customer_profile_consent_timestamp: consentTimestamp,
+    square_customer_profile_consent_language_version: SQUARE_CUSTOMER_PROFILE_CONSENT_VERSION,
+    square_customer_profile_consent_language: SQUARE_CUSTOMER_PROFILE_CONSENT_LANGUAGE,
+    // Status is the final idempotency sentinel. A retry can finish a partial
+    // evidence write without changing the original timestamp.
+    square_customer_profile_consent_status: 'granted'
+  });
+  target.squareConsentStatus = 'granted';
+  target.squareConsentTimestamp = consentTimestamp;
+  target.squareConsentVersion = SQUARE_CUSTOMER_PROFILE_CONSENT_VERSION;
+  target.squareConsentLanguage = SQUARE_CUSTOMER_PROFILE_CONSENT_LANGUAGE;
+  return 'recorded';
+}
+
+/**
+ * The setup diagnostic remains a header-only initializer. This runtime
+ * diagnostic accepts either verified empty tabs or exact-schema nonempty tabs,
+ * while continuing to reject formulas, header drift, name conflicts and ID
+ * columns that are not plain text.
+ */
+function getJourneyLedgerRuntime_() {
+  const config = getJourneyLedgerSetupConfig_();
+  const inspections = JOURNEY_LEDGER_SHEET_SPECS.map(
+    spec => inspectJourneyLedgerSheet_(config.spreadsheet, spec)
+  );
+  inspections.forEach(inspection => {
+    const exactSchemaState = inspection.state === 'verified' || inspection.state === 'nonempty';
+    if (
+      !inspection.sheet
+      || !exactSchemaState
+      || !inspection.headerRowBold
+      || inspection.frozenHeaderRows !== 1
+      || !inspection.plainTextColumnsReady
+    ) {
+      throw new Error(`Journey ledger runtime is not ready: ${inspection.spec.name}.`);
+    }
+  });
+  const identityInspection = inspections.find(
+    inspection => inspection.spec.name === 'Identity Links'
+  );
+  const eventInspection = inspections.find(
+    inspection => inspection.spec.name === 'Journey Events'
+  );
+  return {
+    configuredLeadSheet: config.configuredSheetName,
+    identityLinks: {
+      sheet: identityInspection.sheet,
+      headers: identityInspection.spec.headers,
+      inspection: identityInspection
+    },
+    journeyEvents: {
+      sheet: eventInspection.sheet,
+      headers: eventInspection.spec.headers,
+      inspection: eventInspection
+    }
+  };
+}
+
+function diagnoseJourneyLedgerRuntime() {
+  const runtime = getJourneyLedgerRuntime_();
+  const sheets = [runtime.identityLinks, runtime.journeyEvents].map(entry => ({
+    sheet_name: entry.inspection.spec.name,
+    state: entry.inspection.state === 'nonempty' ? 'active' : 'verified_empty',
+    data_row_count: entry.inspection.dataRowCount,
+    exact_schema: true,
+    formula_free: true,
+    header_row_bold: true,
+    frozen_header_rows: 1,
+    plain_text_id_columns: true
+  }));
+  const result = {
+    ledger_version: JOURNEY_LEDGER_VERSION,
+    configured_lead_sheet: runtime.configuredLeadSheet,
+    ready: true,
+    read_only: true,
+    writes_to_lead_sheet: 0,
+    journey_rows_appended: 0,
+    sheets
+  };
+  console.log(JSON.stringify(result));
+  return result;
+}
+
+function processSquareOfferFinalize_(params, config) {
+  const websiteSubmissionId = requireExternalId_(params.website_submission_id, 80);
+  const couponCode = requireCouponCode_(params.coupon_code);
+  const squareCustomerId = requireExternalId_(params.square_customer_id, 192);
+  const squareGroupId = requireExternalId_(params.square_group_id, 192);
+  const groupMembershipStatus = cleanText_(params.group_membership_status, 40).toLowerCase();
+  const matchMethod = cleanText_(params.match_method, 40).toLowerCase();
+  const matchConfidence = cleanText_(params.match_confidence, 20).toLowerCase();
+  const effectiveAt = requireUtcTimestamp_(params.effective_at_utc);
+  if (squareGroupId !== config.eligibleGroupId) throw new Error('Unexpected Square group.');
+  if (!['added', 'already_member'].includes(groupMembershipStatus)) {
+    throw new Error('Invalid Square group membership status.');
+  }
+  if (!['created', 'unique_phone', 'existing_spartan_reference'].includes(matchMethod)) {
+    throw new Error('Invalid Square match method.');
+  }
+  if (matchConfidence !== 'high') throw new Error('Square identity confidence is not high.');
+
+  const lock = LockService.getScriptLock();
+  let lockAcquired = false;
+  try {
+    lock.waitLock(LOCK_TIMEOUT_MS);
+    lockAcquired = true;
+    const leadSheet = getLeadSheet_();
+    const leadHeaders = ensureSquareCustomerProfileConsentHeaders_(leadSheet);
+    const target = findOriginalWebsiteCouponClaim_(leadSheet, leadHeaders, {
+      websiteSubmissionId,
+      couponCode
+    });
+    if (!target) throw new Error('Original website coupon claim not found.');
+    if (target.redemptionStatus !== 'not_recorded') throw new Error('Coupon is not eligible.');
+    if (
+      target.squareConsentStatus !== 'granted'
+      || target.squareConsentVersion !== SQUARE_CUSTOMER_PROFILE_CONSENT_VERSION
+      || target.squareConsentLanguage !== SQUARE_CUSTOMER_PROFILE_CONSENT_LANGUAGE
+      || !target.squareConsentTimestamp
+    ) {
+      throw new Error('Square profile consent evidence is missing.');
+    }
+
+    const runtime = getJourneyLedgerRuntime_();
+    const identity = appendSquareIdentityLinkIfAbsent_(runtime, {
+      websiteSubmissionId,
+      squareCustomerId,
+      matchMethod,
+      matchConfidence,
+      effectiveAt,
+      groupId: squareGroupId,
+      groupMembershipStatus
+    });
+    const identityEvent = appendJourneyEventIfAbsent_(runtime.journeyEvents, {
+      event_id: Utilities.getUuid(),
+      schema_version: JOURNEY_LEDGER_VERSION,
+      event_type: 'identity_linked',
+      event_status: 'confirmed',
+      occurred_at_utc: effectiveAt,
+      received_at_utc: new Date(),
+      source_system: 'square',
+      source_event_id: squareCustomerId,
+      import_batch_id: '',
+      idempotency_key: `square:${squareCustomerId}:identity_linked`,
+      contact_id: identity.contactId,
+      identity_link_id: identity.identityLinkId,
+      website_submission_id: websiteSubmissionId,
+      coupon_code: couponCode,
+      square_customer_id: squareCustomerId,
+      square_payment_id: '',
+      square_order_id: '',
+      square_location_id: config.locationId,
+      discount_catalog_object_id: '',
+      discount_name: '',
+      discount_amount_minor: '',
+      net_amount_minor: '',
+      currency: '',
+      match_method: matchMethod,
+      match_confidence: matchConfidence,
+      recorded_by: 'square_connector',
+      reversal_of_event_id: '',
+      notes: `eligible_group=${squareGroupId};membership=${groupMembershipStatus}`
+    });
+    SpreadsheetApp.flush();
+    return {
+      created: identity.created,
+      websiteSubmissionId,
+      couponCode,
+      squareCustomerId,
+      identityLinkId: identity.identityLinkId,
+      contactId: identity.contactId,
+      identityEventId: identityEvent.eventId
+    };
+  } finally {
+    if (lockAcquired) lock.releaseLock();
+  }
+}
+
+function appendSquareIdentityLinkIfAbsent_(runtime, data) {
+  const entry = runtime.identityLinks;
+  const byCustomer = findVerifiedSquareIdentityLink_(entry.sheet, entry.headers, {
+    squareCustomerId: data.squareCustomerId
+  });
+  const byWebsite = findVerifiedSquareIdentityLink_(entry.sheet, entry.headers, {
+    websiteSubmissionId: data.websiteSubmissionId
+  });
+  if (byCustomer && byWebsite && byCustomer.identityLinkId !== byWebsite.identityLinkId) {
+    throw new Error('Conflicting Square identity links.');
+  }
+  const existing = byCustomer || byWebsite;
+  if (existing) {
+    if (
+      existing.squareCustomerId !== data.squareCustomerId
+      || existing.websiteSubmissionId !== data.websiteSubmissionId
+    ) {
+      throw new Error('Square identity link does not match the verified claim.');
+    }
+    return { ...existing, created: false };
+  }
+
+  const identityLinkId = Utilities.getUuid();
+  const contactId = Utilities.getUuid();
+  appendRecord_(entry.sheet, entry.headers, {
+    identity_link_id: identityLinkId,
+    link_key: `square:${data.squareCustomerId}`,
+    contact_id: contactId,
+    website_submission_id: data.websiteSubmissionId,
+    provider: 'square',
+    provider_customer_id: data.squareCustomerId,
+    link_status: 'verified',
+    match_method: data.matchMethod,
+    match_confidence: data.matchConfidence,
+    effective_at_utc: data.effectiveAt,
+    verified_at_utc: new Date(),
+    recorded_at_utc: new Date(),
+    recorded_by: 'square_connector',
+    reversal_of_link_id: '',
+    notes: `eligible_group=${data.groupId};membership=${data.groupMembershipStatus}`
+  });
+  return {
+    identityLinkId,
+    contactId,
+    websiteSubmissionId: data.websiteSubmissionId,
+    squareCustomerId: data.squareCustomerId,
+    matchMethod: data.matchMethod,
+    matchConfidence: data.matchConfidence,
+    created: true
+  };
+}
+
+function findVerifiedSquareIdentityLink_(sheet, headers, criteria) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return null;
+  const indexes = {
+    identityLinkId: headers.indexOf('identity_link_id'),
+    contactId: headers.indexOf('contact_id'),
+    websiteSubmissionId: headers.indexOf('website_submission_id'),
+    provider: headers.indexOf('provider'),
+    providerCustomerId: headers.indexOf('provider_customer_id'),
+    linkStatus: headers.indexOf('link_status'),
+    matchMethod: headers.indexOf('match_method'),
+    matchConfidence: headers.indexOf('match_confidence')
+  };
+  if (Object.values(indexes).some(index => index < 0)) {
+    throw new Error('Identity Links schema is incomplete.');
+  }
+  const rows = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+  const matches = [];
+  rows.forEach(row => {
+    if (String(row[indexes.provider] || '').trim().toLowerCase() !== 'square') return;
+    if (String(row[indexes.linkStatus] || '').trim().toLowerCase() !== 'verified') return;
+    const websiteSubmissionId = normalizeStoredSubmissionId_(row[indexes.websiteSubmissionId]);
+    const squareCustomerId = normalizeStoredIdentifier_(row[indexes.providerCustomerId], 192);
+    if (criteria.websiteSubmissionId && websiteSubmissionId !== criteria.websiteSubmissionId) return;
+    if (criteria.squareCustomerId && squareCustomerId !== criteria.squareCustomerId) return;
+    matches.push({
+      identityLinkId: normalizeStoredIdentifier_(row[indexes.identityLinkId], 192),
+      contactId: normalizeStoredIdentifier_(row[indexes.contactId], 192),
+      websiteSubmissionId,
+      squareCustomerId,
+      matchMethod: String(row[indexes.matchMethod] || '').trim().toLowerCase(),
+      matchConfidence: String(row[indexes.matchConfidence] || '').trim().toLowerCase()
+    });
+  });
+  if (matches.length > 1) throw new Error('Duplicate verified Square identity links.');
+  return matches[0] || null;
+}
+
+function appendJourneyEventIfAbsent_(entry, record) {
+  const existing = findJourneyEventByIdempotencyKey_(
+    entry.sheet,
+    entry.headers,
+    record.idempotency_key
+  );
+  if (existing) {
+    const comparableFields = [
+      'event_type',
+      'event_status',
+      'occurred_at_utc',
+      'source_system',
+      'source_event_id',
+      'contact_id',
+      'identity_link_id',
+      'website_submission_id',
+      'coupon_code',
+      'square_customer_id',
+      'square_payment_id',
+      'square_order_id',
+      'square_location_id',
+      'discount_catalog_object_id',
+      'discount_name',
+      'discount_amount_minor',
+      'net_amount_minor',
+      'currency',
+      'match_method',
+      'match_confidence',
+      'reversal_of_event_id'
+    ];
+    if (comparableFields.some(field => String(existing[field] || '') !== String(record[field] || ''))) {
+      throw new Error('Journey event idempotency conflict.');
+    }
+    return { eventId: existing.event_id, created: false, record: existing };
+  }
+  appendRecord_(entry.sheet, entry.headers, record);
+  return { eventId: record.event_id, created: true, record };
+}
+
+function findJourneyEventByIdempotencyKey_(sheet, headers, idempotencyKey) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return null;
+  const keyIndex = headers.indexOf('idempotency_key');
+  if (keyIndex < 0) throw new Error('Journey Events idempotency column is missing.');
+  const rows = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+  const matches = rows.filter(
+    row => normalizeStoredIdentifier_(row[keyIndex], 300) === idempotencyKey
+  );
+  if (matches.length > 1) throw new Error('Duplicate journey event idempotency key.');
+  if (!matches.length) return null;
+  const row = matches[0];
+  return Object.fromEntries(headers.map((header, index) => [
+    header,
+    typeof row[index] === 'string' ? row[index].replace(/^'/, '') : row[index]
+  ]));
+}
+
+function processSquareEventCommit_(params, config) {
+  const squareEventId = requireExternalId_(params.square_event_id, 192);
+  const squareEventType = cleanText_(params.square_event_type, 40).toLowerCase();
+  const occurredAt = requireUtcTimestamp_(params.occurred_at_utc);
+  const squareCustomerId = requireExternalId_(params.square_customer_id, 192);
+  const squarePaymentId = requireExternalId_(params.square_payment_id, 192);
+  const squareOrderId = requireExternalId_(params.square_order_id, 192);
+  const squareLocationId = requireExternalId_(params.square_location_id, 100);
+  const currency = cleanText_(params.currency, 3).toUpperCase();
+  if (!['payment_completed', 'refund_completed'].includes(squareEventType)) {
+    throw new Error('Unsupported Square event type.');
+  }
+  if (squareLocationId !== config.locationId) throw new Error('Unexpected Square location.');
+  if (currency !== 'USD') throw new Error('Unexpected Square currency.');
+
+  const lock = LockService.getScriptLock();
+  let lockAcquired = false;
+  try {
+    lock.waitLock(LOCK_TIMEOUT_MS);
+    lockAcquired = true;
+    const runtime = getJourneyLedgerRuntime_();
+    const identity = findVerifiedSquareIdentityLink_(
+      runtime.identityLinks.sheet,
+      runtime.identityLinks.headers,
+      { squareCustomerId }
+    );
+    if (squareEventType === 'payment_completed') {
+      return commitSquarePaymentEvent_(params, config, runtime, identity, {
+        squareEventId,
+        squareEventType,
+        occurredAt,
+        squareCustomerId,
+        squarePaymentId,
+        squareOrderId,
+        squareLocationId,
+        currency
+      });
+    }
+    return commitSquareRefundEvent_(params, config, runtime, identity, {
+      squareEventId,
+      squareEventType,
+      occurredAt,
+      squareCustomerId,
+      squarePaymentId,
+      squareOrderId,
+      squareLocationId,
+      currency
+    });
+  } finally {
+    if (lockAcquired) lock.releaseLock();
+  }
+}
+
+function commitSquarePaymentEvent_(params, config, runtime, identity, common) {
+  const discountQualification = cleanText_(params.discount_qualification, 30).toLowerCase();
+  const discountCatalogObjectId = cleanText_(params.discount_catalog_object_id, 192);
+  const discountName = cleanText_(params.discount_name, 255);
+  const discountAmountMinor = requireNonnegativeInteger_(params.discount_amount_minor);
+  const netAmountMinor = requirePositiveInteger_(params.net_amount_minor);
+  if (!['qualified', 'not_qualified'].includes(discountQualification)) {
+    throw new Error('Invalid discount qualification.');
+  }
+  if (discountQualification === 'qualified') {
+    if (discountCatalogObjectId !== config.discountCatalogObjectId || discountAmountMinor <= 0) {
+      throw new Error('Qualifying discount evidence does not match configuration.');
+    }
+  }
+
+  const orderEvent = appendJourneyEventIfAbsent_(runtime.journeyEvents, {
+    event_id: Utilities.getUuid(),
+    schema_version: JOURNEY_LEDGER_VERSION,
+    event_type: 'order_completed',
+    event_status: identity ? 'completed' : 'unmatched',
+    occurred_at_utc: common.occurredAt,
+    received_at_utc: new Date(),
+    source_system: 'square',
+    source_event_id: common.squarePaymentId,
+    import_batch_id: common.squareEventId,
+    idempotency_key: `square:${common.squarePaymentId}:order_completed`,
+    contact_id: identity ? identity.contactId : '',
+    identity_link_id: identity ? identity.identityLinkId : '',
+    website_submission_id: identity ? identity.websiteSubmissionId : '',
+    coupon_code: '',
+    square_customer_id: common.squareCustomerId,
+    square_payment_id: common.squarePaymentId,
+    square_order_id: common.squareOrderId,
+    square_location_id: common.squareLocationId,
+    discount_catalog_object_id: discountCatalogObjectId,
+    discount_name: discountName,
+    discount_amount_minor: String(discountAmountMinor),
+    net_amount_minor: String(netAmountMinor),
+    currency: common.currency,
+    match_method: identity ? identity.matchMethod : 'unmatched_square_customer',
+    match_confidence: identity ? identity.matchConfidence : 'none',
+    recorded_by: 'square_connector',
+    reversal_of_event_id: '',
+    notes: `webhook_event=${common.squareEventId};discount=${discountQualification}`
+  });
+  let rowsAppended = orderEvent.created ? 1 : 0;
+  if (!identity) {
+    SpreadsheetApp.flush();
+    return {
+      eventCommitResult: orderEvent.created ? 'unmatched_recorded' : 'duplicate',
+      squareEventType: common.squareEventType,
+      orderEventId: orderEvent.eventId,
+      redemptionEventId: '',
+      reversalEventId: '',
+      redemptionResult: 'identity_not_found',
+      rowsAppended
+    };
+  }
+
+  let redemptionEventId = '';
+  let redemptionResult = 'not_qualified';
+  if (discountQualification === 'qualified') {
+    const leadSheet = getLeadSheet_();
+    const leadHeaders = ensureSquareCustomerProfileConsentHeaders_(leadSheet);
+    const target = findOriginalWebsiteCouponClaim_(leadSheet, leadHeaders, {
+      websiteSubmissionId: identity.websiteSubmissionId
+    });
+    if (!target) throw new Error('Linked website coupon claim is missing.');
+    if (target.redemptionStatus === 'not_recorded') {
+      const redemptionEvent = appendJourneyEventIfAbsent_(runtime.journeyEvents, {
+        event_id: Utilities.getUuid(),
+        schema_version: JOURNEY_LEDGER_VERSION,
+        event_type: 'coupon_redeemed',
+        event_status: 'confirmed',
+        occurred_at_utc: common.occurredAt,
+        received_at_utc: new Date(),
+        source_system: 'square',
+        source_event_id: common.squarePaymentId,
+        import_batch_id: common.squareEventId,
+        idempotency_key: `square:${common.squarePaymentId}:coupon_redeemed`,
+        contact_id: identity.contactId,
+        identity_link_id: identity.identityLinkId,
+        website_submission_id: identity.websiteSubmissionId,
+        coupon_code: target.couponCode,
+        square_customer_id: common.squareCustomerId,
+        square_payment_id: common.squarePaymentId,
+        square_order_id: common.squareOrderId,
+        square_location_id: common.squareLocationId,
+        discount_catalog_object_id: discountCatalogObjectId,
+        discount_name: discountName,
+        discount_amount_minor: String(discountAmountMinor),
+        net_amount_minor: String(netAmountMinor),
+        currency: common.currency,
+        match_method: identity.matchMethod,
+        match_confidence: identity.matchConfidence,
+        recorded_by: 'square_connector',
+        reversal_of_event_id: '',
+        notes: `webhook_event=${common.squareEventId}`
+      });
+      redemptionEventId = redemptionEvent.eventId;
+      if (redemptionEvent.created) rowsAppended += 1;
+      updateCouponRedemptionSnapshot_(leadSheet, leadHeaders, target, {
+        status: 'redeemed',
+        redeemedAt: common.occurredAt,
+        squarePaymentId: common.squarePaymentId
+      });
+      redemptionResult = redemptionEvent.created ? 'redeemed' : 'already_recorded';
+    } else if (
+      target.redemptionStatus === 'redeemed'
+      || target.redemptionStatus === 'reversed_no_reissue'
+    ) {
+      const existingRedemption = findJourneyEventByIdempotencyKey_(
+        runtime.journeyEvents.sheet,
+        runtime.journeyEvents.headers,
+        `square:${common.squarePaymentId}:coupon_redeemed`
+      );
+      redemptionEventId = existingRedemption ? existingRedemption.event_id : '';
+      redemptionResult = target.redemptionStatus === 'reversed_no_reissue'
+        ? 'reversed_no_reissue'
+        : (existingRedemption ? 'already_recorded' : 'already_redeemed_other_payment');
+    } else {
+      redemptionResult = 'not_eligible';
+    }
+  }
+  SpreadsheetApp.flush();
+  return {
+    eventCommitResult: rowsAppended ? 'committed' : 'duplicate',
+    squareEventType: common.squareEventType,
+    orderEventId: orderEvent.eventId,
+    redemptionEventId,
+    reversalEventId: '',
+    redemptionResult,
+    rowsAppended
+  };
+}
+
+function commitSquareRefundEvent_(params, config, runtime, identity, common) {
+  const squareRefundId = requireExternalId_(params.square_refund_id, 192);
+  const refundAmountMinor = requirePositiveInteger_(params.refund_amount_minor);
+  const refundScope = cleanText_(params.refund_scope, 20).toLowerCase();
+  if (!['partial', 'full'].includes(refundScope)) throw new Error('Invalid refund scope.');
+  const originalRedemption = findJourneyEventByIdempotencyKey_(
+    runtime.journeyEvents.sheet,
+    runtime.journeyEvents.headers,
+    `square:${common.squarePaymentId}:coupon_redeemed`
+  );
+  if (originalRedemption && (
+    normalizeStoredIdentifier_(originalRedemption.square_customer_id, 192) !== common.squareCustomerId
+    || normalizeStoredIdentifier_(originalRedemption.square_order_id, 192) !== common.squareOrderId
+    || normalizeStoredIdentifier_(originalRedemption.square_location_id, 100) !== common.squareLocationId
+    || normalizeStoredIdentifier_(originalRedemption.discount_catalog_object_id, 192)
+      !== config.discountCatalogObjectId
+  )) {
+    throw new Error('Refund does not match the recorded redemption.');
+  }
+  const refundEvent = appendJourneyEventIfAbsent_(runtime.journeyEvents, {
+    event_id: Utilities.getUuid(),
+    schema_version: JOURNEY_LEDGER_VERSION,
+    event_type: 'order_refunded',
+    event_status: refundScope,
+    occurred_at_utc: common.occurredAt,
+    received_at_utc: new Date(),
+    source_system: 'square',
+    source_event_id: squareRefundId,
+    import_batch_id: common.squareEventId,
+    idempotency_key: `square:${squareRefundId}:order_refunded`,
+    contact_id: identity ? identity.contactId : '',
+    identity_link_id: identity ? identity.identityLinkId : '',
+    website_submission_id: identity ? identity.websiteSubmissionId : '',
+    coupon_code: originalRedemption ? originalRedemption.coupon_code : '',
+    square_customer_id: common.squareCustomerId,
+    square_payment_id: common.squarePaymentId,
+    square_order_id: common.squareOrderId,
+    square_location_id: common.squareLocationId,
+    discount_catalog_object_id: originalRedemption
+      ? originalRedemption.discount_catalog_object_id
+      : '',
+    discount_name: originalRedemption ? originalRedemption.discount_name : '',
+    discount_amount_minor: originalRedemption
+      ? originalRedemption.discount_amount_minor
+      : '',
+    net_amount_minor: String(-refundAmountMinor),
+    currency: common.currency,
+    match_method: identity ? identity.matchMethod : 'unmatched_square_customer',
+    match_confidence: identity ? identity.matchConfidence : 'none',
+    recorded_by: 'square_connector',
+    reversal_of_event_id: '',
+    notes: `webhook_event=${common.squareEventId};refund_scope=${refundScope}`
+  });
+  let rowsAppended = refundEvent.created ? 1 : 0;
+  const reversalEventId = '';
+  const redemptionResult = originalRedemption ? 'refund_recorded' : 'no_redemption_found';
+  SpreadsheetApp.flush();
+  return {
+    eventCommitResult: rowsAppended ? (identity ? 'committed' : 'unmatched_recorded') : 'duplicate',
+    squareEventType: common.squareEventType,
+    orderEventId: refundEvent.eventId,
+    redemptionEventId: originalRedemption ? originalRedemption.event_id : '',
+    reversalEventId,
+    redemptionResult,
+    rowsAppended
+  };
+}
+
+function findJourneyReversalForEvent_(sheet, headers, originalEventId) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return null;
+  const typeIndex = headers.indexOf('event_type');
+  const reversalIndex = headers.indexOf('reversal_of_event_id');
+  if (typeIndex < 0 || reversalIndex < 0) throw new Error('Journey reversal columns are missing.');
+  const rows = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+  const matches = rows.filter(row => (
+    String(row[typeIndex] || '').trim().toLowerCase() === 'redemption_reversed'
+    && normalizeStoredIdentifier_(row[reversalIndex], 192) === originalEventId
+  ));
+  if (matches.length > 1) throw new Error('Duplicate redemption reversal.');
+  if (!matches.length) return null;
+  return Object.fromEntries(headers.map((header, index) => [
+    header,
+    typeof matches[0][index] === 'string'
+      ? matches[0][index].replace(/^'/, '')
+      : matches[0][index]
+  ]));
+}
+
+function updateCouponRedemptionSnapshot_(sheet, headers, target, update) {
+  const statusIndex = headers.indexOf('coupon_redemption_status');
+  const redeemedAtIndex = headers.indexOf('coupon_redeemed_at');
+  const paymentIdIndex = headers.indexOf('square_transaction_id');
+  if (statusIndex < 0 || redeemedAtIndex < 0 || paymentIdIndex < 0) {
+    throw new Error('Coupon redemption snapshot columns are missing.');
+  }
+  const current = sheet.getRange(target.rowNumber, 1, 1, headers.length).getValues()[0];
+  const currentStatus = String(current[statusIndex] || '').trim().toLowerCase();
+  const currentPaymentId = normalizeStoredIdentifier_(current[paymentIdIndex], 192);
+
+  if (update.status === 'redeemed') {
+    if (currentStatus === 'redeemed' && currentPaymentId === update.squarePaymentId) return false;
+    if (currentStatus !== 'not_recorded') return false;
+    updateRecordFields_(sheet, headers, target.rowNumber, {
+      coupon_redeemed_at: update.redeemedAt,
+      square_transaction_id: update.squarePaymentId,
+      coupon_redemption_status: 'redeemed'
+    });
+    return true;
+  }
+  if (update.status === 'reversed_no_reissue') {
+    if (currentStatus === 'reversed_no_reissue') return false;
+    if (currentStatus !== 'redeemed' || currentPaymentId !== update.expectedSquarePaymentId) {
+      return false;
+    }
+    // Keep the original redemption timestamp and payment ID. The append-only
+    // reversal event is the detailed audit record; the snapshot only prevents
+    // automatic reissue.
+    updateRecordFields_(sheet, headers, target.rowNumber, {
+      coupon_redemption_status: 'reversed_no_reissue'
+    });
+    return true;
+  }
+  throw new Error('Unsupported redemption snapshot update.');
+}
+
+function requireExternalId_(value, maxLength) {
+  const raw = String(value || '');
+  const normalized = raw.trim();
+  if (raw !== normalized || !normalized || normalized.length > maxLength) {
+    throw new Error('Invalid external identifier.');
+  }
+  if (!/^[A-Za-z0-9_-]+$/.test(normalized)) throw new Error('Invalid external identifier.');
+  return normalized;
+}
+
+function normalizeStoredIdentifier_(value, maxLength) {
+  return String(value || '').trim().replace(/^'/, '').slice(0, maxLength);
+}
+
+function requireCouponCode_(value) {
+  const couponCode = cleanText_(value, 40).toUpperCase();
+  if (!/^[A-Z0-9-]{2,40}$/.test(couponCode)) throw new Error('Invalid coupon code.');
+  return couponCode;
+}
+
+function requireUtcTimestamp_(value) {
+  const timestamp = String(value || '').trim();
+  const pattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
+  if (!pattern.test(timestamp)) throw new Error('Invalid UTC timestamp.');
+  const parsed = Date.parse(timestamp);
+  const canonical = timestamp.includes('.') ? timestamp : timestamp.replace(/Z$/, '.000Z');
+  if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== canonical) {
+    throw new Error('Invalid UTC timestamp.');
+  }
+  return new Date(parsed);
+}
+
+function requireNonnegativeInteger_(value) {
+  const text = String(value || '').trim();
+  if (!/^(0|[1-9]\d{0,12})$/.test(text)) throw new Error('Invalid minor-unit amount.');
+  return Number(text);
+}
+
+function requirePositiveInteger_(value) {
+  const amount = requireNonnegativeInteger_(value);
+  if (amount <= 0) throw new Error('Minor-unit amount must be positive.');
+  return amount;
 }
 
 function getOwnerNotificationConfig_() {

@@ -1,0 +1,54 @@
+name = "spartan-square-connector"
+main = "src/index.mjs"
+compatibility_date = "2026-08-17"
+workers_dev = false
+
+routes = [
+  { pattern = "spartandrink.com/api/square*", zone_name = "spartandrink.com" },
+  { pattern = "www.spartandrink.com/api/square*", zone_name = "spartandrink.com" }
+]
+
+[vars]
+ALLOWED_ORIGINS = "https://spartandrink.com,https://www.spartandrink.com"
+SQUARE_API_BASE_URL = "https://connect.squareup.com"
+SQUARE_API_VERSION = "2026-07-15"
+SQUARE_LOCATION_ID = "3MDGSXS33HERT"
+SQUARE_DISCOUNT_CATALOG_ID = ""
+SQUARE_ELIGIBLE_GROUP_ID = ""
+SQUARE_REDEEMED_GROUP_ID = ""
+SQUARE_QUALIFYING_VARIATION_IDS = ""
+SQUARE_MERCHANT_ID = ""
+SQUARE_WEBHOOK_NOTIFICATION_URL = "https://spartandrink.com/api/square/webhook"
+TURNSTILE_SITE_KEY = ""
+TURNSTILE_EXPECTED_ACTION = "square_offer"
+SQUARE_OFFER_ENABLED = "false"
+SQUARE_WEBHOOK_ENABLED = "false"
+SQUARE_PASS_ENABLED = "false"
+SQUARE_CONSUMER_ENABLED = "false"
+SQUARE_RECONCILIATION_ENABLED = "false"
+SQUARE_CANARY_ONLY = "true"
+SQUARE_CANARY_SUBMISSION_IDS = ""
+PASS_SESSION_TTL_SECONDS = "2592000"
+PROCESSING_LEASE_SECONDS = "900"
+PROCESSING_RECOVERY_LIMIT = "25"
+RECONCILIATION_LOOKBACK_HOURS = "96"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "spartan-square-connector"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[[queues.producers]]
+binding = "SQUARE_QUEUE"
+queue = "spartan-square-connector"
+
+[[queues.consumers]]
+queue = "spartan-square-connector"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 5
+dead_letter_queue = "spartan-square-connector-dlq"
+
+[triggers]
+crons = ["*/5 * * * *"]

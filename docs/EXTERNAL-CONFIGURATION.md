@@ -110,6 +110,13 @@ This file records external configuration that cannot be inferred from GitHub alo
 - One recent paid transaction exposed stable transaction/order/receipt references but no visible customer-profile link. This sample is not a coverage estimate.
 - No customer, plan, discount, transaction or account setting was changed. Physical POS customer attachment, fixed-discount behavior, export fields and a controlled redemption/return/reversal path remain to test.
 
+#### August 17 controlled Square update
+
+- The owner changed `50% Off First Drink — Enter 50%` in place from variable percentage to fixed 50%. Its verified catalog object ID is `5ZXWVO3YGDYFHPZBD5KX6JXI`. Applying it from one selected quantity-one Kids Shake line left BCAAs and Protein Coffee full price; applying it to an identical quantity-two line discounted both units, so staff must split the eligible drink first.
+- A labeled synthetic test customer's reference code was scanned at the POS and the customer was attached before a paid $3.58 Best Defense transaction. Square retained stable customer, payment, order and location references. The test did not use the website coupon or target discount and must not be backfilled as a redemption.
+- The separate local Square connector candidate is default-off and not deployed. Production still has no automatic website-to-Square customer, group, scan-pass, redemption or later-purchase synchronization.
+- Square's separate checkout/text-signup screen advertising 50% remains an unresolved competing-offer gate. It must be disabled or proven not to create a second first-visit path before the connector canary.
+
 ### Customer-journey ledger foundation
 
 - A private recovery copy named `Spartan Leads — pre-journey-ledger backup 2026-08-16` was created before the workbook change. Its private file ID is intentionally not stored in the repository.

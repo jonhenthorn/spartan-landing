@@ -62,6 +62,11 @@ Open **Apps Script -> Project settings -> Script properties** and set:
 - `BREVO_DOI_TEMPLATE_ID`: the positive numeric ID of the active Brevo double-opt-in confirmation template.
 - `OWNER_NOTIFICATION_ENABLED`: leave `false` through code paste, mail authorization, deployment, and the no-send configuration diagnostic. Enable it only for the controlled labeled delivery test and later operation. Only exact `true` enables delivery.
 - `OWNER_NOTIFICATION_EMAIL`: the single owner-controlled mailbox that should receive counts-only submission alerts. Use `bixbynutrition@gmail.com` for the current Spartan business inbox unless ownership changes.
+- `SQUARE_JOURNEY_ENABLED`: leave exact `false` through code deployment, connector infrastructure setup, sandbox testing and the owner-canary preflight. Only exact `true` enables the private signed Square prepare/finalize/event handlers.
+- `SQUARE_CONNECTOR_SHARED_SECRET`: a separate random secret of at least 32 bytes matching the isolated Square Worker. Never reuse `WORKER_SHARED_SECRET`, an API token or the pass/hash key.
+- `SQUARE_LOCATION_ID`: the verified Spartan location ID. The current reviewed value is `3MDGSXS33HERT`.
+- `SQUARE_FIRST_DRINK_DISCOUNT_ID`: the verified fixed-50% discount catalog object ID. The current reviewed value is `5ZXWVO3YGDYFHPZBD5KX6JXI`.
+- `SQUARE_FIRST_VISIT_GROUP_ID`: the exact manually created eligibility group ID, verified in the intended Square environment before any write. Do not use a group name as an identifier.
 
 Both Sheet properties are mandatory. There is no active-spreadsheet or first-tab fallback. The handler also refuses to write unless the configured tab's first five header cells exactly match the historical schema. Public visitors receive only a generic error when either safety check fails.
 
@@ -80,6 +85,20 @@ Safety behavior:
 - A second successful setup performs zero header or formatting writes.
 
 The current workbook is private and owner-only. This initializer does not attempt to remove editors or alter recovery access. Explicit per-tab protection is deferred until its access effect can be verified safely. Follow the controlled-proof and activation gates in `../docs/SQUARE-JOURNEY-PILOT.md`; merely creating these empty tabs does not authorize journey imports.
+
+## Default-off Square connector candidate
+
+The local code includes private, signed Square connector operations for one optional post-coupon profile connection. They are not used by the existing form Worker and are disabled unless `SQUARE_JOURNEY_ENABLED=true` with every matching property complete. Deploying the code with that flag false does not create a Square customer, add a group, append a journey event or expose the website option.
+
+`diagnoseSquareJourneyConfiguration()` sends no provider request and performs no write. It reports only contract/version readiness, boolean property checks and the current ledger diagnosis. Require `enabled=false`, `configured=false` and `writes_performed=0` for an inert deployment. Before a sandbox or canary write, configure the exact isolated environment, enable the flag only for the test window, and require `configured=true`, `ledger_ready=true` and the reviewed IDs.
+
+When enabled, the private operations behave as follows:
+
+- `offer_prepare` verifies an original new website claim plus the exact coupon code and records the separate Square-profile choice/version/time on that same lead row. It returns name and phone only to the signed connector; it never returns or accepts email.
+- `offer_finalize` idempotently appends the Square identity link only after the connector verifies the intended profile and eligible-group state.
+- `event_commit` appends verified ordinary purchases, one qualifying redemption and refund-review evidence. Refunds never restore eligibility, reissue a coupon or reverse the redemption snapshot automatically.
+
+The first successful prepare may append the four reviewed Square-profile-consent headers to the lead tab; it never shifts, deletes or rewrites existing columns. Finalize and event operations require the exact active `Identity Links` and `Journey Events` schemas. Keep the connector Worker and all customer-facing flags off until the separate sandbox, canary, monitoring, retention and rollback gates in `../docs/SQUARE-CONNECTOR-ROLLOUT.md` are complete. The production `/exec` URL, existing form contracts, Brevo behavior and owner-alert trigger must remain unchanged.
 
 ## Owner submission notifications
 
