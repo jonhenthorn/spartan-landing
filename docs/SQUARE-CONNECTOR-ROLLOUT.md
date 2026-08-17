@@ -74,16 +74,20 @@ Send Square only the consented customer name, canonical mobile number and opaque
 
 D1 stores only internal/provider IDs, status, timestamps, amount/currency and audit references needed for the journey. It does not duplicate names, phones or emails and never stores card data, tender details or receipt URLs. Logs contain counts, bounded error codes and trace IDs—not bodies, authorization headers, QR values or customer/provider IDs.
 
-These owner decisions block production persistence:
+Phase 1 uses these operating defaults. Changing them requires a dated decision before production activation:
 
-| Data class | Required decision before launch |
+| Data class | Phase 1 default |
 | --- | --- |
-| Square access credential | Credential model, encryption owner, rotation/revocation runbook and recovery access `[REVIEW/FILL]` |
-| Coupon/order identity links | Retention period and verified unlink/deletion process `[REVIEW/FILL]` |
-| Normalized journey events | Retention period, backup frequency and successful restore-test date `[REVIEW/FILL]` |
-| Raw webhook inputs | Delete after normalization; maximum seven days only for a documented incident |
-| Test/staging records | Delete within 30 days; keep test evidence without customer PII |
-| Suppression/audit minimum | Define the limited record retained to prevent unauthorized resending `[REVIEW/FILL]` |
+| Square access credential | Use a dedicated `Spartan Square Connector` application and its single-business personal access token. Store the runtime copy only as a Cloudflare encrypted secret; keep one sealed recovery copy in a business-owned password-manager vault available to two separately MFA-protected owners. Review access every 180 days, replace the token annually as a recovery drill, and replace it immediately after suspected disclosure, owner/admin departure or unexplained authentication failures. OAuth becomes mandatory before serving another seller/account or outside operator. |
+| Coupon/order identity links | Retain for 25 months after the latest linked purchase/refund, or 25 months after link creation if no purchase occurs. A verified unlink request revokes pass access and marks the link inactive within two business days; removes the connector-owned customer join within 30 days; and removes connector-owned group/reference state only after confirming it is not shared. Do not delete Square payment, order, receipt or customer records automatically. |
+| Normalized journey events | Retain detailed events for 25 months. Retain an unresolved refund, dispute or reconciliation exception until resolved and then 12 additional months. Non-identifying monthly aggregates may be retained indefinitely. |
+| Raw webhook inputs | Keep recoverable normalized metadata only while processing. Scrub terminal payload storage immediately; permit a maximum seven-day incident copy only through a documented security exception. |
+| Test/staging records | Delete within 30 days; retain test evidence without customer PII. |
+| Suppression/audit minimum | Retain one keyed HMAC of normalized phone, purpose `first_drink_offer`, final state, effective date, offer/policy version and any unlink date/bounded reason for the life of the program plus 24 months. Do not retain name, raw contact data, Square IDs, coupon/reference code, amount or marketing attributes in this minimum record. Use it only to prevent duplicate issuance or unauthorized resending. |
+
+Use Workers Paid for the production connector so D1 Time Travel supplies a 30-day recovery window and Queue/DLQ retention can be set to 14 days. Export D1 privately to R2 nightly and retain exports for 90 days. Export the restricted `Identity Links` and `Journey Events` Sheet tabs monthly and retain those exports for 90 days. Before every migration, record a Time Travel bookmark and create an explicit SQL export. Each quarter, restore D1 and the Sheet exports into isolated nonproduction copies, reconcile row counts and unique keys, record the result and remove the restore-test copies within seven days.
+
+Keep the deletion manifest outside D1 and outside the R2/Sheet backup sets in a restricted, business-owned record accessible only to the two MFA-protected owners. Store only internal `claim_id`, deletion effective date, affected record class, policy version and a bounded reason code—no name, raw contact data or Square ID. Retain each manifest entry for 120 days, covering the 90-day backup lifecycle plus a 30-day safety margin. Deleted customer-linked data may remain only in encrypted backups until their normal 90-day expiry. Any restore must apply all still-retained manifest entries before the connector is re-enabled so an old backup cannot silently resurrect an unlinked record.
 
 ## Default-off production controls
 
@@ -114,16 +118,17 @@ An empty canary allowlist exposes the option to nobody. Reward automation is not
 - Reviewed request/response schemas, threat cases, feature flags, alert thresholds and rollback steps exist.
 - Separate Square choice and updated privacy disclosure are approved; the manual coupon path remains unchanged.
 - The current form/Apps Script/Brevo contracts still pass and no Square choice can create marketing permission.
-- Every `[REVIEW/FILL]` retention/access item above is closed.
+- The Phase 1 credential, retention, backup, deletion and suppression defaults above are implemented and recorded in the activation decision.
 
 ### 2. Sandbox gate
 
 - Separate sandbox credentials, IDs, database and queues are proven incapable of reaching production.
+- The checked-in workers.dev sandbox is intentionally an API, Queue, webhook and recovery harness. It does not serve the public website frontend, and same-origin controls correctly prevent the production page from calling it. Full real-browser signup/pass proof therefore occurs only in the one-owner production canary unless a separate same-origin sandbox site and test Apps ledger are built first; do not weaken origin or cookie controls to bridge the two.
 - New, duplicate, filtered, declined-consent, ambiguous-match and provider-outage cases return the correct bounded state.
 - Exact claim and webhook retries create one customer/link/event; forged signature, altered body/URL and unrecognized merchant/location create none.
 - Out-of-order payment/refund events, customer-created/group-failed and ledger-committed/group-removal-failed cases recover through idempotent retry or the exception queue.
 - Logs, analytics and browser responses contain no PII, QR value, provider ID or secret.
-- OAuth refresh, revoke, backup/restore, queue retry and dead-letter recovery are demonstrated.
+- Credential replacement/revocation, backup/restore, queue retry and dead-letter recovery are demonstrated. If the connector later migrates to OAuth, refresh and revoke behavior must also be demonstrated.
 - A deliberately interrupted Queue job recovers from `PROCESSING`; a dead-letter item can be inspected and replayed without duplicating an event.
 
 ### 3. Production owner canary
@@ -156,7 +161,13 @@ Before broader customer use, every checkout device must pass the staff SOP. Cont
 
 ## Monitoring and alerts
 
-Before activation, configure owner-visible monitoring for invalid-signature or request-freshness failures, credential age/failure, Queue or dead-letter backlog, stale/retrying records, provider error-rate spikes, rejected discount/customer combinations, duplicate/ambiguous profiles and ledger/group drift. The local candidate records bounded states/error codes but does not itself send these alerts. Ordinary customer inactivity is not a technical alert. Never include customer details in an alert email.
+Before activation, configure owner-visible monitoring for invalid-signature or request-freshness failures, credential age/failure, Queue or dead-letter backlog, stale/retrying records, provider error-rate spikes, rejected discount/customer combinations, duplicate/ambiguous profiles and ledger/group drift. The local candidate records bounded states/error codes but does not itself send these alerts. Ordinary customer inactivity is not a technical alert.
+
+Send an immediate owner and backup-owner alert for any `DEAD` row or DLQ message; Square `401/403`; Apps authentication/contract failure; environment mismatch or unexpected flag/canary change; distinct-order duplicate-redemption race; target discount without the intended linked customer; ledger/group drift; oldest main-queue message over 30 minutes; reconciliation heartbeat older than 30 minutes; or nightly backup older than 48 hours.
+
+Send a same-day warning when Queue age exceeds 10 minutes for two consecutive checks, retry attempt reaches 3, a stale lease survives its next five-minute recovery cycle, three invalid signatures occur in 10 minutes, three Square/Apps `429/5xx` responses occur in 15 minutes, any quantity/stacking/discount configuration is rejected, or backup age exceeds 26 hours. Escalate staff lookup at 3 in one day or above 10% after at least 10 offers. Escalate discount-policy rejection at 2 in 24 hours and disable offer/pass while preserving the manual coupon.
+
+Send one daily digest with aggregate claims, passes, redemptions, ordinary purchases, refund reviews, staff-lookup cases, recovered retries, stale leases, backup/restore age and credential-rotation due date. Alerts contain only error code, count, environment and time—never customer/provider IDs or contact data. Deduplicate the same alert for 60 minutes, send a recovery notice and test the complete alert path monthly.
 
 ## Rollback
 

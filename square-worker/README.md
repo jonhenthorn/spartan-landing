@@ -14,9 +14,11 @@ Future sandbox setup, only after explicit authorization:
 2. Create dedicated Cloudflare D1, Queue, and DLQ resources whose names end in `-sandbox`; replace only the sandbox placeholders and apply both migrations to that sandbox D1.
 3. Reserve the sandbox Worker's distinct `workers.dev` hostname, then replace both the sandbox `ALLOWED_ORIGINS` and `SQUARE_WEBHOOK_NOTIFICATION_URL` with that same exact origin. Do not add a `spartandrink.com` route or zone.
 4. Configure sandbox-only Turnstile, Apps Script test ledger, and secrets through the sandbox config. Secrets are not inherited from `wrangler.toml` and must never be committed.
-5. Run `node scripts/validate-square-connector.mjs`, deploy the sandbox config with all flags still false, verify `enabled:false`, and then follow the same webhook-first, owner-canary sequence below using only sandbox data.
+5. Run `node scripts/validate-square-connector.mjs`, deploy the sandbox config with all flags still false, and verify `enabled:false`. Use it for synthetic API, Queue, webhook, recovery and failure-matrix tests only.
 
 Do not run a Wrangler deploy, resource-creation, migration, secret, or Square registration command for this configuration until those sandbox resources and approvals exist.
+
+This workers.dev harness intentionally does not host the Spartan website frontend. Its strict same-origin rules prevent the production page from calling sandbox APIs. The real signup/pass user interface is tested only during the single allowlisted production owner canary unless a separate same-origin sandbox site and test Apps ledger are built first. Do not loosen CORS, origin or cookie protections to connect production pages to the sandbox Worker.
 
 ## Fixed contracts
 
