@@ -2,7 +2,7 @@
 
 Last reviewed: August 17, 2026
 
-Status: **Built locally behind default-off controls; not deployed, connected to production credentials or live.** The implementation is a release candidate only. This document does not authorize a Square credential, endpoint, webhook, customer/group write, public scan-code display or live ledger event.
+Status: **Release candidate with an isolated, inert sandbox deployment; not deployed with production credentials or active for customers.** Every sandbox feature flag remains off, canary-only mode is on and the allowlist is empty. This document does not authorize production activation, a sandbox customer/group write, public scan-code display or live ledger event.
 
 ## Outcome and non-negotiable fallback
 
@@ -78,7 +78,7 @@ Phase 1 uses these operating defaults. Changing them requires a dated decision b
 
 | Data class | Phase 1 default |
 | --- | --- |
-| Square access credential | Use a dedicated `Spartan Square Connector` application and its single-business personal access token. Store the runtime copy only as a Cloudflare encrypted secret; keep one sealed recovery copy in a business-owned password-manager vault available to two separately MFA-protected owners. Review access every 180 days, replace the token annually as a recovery drill, and replace it immediately after suspected disclosure, owner/admin departure or unexplained authentication failures. OAuth becomes mandatory before serving another seller/account or outside operator. |
+| Square access credential | Use the dedicated `Spartan First Visit Connector` application. The isolated sandbox uses a scoped 30-day test authorization; renew it only after rechecking the same least-privilege permissions. The eventual single-business production runtime may use that application's personal access token only after the production gates pass. Store the runtime copy only as a Cloudflare encrypted secret; keep one sealed recovery copy in a business-owned password-manager vault available to two separately MFA-protected owners. Review access every 180 days, replace the token annually as a recovery drill, and replace it immediately after suspected disclosure, owner/admin departure or unexplained authentication failures. OAuth becomes mandatory before serving another seller/account or outside operator. |
 | Coupon/order identity links | Retain for 25 months after the latest linked purchase/refund, or 25 months after link creation if no purchase occurs. A verified unlink request revokes pass access and marks the link inactive within two business days; removes the connector-owned customer join within 30 days; and removes connector-owned group/reference state only after confirming it is not shared. Do not delete Square payment, order, receipt or customer records automatically. |
 | Normalized journey events | Retain detailed events for 25 months. Retain an unresolved refund, dispute or reconciliation exception until resolved and then 12 additional months. Non-identifying monthly aggregates may be retained indefinitely. |
 | Raw webhook inputs | Keep recoverable normalized metadata only while processing. Scrub terminal payload storage immediately; permit a maximum seven-day incident copy only through a documented security exception. |

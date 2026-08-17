@@ -4,19 +4,20 @@ This is an isolated Cloudflare Worker for the optional Spartan Nutrition first-d
 
 ## Isolated sandbox configuration
 
-`wrangler.sandbox.toml` is a separate, non-inheriting configuration. It uses the distinct Worker name `spartan-square-connector-sandbox`, Square's exact sandbox API base, sandbox-only D1/Queue/DLQ names, a `workers.dev` hostname placeholder, no custom route or production zone, all five feature flags `false`, and canary-only mode `true`. Its D1 IDs, Square location/catalog/group/merchant IDs, Turnstile site key, webhook hostname, allowlist, and all secrets are intentionally absent or placeholders. It cannot be deployed successfully as checked in, and no sandbox or production resource was created by adding it.
+`wrangler.sandbox.toml` is a separate, non-inheriting configuration. It uses the distinct Worker name `spartan-square-connector-sandbox`, Square's exact sandbox API base, sandbox-only D1/Queue/DLQ names and one dedicated `workers.dev` hostname, with no custom route or production zone. Its checked-in values include only non-secret sandbox resource, merchant/location, origin and public Turnstile identifiers. Discount, customer-group and qualifying-item identifiers remain empty. All five feature flags are `false`, canary-only mode is `true`, and the allowlist is empty.
+
+The isolated sandbox Worker and its runtime/preview D1 databases, main Queue, one-day-retention DLQ and managed Turnstile widget were provisioned on August 17, 2026. Both migrations are applied to both databases. The Square sandbox token, Turnstile secret and independently generated hash/session secrets exist only as encrypted Worker secrets; Apps Script and webhook-signature secrets are intentionally absent. Public config reports `enabled:false`, and no production connector route, credential or automation is active.
 
 The runtime requires `CONNECTOR_ENVIRONMENT` and `SQUARE_ENVIRONMENT` to match. Production accepts only `https://connect.squareup.com`, location `3MDGSXS33HERT`, and the production webhook/origin set. Sandbox accepts only `https://connect.squareupsandbox.com`, a non-placeholder location that is not the production location, and one matching non-placeholder `workers.dev` origin/webhook. A mixed environment remains disabled and Square calls fail closed with `SQUARE_ENVIRONMENT_MISMATCH`.
 
-Future sandbox setup, only after explicit authorization:
+Remaining sandbox setup, only under the rollout gates:
 
-1. Create a separate Square Sandbox application/location and sandbox catalog objects; never copy a production access token, location, discount, group, merchant, customer, payment, or order ID.
-2. Create dedicated Cloudflare D1, Queue, and DLQ resources whose names end in `-sandbox`; replace only the sandbox placeholders and apply both migrations to that sandbox D1.
-3. Reserve the sandbox Worker's distinct `workers.dev` hostname, then replace both the sandbox `ALLOWED_ORIGINS` and `SQUARE_WEBHOOK_NOTIFICATION_URL` with that same exact origin. Do not add a `spartandrink.com` route or zone.
-4. Configure sandbox-only Turnstile, Apps Script test ledger, and secrets through the sandbox config. Secrets are not inherited from `wrangler.toml` and must never be committed.
-5. Run `node scripts/validate-square-connector.mjs`, deploy the sandbox config with all flags still false, and verify `enabled:false`. Use it for synthetic API, Queue, webhook, recovery and failure-matrix tests only.
+1. Create sandbox-only copies of the fixed discount, eligible/redeemed groups and qualifying prepared-drink variations. Never copy a production access token, location, discount, group, merchant, customer, payment or order ID.
+2. Configure a separate Apps Script test ledger and sandbox webhook subscription/signature. Secrets are not inherited from `wrangler.toml` and must never be committed.
+3. Run the synthetic API, Queue, webhook, recovery and failure matrix with all public features still off. Record exact evidence before adding one pre-seeded owner canary.
+4. Re-run `node scripts/validate-square-connector.mjs` and the external acceptance checks after every configuration or deployment change. Do not add a `spartandrink.com` route or zone.
 
-Do not run a Wrangler deploy, resource-creation, migration, secret, or Square registration command for this configuration until those sandbox resources and approvals exist.
+Do not enable any feature flag, add a canary submission or create a customer/group write until the remaining sandbox gates pass.
 
 This workers.dev harness intentionally does not host the Spartan website frontend. Its strict same-origin rules prevent the production page from calling sandbox APIs. The real signup/pass user interface is tested only during the single allowlisted production owner canary unless a separate same-origin sandbox site and test Apps ledger are built first. Do not loosen CORS, origin or cookie protections to connect production pages to the sandbox Worker.
 
@@ -27,7 +28,7 @@ Public website contract: `spartan-square-offer-v1-2026-08-17`
 `GET /api/square/config` returns exactly the body below. During canary, the browser sends the confirmed in-memory submission ID in `X-Spartan-Submission-Id`; it is never placed in the URL, logs, or analytics. Config is enabled only for an exact server-side allowlist match, and the POST independently repeats that check.
 
 ```json
-{"ok":true,"enabled":false,"square_offer_contract_version":"spartan-square-offer-v1-2026-08-17","turnstile_site_key":""}
+{"ok":true,"enabled":false,"square_offer_contract_version":"spartan-square-offer-v1-2026-08-17","turnstile_site_key":"0x4AAAAAAETIBGUWCQZhgbGM"}
 ```
 
 `POST /api/square/offer` accepts exactly these browser fields:

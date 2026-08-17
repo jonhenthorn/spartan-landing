@@ -3,23 +3,23 @@ main = "src/index.mjs"
 compatibility_date = "2026-08-17"
 workers_dev = true
 
-# Intentionally no custom routes or production zone. Replace the workers.dev
-# placeholder only after the isolated sandbox Worker name is reserved.
+# Intentionally no custom routes or production zone. This origin is the isolated
+# workers.dev sandbox hostname and is never used by the production website.
 
 [vars]
 CONNECTOR_ENVIRONMENT = "sandbox"
-ALLOWED_ORIGINS = "https://replace-with-sandbox-worker.workers.dev"
+ALLOWED_ORIGINS = "https://spartan-square-connector-sandbox.bixbynutrition.workers.dev"
 SQUARE_ENVIRONMENT = "sandbox"
 SQUARE_API_BASE_URL = "https://connect.squareupsandbox.com"
 SQUARE_API_VERSION = "2026-07-15"
-SQUARE_LOCATION_ID = "REPLACE_WITH_SQUARE_SANDBOX_LOCATION_ID"
+SQUARE_LOCATION_ID = "L34NX9YA4PGF6"
 SQUARE_DISCOUNT_CATALOG_ID = ""
 SQUARE_ELIGIBLE_GROUP_ID = ""
 SQUARE_REDEEMED_GROUP_ID = ""
 SQUARE_QUALIFYING_VARIATION_IDS = ""
-SQUARE_MERCHANT_ID = ""
-SQUARE_WEBHOOK_NOTIFICATION_URL = "https://replace-with-sandbox-worker.workers.dev/api/square/webhook"
-TURNSTILE_SITE_KEY = ""
+SQUARE_MERCHANT_ID = "ML8W3CSGD2B71"
+SQUARE_WEBHOOK_NOTIFICATION_URL = "https://spartan-square-connector-sandbox.bixbynutrition.workers.dev/api/square/webhook"
+TURNSTILE_SITE_KEY = "0x4AAAAAAETIBGUWCQZhgbGM"
 TURNSTILE_EXPECTED_ACTION = "square_offer_sandbox"
 SQUARE_OFFER_ENABLED = "false"
 SQUARE_WEBHOOK_ENABLED = "false"
@@ -36,8 +36,8 @@ RECONCILIATION_LOOKBACK_HOURS = "96"
 [[d1_databases]]
 binding = "DB"
 database_name = "spartan-square-connector-sandbox"
-database_id = "REPLACE_WITH_SANDBOX_D1_DATABASE_ID"
-preview_database_id = "REPLACE_WITH_SANDBOX_D1_PREVIEW_DATABASE_ID"
+database_id = "9531221e-cabe-4ed4-b7d4-f715798b8945"
+preview_database_id = "ffd69503-aa8d-4677-ac4f-8875a0860bb2"
 migrations_dir = "migrations"
 
 [[queues.producers]]
