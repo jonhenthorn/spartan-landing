@@ -8,6 +8,7 @@ const MAX_JSON_BYTES = 8 * 1024;
 const MAX_WEBHOOK_BYTES = 256 * 1024;
 const DEFAULT_PROCESSING_LEASE_SECONDS = 900;
 const DEFAULT_PROCESSING_RECOVERY_LIMIT = 25;
+const WEBHOOK_ENQUEUED_STALE_SECONDS = 1800;
 const PRODUCTION_SQUARE_API_BASE = "https://connect.squareup.com";
 const SANDBOX_SQUARE_API_BASE = "https://connect.squareupsandbox.com";
 const PRODUCTION_LOCATION_ID = "3MDGSXS33HERT";
@@ -457,8 +458,8 @@ async function webhookRoute(request, env) {
   const minimal = JSON.stringify({ event_id: eventId, type: event.type, merchant_id: event.merchant_id, object_id: objectId });
   await dbRun(env, "webhook_insert", `
     INSERT INTO webhook_events
-      (event_id, event_type, object_id, merchant_id, payload_json, state, created_at, updated_at)
-    VALUES (?1, ?2, ?3, ?4, ?5, 'PENDING', ?6, ?6)
+      (event_id, event_type, object_id, merchant_id, payload_json, state, available_at, created_at, updated_at)
+    VALUES (?1, ?2, ?3, ?4, ?5, 'PENDING', NULL, ?6, ?6)
     ON CONFLICT(event_id) DO NOTHING
   `, [eventId, event.type, objectId, event.merchant_id, minimal, now]);
   const stored = await dbFirst(env, "webhook_get", `
@@ -468,11 +469,21 @@ async function webhookRoute(request, env) {
   if (["ENQUEUED", "PROCESSING", "PROCESSED", "IGNORED", "REJECTED"].includes(stored.state)) {
     return json({ ok: true }, 200);
   }
-  await env.SQUARE_QUEUE.send({ kind: "square_webhook", event_id: eventId }, { contentType: "json" });
-  await dbRun(env, "webhook_enqueued", `
-    UPDATE webhook_events SET state = 'ENQUEUED', updated_at = ?1 WHERE event_id = ?2
-  `, [new Date().toISOString(), eventId]);
+  if (!["PENDING", "RETRY"].includes(stored.state)) return errorJson("WEBHOOK_LEDGER_INVALID", 503);
+  if (webhookDeliveryDue(stored, now)) await enqueueWebhookEvent(stored, env);
   return json({ ok: true }, 200);
+}
+
+async function enqueueWebhookEvent(event, env) {
+  await env.SQUARE_QUEUE.send({ kind: "square_webhook", event_id: event.event_id }, { contentType: "json" });
+  const sentAt = new Date().toISOString();
+  return dbRun(env, "webhook_enqueued", `
+    UPDATE webhook_events
+       SET state = 'ENQUEUED', available_at = NULL, updated_at = ?1
+     WHERE event_id = ?2 AND state = ?3
+       AND updated_at = ?4
+       AND (state <> 'RETRY' OR available_at IS NULL OR available_at <= ?1)
+  `, [sentAt, event.event_id, event.state, event.updated_at]);
 }
 
 async function processQueueMessage(body, env) {
@@ -499,10 +510,12 @@ async function processWebhookEvent(eventId, env) {
   const acquired = await dbRun(env, "webhook_processing", `
     UPDATE webhook_events
        SET state = 'PROCESSING', attempts = attempts + 1, updated_at = ?1,
-           lease_token = ?2, lease_expires_at = ?3
+           available_at = NULL, lease_token = ?2, lease_expires_at = ?3
      WHERE event_id = ?4
        AND (
-         state IN ('PENDING', 'ENQUEUED', 'RETRY')
+         state = 'ENQUEUED'
+         OR state = 'PENDING'
+         OR (state = 'RETRY' AND (available_at IS NULL OR available_at <= ?1))
          OR (state = 'PROCESSING' AND (lease_expires_at IS NULL OR lease_expires_at <= ?1))
        )
   `, [leaseStartedAt, leaseToken, leaseExpiresAt, eventId]);
@@ -693,7 +706,7 @@ async function processPaymentEvent(event, env) {
     dbStatement(env, "webhook_processed", `
       UPDATE webhook_events
          SET state = 'PROCESSED', last_error_code = NULL, payload_json = '{}', updated_at = ?1,
-             lease_token = NULL, lease_expires_at = NULL
+             available_at = NULL, lease_token = NULL, lease_expires_at = NULL
        WHERE event_id = ?2 AND state = 'PROCESSING' AND lease_token = ?3
          AND EXISTS (
            SELECT 1 FROM redemptions WHERE claim_id = ?4 AND square_order_id = ?5
@@ -776,7 +789,7 @@ async function recordOrdinaryPurchase(claim, payment, order, event, env) {
     dbStatement(env, "webhook_processed", `
       UPDATE webhook_events
          SET state = 'PROCESSED', last_error_code = NULL, payload_json = '{}', updated_at = ?1,
-             lease_token = NULL, lease_expires_at = NULL
+             available_at = NULL, lease_token = NULL, lease_expires_at = NULL
        WHERE event_id = ?2 AND state = 'PROCESSING' AND lease_token = ?3
     `, [now, event.event_id, event.lease_token]),
   ]);
@@ -793,7 +806,7 @@ async function recordAdditionalTender(purchase, payment, event, env) {
     dbStatement(env, "webhook_processed", `
       UPDATE webhook_events
          SET state = 'PROCESSED', last_error_code = 'SAME_ORDER_ADDITIONAL_TENDER', payload_json = '{}', updated_at = ?1,
-             lease_token = NULL, lease_expires_at = NULL
+             available_at = NULL, lease_token = NULL, lease_expires_at = NULL
        WHERE event_id = ?2 AND state = 'PROCESSING' AND lease_token = ?3
     `, [now, event.event_id, event.lease_token]),
   ]);
@@ -889,7 +902,7 @@ async function processRefundEvent(event, env) {
     dbStatement(env, "webhook_processed", `
       UPDATE webhook_events
          SET state = 'PROCESSED', last_error_code = NULL, payload_json = '{}', updated_at = ?1,
-             lease_token = NULL, lease_expires_at = NULL
+             available_at = NULL, lease_token = NULL, lease_expires_at = NULL
        WHERE event_id = ?2 AND state = 'PROCESSING' AND lease_token = ?3
     `, [now, event.event_id, event.lease_token]),
   ]);
@@ -948,7 +961,8 @@ async function recoverStaleProcessing(env) {
   for (const row of webhookRows) {
     await dbRun(env, "webhook_reclaim_processing", `
       UPDATE webhook_events
-         SET state = 'RETRY', last_error_code = 'STALE_PROCESSING_LEASE', updated_at = ?1,
+         SET state = 'RETRY', available_at = ?1,
+             last_error_code = 'STALE_PROCESSING_LEASE', updated_at = ?1,
              lease_token = NULL, lease_expires_at = NULL
        WHERE event_id = ?2 AND state = 'PROCESSING'
          AND lease_token IS ?3
@@ -975,14 +989,28 @@ async function recoverStaleProcessing(env) {
 }
 
 async function enqueueRecoveredWebhookEvents(env) {
+  const now = new Date().toISOString();
+  const enqueuedCutoff = new Date(Date.now() - WEBHOOK_ENQUEUED_STALE_SECONDS * 1000).toISOString();
   const result = await dbAll(env, "webhook_recovery_pending", `
-    SELECT event_id FROM webhook_events
-     WHERE state = 'RETRY' AND last_error_code = 'STALE_PROCESSING_LEASE'
-     ORDER BY updated_at ASC LIMIT ?1
-  `, [processingRecoveryLimit(env)]);
+    SELECT event_id, state FROM webhook_events
+     WHERE state = 'PENDING'
+        OR (state = 'RETRY' AND (available_at IS NULL OR available_at <= ?1))
+        OR (state = 'ENQUEUED' AND updated_at <= ?2)
+     ORDER BY updated_at ASC LIMIT ?3
+  `, [now, enqueuedCutoff, processingRecoveryLimit(env)]);
   for (const row of result) {
     try {
       await env.SQUARE_QUEUE.send({ kind: "square_webhook", event_id: row.event_id }, { contentType: "json" });
+      const sentAt = new Date().toISOString();
+      await dbRun(env, "webhook_recovery_enqueued", `
+        UPDATE webhook_events
+         SET state = 'ENQUEUED', available_at = NULL, updated_at = ?1
+         WHERE event_id = ?2 AND (
+           state = 'PENDING'
+           OR (state = 'RETRY' AND (available_at IS NULL OR available_at <= ?1))
+           OR (state = 'ENQUEUED' AND updated_at <= ?3)
+         )
+      `, [sentAt, row.event_id, enqueuedCutoff]);
     } catch (error) {
       console.error("square_webhook_recovery_enqueue_error", safeErrorCode(error));
     }
@@ -1117,15 +1145,14 @@ async function reconcileCollection(kind, path, beginTime, env) {
       const now = new Date().toISOString();
       await dbRun(env, "webhook_insert", `
         INSERT INTO webhook_events
-          (event_id, event_type, object_id, merchant_id, payload_json, state, created_at, updated_at)
-        VALUES (?1, ?2, ?3, ?4, ?5, 'PENDING', ?6, ?6)
+          (event_id, event_type, object_id, merchant_id, payload_json, state, available_at, created_at, updated_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, 'PENDING', NULL, ?6, ?6)
         ON CONFLICT(event_id) DO NOTHING
       `, [eventId, eventType, object.id, env.SQUARE_MERCHANT_ID,
         JSON.stringify({ event_id: eventId, type: eventType, merchant_id: env.SQUARE_MERCHANT_ID, object_id: object.id }), now]);
       const stored = await dbFirst(env, "webhook_get", `SELECT * FROM webhook_events WHERE event_id = ?1`, [eventId]);
-      if (stored && ["PENDING", "RETRY"].includes(stored.state)) {
-        await env.SQUARE_QUEUE.send({ kind: "square_webhook", event_id: eventId }, { contentType: "json" });
-        await dbRun(env, "webhook_enqueued", `UPDATE webhook_events SET state = 'ENQUEUED', updated_at = ?1 WHERE event_id = ?2`, [now, eventId]);
+      if (stored && ["PENDING", "RETRY"].includes(stored.state) && webhookDeliveryDue(stored, now)) {
+        await enqueueWebhookEvent(stored, env);
       }
     }
     cursor = response.cursor || "";
@@ -1615,6 +1642,13 @@ function methodNotAllowed(allow) {
 
 function requestError(code, status) { const error = new Error(code); error.code = code; error.status = status; return error; }
 function retryDelay(attempts) { return Math.min(3600, 30 * (2 ** Math.min(7, Math.max(0, attempts - 1)))); }
+function webhookDeliveryDue(event, now) {
+  if (event?.state === "PENDING") return true;
+  if (event?.state !== "RETRY") return false;
+  if (!event.available_at) return true;
+  const availableAt = Date.parse(event.available_at);
+  return Number.isFinite(availableAt) && availableAt <= Date.parse(now);
+}
 
 class ConnectorError extends Error {
   constructor(code, status = 500, permanentValue = true) {
@@ -1707,14 +1741,19 @@ function escapeHtml(value) {
 }
 
 async function markWebhook(env, event, state, errorCode) {
+  const now = new Date().toISOString();
+  const availableAt = state === "RETRY"
+    ? new Date(Date.parse(now) + retryDelay(Number(event.attempts || 1)) * 1000).toISOString()
+    : null;
   const result = await dbRun(env, "webhook_mark", `
     UPDATE webhook_events
        SET state = ?1, last_error_code = ?2,
+           available_at = ?3,
            payload_json = CASE WHEN ?1 IN ('PROCESSED', 'IGNORED', 'REJECTED') THEN '{}' ELSE payload_json END,
-           updated_at = ?3,
+           updated_at = ?4,
            lease_token = NULL, lease_expires_at = NULL
-     WHERE event_id = ?4 AND state = 'PROCESSING' AND lease_token = ?5
-  `, [state, errorCode, new Date().toISOString(), event.event_id, event.lease_token]);
+     WHERE event_id = ?5 AND state = 'PROCESSING' AND lease_token = ?6
+  `, [state, errorCode, availableAt, now, event.event_id, event.lease_token]);
   if (dbChanges(result) !== 1) throw transient("WEBHOOK_PROCESSING_LEASE_LOST");
 }
 

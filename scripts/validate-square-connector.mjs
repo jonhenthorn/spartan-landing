@@ -8,6 +8,7 @@ const wrangler = readFileSync(new URL("square-worker/wrangler.toml", ROOT), "utf
 const sandboxWrangler = readFileSync(new URL("square-worker/wrangler.sandbox.toml", ROOT), "utf8");
 const migration = readFileSync(new URL("square-worker/migrations/0001_initial.sql", ROOT), "utf8");
 const leaseMigration = readFileSync(new URL("square-worker/migrations/0002_processing_leases.sql", ROOT), "utf8");
+const retryScheduleMigration = readFileSync(new URL("square-worker/migrations/0003_webhook_retry_schedule.sql", ROOT), "utf8");
 const source = readFileSync(new URL("square-worker/src/index.mjs", ROOT), "utf8");
 
 const checks = [];
@@ -99,7 +100,7 @@ class MockD1 {
       case "webhook_insert":
         if (!this.webhooks.some((row) => row.event_id === values[0])) this.webhooks.push({
           event_id: values[0], event_type: values[1], object_id: values[2], merchant_id: values[3], payload_json: values[4],
-          state: "PENDING", attempts: 0, last_error_code: null, lease_token: null, lease_expires_at: null,
+          state: "PENDING", attempts: 0, available_at: null, last_error_code: null, lease_token: null, lease_expires_at: null,
           created_at: values[5], updated_at: values[5],
         });
         return now();
@@ -107,24 +108,30 @@ class MockD1 {
         const row = this.webhooks.find((item) => item.event_id === values[0]); return row ? { ...row } : null;
       }
       case "webhook_enqueued": {
-        const row = this.webhooks.find((item) => item.event_id === values[1]); if (row) Object.assign(row, { state: "ENQUEUED", updated_at: values[0] }); return now();
+        const row = this.webhooks.find((item) => item.event_id === values[1]);
+        const retryDue = row?.state !== "RETRY" || !row.available_at || Date.parse(row.available_at) <= Date.parse(values[0]);
+        if (!row || row.state !== values[2] || row.updated_at !== values[3] || !retryDue) {
+          return { success: true, meta: { changes: 0 } };
+        }
+        Object.assign(row, { state: "ENQUEUED", available_at: null, updated_at: values[0] }); return now();
       }
       case "webhook_processing": {
         const row = this.webhooks.find((item) => item.event_id === values[3]);
-        const eligible = row && (["PENDING", "ENQUEUED", "RETRY"].includes(row.state) ||
+        const eligible = row && (["PENDING", "ENQUEUED"].includes(row.state) ||
+          (row.state === "RETRY" && (!row.available_at || Date.parse(row.available_at) <= Date.parse(values[0]))) ||
           (row.state === "PROCESSING" && (!row.lease_expires_at || Date.parse(row.lease_expires_at) <= Date.parse(values[0]))));
         if (!eligible) return { success: true, meta: { changes: 0 } };
         Object.assign(row, { state: "PROCESSING", attempts: row.attempts + 1, updated_at: values[0],
-          lease_token: values[1], lease_expires_at: values[2] });
+          available_at: null, lease_token: values[1], lease_expires_at: values[2] });
         if (this.crashAfterWebhookLease) { this.crashAfterWebhookLease = false; throw new Error("DELIBERATE_WEBHOOK_CRASH"); }
         return now();
       }
       case "webhook_mark": {
-        const row = this.webhooks.find((item) => item.event_id === values[3]);
-        if (!row || row.state !== "PROCESSING" || row.lease_token !== values[4]) return { success: true, meta: { changes: 0 } };
-        Object.assign(row, { state: values[0], last_error_code: values[1],
+        const row = this.webhooks.find((item) => item.event_id === values[4]);
+        if (!row || row.state !== "PROCESSING" || row.lease_token !== values[5]) return { success: true, meta: { changes: 0 } };
+        Object.assign(row, { state: values[0], last_error_code: values[1], available_at: values[2],
           payload_json: ["PROCESSED", "IGNORED", "REJECTED"].includes(values[0]) ? "{}" : row.payload_json,
-          updated_at: values[2], lease_token: null, lease_expires_at: null }); return now();
+          updated_at: values[3], lease_token: null, lease_expires_at: null }); return now();
       }
       case "webhook_processed": {
         const row = this.webhooks.find((item) => item.event_id === values[1]);
@@ -134,7 +141,7 @@ class MockD1 {
           return { success: true, meta: { changes: 0 } };
         }
         Object.assign(row, { state: "PROCESSED", last_error_code: sql.includes("SAME_ORDER_ADDITIONAL_TENDER") ? "SAME_ORDER_ADDITIONAL_TENDER" : null,
-          payload_json: "{}", updated_at: values[0], lease_token: null, lease_expires_at: null }); return now();
+          payload_json: "{}", available_at: null, updated_at: values[0], lease_token: null, lease_expires_at: null }); return now();
       }
       case "webhook_stale_processing": return { results: this.webhooks.filter((row) => row.state === "PROCESSING" &&
         (!row.lease_expires_at || Date.parse(row.lease_expires_at) <= Date.parse(values[0]))).slice(0, values[1])
@@ -143,10 +150,22 @@ class MockD1 {
         const row = this.webhooks.find((item) => item.event_id === values[1]);
         if (!row || row.state !== "PROCESSING" || row.lease_token !== values[2] ||
             (row.lease_expires_at && Date.parse(row.lease_expires_at) > Date.parse(values[0]))) return { success: true, meta: { changes: 0 } };
-        Object.assign(row, { state: "RETRY", last_error_code: "STALE_PROCESSING_LEASE", updated_at: values[0], lease_token: null, lease_expires_at: null }); return now();
+        Object.assign(row, { state: "RETRY", available_at: values[0], last_error_code: "STALE_PROCESSING_LEASE", updated_at: values[0], lease_token: null, lease_expires_at: null }); return now();
       }
-      case "webhook_recovery_pending": return { results: this.webhooks.filter((row) => row.state === "RETRY" &&
-        row.last_error_code === "STALE_PROCESSING_LEASE").slice(0, values[0]).map(({ event_id }) => ({ event_id })) };
+      case "webhook_recovery_pending": return { results: this.webhooks.filter((row) =>
+        row.state === "PENDING" ||
+        (row.state === "RETRY" && (!row.available_at || Date.parse(row.available_at) <= Date.parse(values[0]))) ||
+        (row.state === "ENQUEUED" && Date.parse(row.updated_at) <= Date.parse(values[1])))
+        .sort((left, right) => Date.parse(left.updated_at) - Date.parse(right.updated_at))
+        .slice(0, values[2]).map(({ event_id, state }) => ({ event_id, state })) };
+      case "webhook_recovery_enqueued": {
+        const row = this.webhooks.find((item) => item.event_id === values[1]);
+        const pending = row?.state === "PENDING";
+        const retryDue = row?.state === "RETRY" && (!row.available_at || Date.parse(row.available_at) <= Date.parse(values[0]));
+        const enqueuedStale = row?.state === "ENQUEUED" && Date.parse(row.updated_at) <= Date.parse(values[2]);
+        if (!row || (!pending && !retryDue && !enqueuedStale)) return { success: true, meta: { changes: 0 } };
+        Object.assign(row, { state: "ENQUEUED", available_at: null, updated_at: values[0] }); return now();
+      }
       case "claim_ready_by_customer": return this.claims.find((row) => row.square_customer_id === values[0] && ["READY", "REDEEMED"].includes(row.status)) || null;
       case "purchase_by_order": return this.purchases.find((row) => row.square_order_id === values[0]) || null;
       case "purchase_by_payment": {
@@ -318,6 +337,12 @@ function jsonResponse(value, status = 200) {
   return new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
 }
 
+async function runScheduled(env) {
+  const waits = [];
+  await worker.scheduled({}, env, { waitUntil(promise) { waits.push(promise); } });
+  await Promise.all(waits);
+}
+
 function installServiceMocks(env, trace, state) {
   globalThis.fetch = async (input, init = {}) => {
     const url = String(input);
@@ -397,7 +422,15 @@ function installServiceMocks(env, trace, state) {
     }
     if (customerMatch && init.method === "GET") return jsonResponse({ customer: state.customer });
     const paymentMatch = path.match(/^\/v2\/payments\/([^/]+)$/);
-    if (paymentMatch) return jsonResponse({ payment: state.payments?.[paymentMatch[1]] || state.payment });
+    if (paymentMatch) {
+      if (Number(state.paymentFetchFailures || 0) > 0) {
+        state.paymentFetchFailures -= 1;
+        return jsonResponse({ errors: [{ code: "INTERNAL_SERVER_ERROR" }] }, state.paymentFailureStatus || 503);
+      }
+      return jsonResponse({ payment: state.payments?.[paymentMatch[1]] || state.payment });
+    }
+    if (path === "/v2/payments") return jsonResponse({ payments: state.reconciliationPayments || [], cursor: state.reconciliationPaymentCursor || "" });
+    if (path === "/v2/refunds") return jsonResponse({ refunds: state.reconciliationRefunds || [], cursor: state.reconciliationRefundCursor || "" });
     const orderMatch = path.match(/^\/v2\/orders\/([^/]+)$/);
     if (orderMatch) return jsonResponse({ order: state.orders?.[orderMatch[1]] || state.order });
     if (path === "/v2/refunds/REFUND_1") return jsonResponse({ refund: state.refund });
@@ -424,6 +457,10 @@ check("static configuration is default-off and pinned", () => {
   assert.match(migration, /CREATE TABLE IF NOT EXISTS refund_reviews/);
   assert.match(leaseMigration, /ALTER TABLE webhook_events ADD COLUMN lease_token TEXT/);
   assert.match(leaseMigration, /ALTER TABLE square_outbox ADD COLUMN lease_expires_at TEXT/);
+  assert.match(retryScheduleMigration, /ALTER TABLE webhook_events ADD COLUMN available_at TEXT/);
+  assert.match(retryScheduleMigration, /WHERE state = 'RETRY' AND available_at IS NULL/);
+  assert.match(retryScheduleMigration, /webhook_events_retry_ready_idx/);
+  assert.match(source, /WEBHOOK_ENQUEUED_STALE_SECONDS = 1800/);
   assert.doesNotMatch(wrangler, /SQUARE_ACCESS_TOKEN\s*=/);
 });
 
@@ -669,6 +706,28 @@ check("webhook rejects bad signatures and ACKs only after D1 plus Queue", async 
   assert.equal(created.status, 200); assert.equal(db.webhooks.find((row) => row.event_id === "event-created-0001")?.state, "ENQUEUED");
 });
 
+check("webhook ingress remains PENDING when Queue send fails and transitions by CAS only after a durable send", async () => {
+  const db = new MockD1(); const queued = []; let failSend = true;
+  const env = baseEnv(db, { send: async (body) => {
+    if (failSend) throw new Error("DELIBERATE_INGRESS_QUEUE_FAILURE");
+    queued.push(body);
+  } });
+  const event = { merchant_id: env.SQUARE_MERCHANT_ID, type: "payment.updated", event_id: "event-ingress-recovery",
+    data: { type: "payment", id: "PAY_INGRESS" } };
+  const raw = JSON.stringify(event);
+  const signature = createHmac("sha256", env.SQUARE_WEBHOOK_SIGNATURE_KEY)
+    .update(env.SQUARE_WEBHOOK_NOTIFICATION_URL + raw).digest("base64");
+  const request = () => new Request(env.SQUARE_WEBHOOK_NOTIFICATION_URL, {
+    method: "POST", headers: { "Content-Type": "application/json", "x-square-hmacsha256-signature": signature }, body: raw,
+  });
+  const failed = await worker.fetch(request(), env, {});
+  assert.equal(failed.status, 500); assert.equal(db.webhooks[0].state, "PENDING"); assert.equal(db.webhooks[0].available_at, null);
+  failSend = false;
+  const recovered = await worker.fetch(request(), env, {});
+  assert.equal(recovered.status, 200); assert.equal(db.webhooks[0].state, "ENQUEUED"); assert.equal(db.webhooks[0].available_at, null);
+  assert.deepEqual(queued, [{ kind: "square_webhook", event_id: "event-ingress-recovery" }]);
+});
+
 check("consumer validates exact discount and quantity, commits redemption, and creates removal outbox", async () => {
   const { db, env, state, queued } = globalThis.__squareTest;
   state.payment = { id: "PAYMENT_1", status: "COMPLETED", location_id: env.SQUARE_LOCATION_ID, customer_id: "CUSTOMER_1",
@@ -680,6 +739,7 @@ check("consumer validates exact discount and quantity, commits redemption, and c
   assert.equal(db.redemptions.length, 1); assert.equal(db.claims[0].status, "REDEEMED");
   assert.equal(db.webhooks.find((row) => row.event_id === "event-payment-0001")?.payload_json, "{}",
     "processed webhook metadata is scrubbed after normalization");
+  assert.equal(db.webhooks.find((row) => row.event_id === "event-payment-0001")?.available_at, null);
   assert.ok(db.outbox.some((row) => row.action === "REMOVE_ELIGIBLE_GROUP"));
   assert.ok(db.outbox.some((row) => row.action === "APPS_RECORD_REDEMPTION"));
   assert.ok(queued.some((row) => row.kind === "outbox"));
@@ -709,6 +769,11 @@ check("eventually consistent payment links and order state remain retryable", as
   await assert.rejects(() => __test.processQueueMessage({ kind: "square_webhook", event_id: "event-links-retry" }, env));
   assert.equal(db.webhooks[0].state, "RETRY");
   assert.equal(db.webhooks[0].payload_json, '{"object_id":"PAYMENT_1"}', "retryable recovery metadata is retained");
+  assert.equal(Date.parse(db.webhooks[0].available_at) - Date.parse(db.webhooks[0].updated_at), 30_000);
+  const attemptsBeforeEarlyDuplicate = db.webhooks[0].attempts;
+  await __test.processQueueMessage({ kind: "square_webhook", event_id: "event-links-retry" }, env);
+  assert.equal(db.webhooks[0].state, "RETRY");
+  assert.equal(db.webhooks[0].attempts, attemptsBeforeEarlyDuplicate, "an early duplicate Queue delivery cannot bypass D1 backoff");
 
   db.webhooks.push({ event_id: "event-order-retry", event_type: "payment.updated", object_id: "PAYMENT_1", merchant_id: env.SQUARE_MERCHANT_ID,
     payload_json: "{}", state: "ENQUEUED", attempts: 0, created_at: now, updated_at: now });
@@ -716,6 +781,151 @@ check("eventually consistent payment links and order state remain retryable", as
   state.order = { id: "ORDER_1", state: "OPEN", location_id: env.SQUARE_LOCATION_ID, customer_id: "CUSTOMER_RETRY" };
   await assert.rejects(() => __test.processQueueMessage({ kind: "square_webhook", event_id: "event-order-retry" }, env));
   assert.equal(db.webhooks[1].state, "RETRY");
+});
+
+check("webhook retry schedule uses the bounded exponential backoff for every transient attempt", async () => {
+  const expectedDelays = new Map([[1, 30], [2, 60], [7, 1920], [8, 3600]]);
+  for (const [attempt, expectedSeconds] of expectedDelays) {
+    const db = new MockD1(); const env = baseEnv(db, { send: async () => {} }); const trace = [];
+    const now = new Date().toISOString();
+    const eventId = `event-backoff-${attempt}`;
+    db.webhooks.push({ event_id: eventId, event_type: "payment.updated", object_id: `PAY_BACKOFF_${attempt}`,
+      merchant_id: env.SQUARE_MERCHANT_ID, payload_json: JSON.stringify({ object_id: `PAY_BACKOFF_${attempt}` }),
+      state: "ENQUEUED", attempts: attempt - 1, available_at: null, last_error_code: null,
+      lease_token: null, lease_expires_at: null, created_at: now, updated_at: now });
+    const state = {
+      payment: { id: `PAY_BACKOFF_${attempt}`, status: "COMPLETED", location_id: env.SQUARE_LOCATION_ID,
+        customer_id: "CUSTOMER_BACKOFF", order_id: `ORDER_BACKOFF_${attempt}` },
+      order: { id: `ORDER_BACKOFF_${attempt}`, state: "OPEN", location_id: env.SQUARE_LOCATION_ID,
+        customer_id: "CUSTOMER_BACKOFF" },
+    };
+    installServiceMocks(env, trace, state);
+    await assert.rejects(() => __test.processQueueMessage({ kind: "square_webhook", event_id: eventId }, env));
+    const row = db.webhooks[0];
+    assert.equal(row.state, "RETRY"); assert.equal(row.attempts, attempt); assert.equal(row.last_error_code, "ORDER_NOT_READY");
+    assert.equal(Date.parse(row.available_at) - Date.parse(row.updated_at), expectedSeconds * 1000);
+  }
+});
+
+check("scheduled webhook recovery handles due retries, null legacy due times, stale ENQUEUED rows, failures, and CAS races", async () => {
+  const db = new MockD1(); const queued = []; const sendAttempts = new Map();
+  const failOnce = new Set(["event-pending-send-fail", "event-retry-send-fail", "event-stale-send-fail"]);
+  const now = new Date().toISOString();
+  const old = new Date(Date.now() - 31 * 60 * 1000).toISOString();
+  const past = new Date(Date.now() - 1000).toISOString();
+  const future = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  const row = (event_id, state, updated_at, available_at = null) => ({ event_id, event_type: "payment.updated",
+    object_id: `PAY_${event_id}`, merchant_id: "MERCHANT_1", payload_json: JSON.stringify({ object_id: `PAY_${event_id}` }),
+    state, attempts: 1, available_at, last_error_code: state === "RETRY" ? "SQUARE_API_ERROR" : null,
+    lease_token: null, lease_expires_at: null, created_at: old, updated_at });
+  db.webhooks.push(
+    row("event-pending-send-fail", "PENDING", old),
+    row("event-pending-cas-processing", "PENDING", old),
+    row("event-retry-future", "RETRY", now, future),
+    row("event-retry-due", "RETRY", old, past),
+    row("event-retry-null", "RETRY", old, null),
+    row("event-enqueued-fresh", "ENQUEUED", now),
+    row("event-enqueued-stale", "ENQUEUED", old),
+    row("event-retry-send-fail", "RETRY", old, past),
+    row("event-stale-send-fail", "ENQUEUED", old),
+    row("event-cas-terminal", "RETRY", old, past),
+    row("event-cas-new-retry", "RETRY", old, past),
+    row("event-terminal-processed", "PROCESSED", old),
+    row("event-terminal-ignored", "IGNORED", old),
+    row("event-terminal-rejected", "REJECTED", old),
+  );
+  const env = baseEnv(db, { send: async (body) => {
+    const id = body.event_id || body.outbox_id;
+    sendAttempts.set(id, (sendAttempts.get(id) || 0) + 1);
+    if (failOnce.delete(id)) throw new Error("DELIBERATE_QUEUE_SEND_FAILURE");
+    queued.push(body);
+    if (id === "event-cas-terminal") {
+      const terminal = db.webhooks.find((item) => item.event_id === id);
+      Object.assign(terminal, { state: "PROCESSED", payload_json: "{}", available_at: null,
+        last_error_code: null, updated_at: new Date().toISOString() });
+    }
+    if (id === "event-pending-cas-processing") {
+      const processing = db.webhooks.find((item) => item.event_id === id);
+      Object.assign(processing, { state: "PROCESSING", available_at: null, updated_at: new Date().toISOString(),
+        lease_token: "concurrent-processing-lease", lease_expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString() });
+    }
+    if (id === "event-cas-new-retry") {
+      const retried = db.webhooks.find((item) => item.event_id === id);
+      Object.assign(retried, { state: "RETRY", available_at: future, last_error_code: "NEW_TRANSIENT_FAILURE",
+        updated_at: new Date().toISOString(), lease_token: null, lease_expires_at: null });
+    }
+  } });
+
+  const pendingFailureBefore = structuredClone(db.webhooks.find((item) => item.event_id === "event-pending-send-fail"));
+  const retryFailureBefore = structuredClone(db.webhooks.find((item) => item.event_id === "event-retry-send-fail"));
+  const staleFailureBefore = structuredClone(db.webhooks.find((item) => item.event_id === "event-stale-send-fail"));
+  await runScheduled(env);
+
+  assert.equal(sendAttempts.get("event-retry-future") || 0, 0, "future retries are not sent before due");
+  assert.equal(db.webhooks.find((item) => item.event_id === "event-retry-future").state, "RETRY");
+  for (const id of ["event-retry-due", "event-retry-null", "event-enqueued-stale"]) {
+    const recovered = db.webhooks.find((item) => item.event_id === id);
+    assert.equal(sendAttempts.get(id), 1); assert.equal(recovered.state, "ENQUEUED"); assert.equal(recovered.available_at, null);
+  }
+  assert.equal(sendAttempts.get("event-enqueued-fresh") || 0, 0, "fresh ENQUEUED rows are not duplicated");
+  assert.deepEqual(db.webhooks.find((item) => item.event_id === "event-pending-send-fail"), pendingFailureBefore,
+    "a failed Queue send leaves a durable PENDING receipt unchanged");
+  assert.deepEqual(db.webhooks.find((item) => item.event_id === "event-retry-send-fail"), retryFailureBefore,
+    "a failed Queue send leaves a due RETRY unchanged");
+  assert.deepEqual(db.webhooks.find((item) => item.event_id === "event-stale-send-fail"), staleFailureBefore,
+    "a failed Queue send leaves stale ENQUEUED evidence unchanged");
+  const casTerminal = db.webhooks.find((item) => item.event_id === "event-cas-terminal");
+  assert.equal(casTerminal.state, "PROCESSED"); assert.equal(casTerminal.payload_json, "{}");
+  const concurrentProcessing = db.webhooks.find((item) => item.event_id === "event-pending-cas-processing");
+  assert.equal(concurrentProcessing.state, "PROCESSING"); assert.equal(concurrentProcessing.lease_token, "concurrent-processing-lease");
+  const concurrentRetry = db.webhooks.find((item) => item.event_id === "event-cas-new-retry");
+  assert.equal(concurrentRetry.state, "RETRY"); assert.equal(concurrentRetry.available_at, future);
+  assert.equal(concurrentRetry.last_error_code, "NEW_TRANSIENT_FAILURE",
+    "post-send CAS cannot erase a newer transient retry schedule");
+  for (const id of ["event-terminal-processed", "event-terminal-ignored", "event-terminal-rejected"]) {
+    assert.equal(sendAttempts.get(id) || 0, 0, `${id} must never be selected for recovery`);
+  }
+
+  await runScheduled(env);
+  assert.equal(sendAttempts.get("event-enqueued-stale"), 1, "a refreshed stale delivery is not duplicated by the next cron");
+  assert.equal(sendAttempts.get("event-pending-send-fail"), 2);
+  assert.equal(sendAttempts.get("event-retry-send-fail"), 2); assert.equal(sendAttempts.get("event-stale-send-fail"), 2);
+  assert.equal(db.webhooks.find((item) => item.event_id === "event-pending-send-fail").state, "ENQUEUED");
+  assert.equal(db.webhooks.find((item) => item.event_id === "event-retry-send-fail").state, "ENQUEUED");
+  assert.equal(db.webhooks.find((item) => item.event_id === "event-stale-send-fail").state, "ENQUEUED");
+
+  db.webhooks.find((item) => item.event_id === "event-retry-future").available_at = past;
+  await runScheduled(env);
+  assert.equal(sendAttempts.get("event-retry-future"), 1);
+  assert.equal(db.webhooks.find((item) => item.event_id === "event-retry-future").state, "ENQUEUED");
+  assert.ok(queued.some((body) => body.event_id === "event-retry-null"), "legacy RETRY rows with NULL due time recover immediately");
+});
+
+check("a transient Square failure recovers through the D1 schedule and duplicate Queue deliveries terminalize once", async () => {
+  const db = new MockD1(); const queued = []; const env = baseEnv(db, { send: async (body) => queued.push(body) });
+  const trace = []; const now = new Date().toISOString();
+  db.webhooks.push({ event_id: "event-square-503", event_type: "payment.updated", object_id: "PAY_503",
+    merchant_id: env.SQUARE_MERCHANT_ID, payload_json: '{"object_id":"PAY_503"}', state: "ENQUEUED", attempts: 0,
+    available_at: null, last_error_code: null, lease_token: null, lease_expires_at: null, created_at: now, updated_at: now });
+  const state = { paymentFetchFailures: 1, paymentFailureStatus: 503,
+    payment: { id: "PAY_503", status: "CANCELED", location_id: env.SQUARE_LOCATION_ID } };
+  installServiceMocks(env, trace, state);
+  await assert.rejects(() => __test.processQueueMessage({ kind: "square_webhook", event_id: "event-square-503" }, env));
+  const retry = db.webhooks[0];
+  assert.equal(retry.state, "RETRY"); assert.equal(retry.last_error_code, "SQUARE_API_ERROR");
+  await runScheduled(env);
+  assert.equal(queued.length, 0, "the cron respects the first 30-second retry delay");
+  retry.available_at = new Date(Date.now() - 1000).toISOString();
+  await runScheduled(env);
+  assert.deepEqual(queued, [{ kind: "square_webhook", event_id: "event-square-503" }]);
+  const beforeAttempts = retry.attempts;
+  await Promise.all([
+    __test.processQueueMessage(queued[0], env),
+    __test.processQueueMessage(queued[0], env),
+  ]);
+  assert.equal(retry.state, "IGNORED"); assert.equal(retry.last_error_code, "PAYMENT_NOT_COMPLETED");
+  assert.equal(retry.available_at, null); assert.equal(retry.payload_json, "{}");
+  assert.equal(retry.attempts, beforeAttempts + 1, "the lease CAS admits exactly one duplicate delivery");
 });
 
 check("scheduled recovery reclaims and re-enqueues deliberately crashed processing leases", async () => {
@@ -743,10 +953,9 @@ check("scheduled recovery reclaims and re-enqueues deliberately crashed processi
 
   const expired = new Date(Date.now() - 1000).toISOString();
   db.webhooks[0].lease_expires_at = expired; db.outbox[0].lease_expires_at = expired;
-  const waits = [];
-  await worker.scheduled({}, env, { waitUntil(promise) { waits.push(promise); } });
-  await Promise.all(waits);
-  assert.equal(db.webhooks[0].state, "RETRY"); assert.equal(db.webhooks[0].lease_token, null);
+  await runScheduled(env);
+  assert.equal(db.webhooks[0].state, "ENQUEUED"); assert.equal(db.webhooks[0].lease_token, null);
+  assert.equal(db.webhooks[0].available_at, null);
   assert.equal(db.outbox[0].state, "RETRY"); assert.equal(db.outbox[0].lease_token, null);
   assert.ok(queued.some((body) => body.kind === "square_webhook" && body.event_id === "event-crash"));
   assert.ok(queued.some((body) => body.kind === "outbox" && body.outbox_id === "out-crash"));
@@ -789,6 +998,7 @@ check("concurrent discounted orders use one redemption CAS and reject the losing
   const processed = db.webhooks.filter((row) => row.state === "PROCESSED");
   const rejected = db.webhooks.filter((row) => row.state === "REJECTED");
   assert.equal(processed.length, 1); assert.equal(rejected.length, 1);
+  assert.equal(processed[0].available_at, null); assert.equal(rejected[0].available_at, null);
   assert.equal(rejected[0].last_error_code, "CLAIM_ALREADY_REDEEMED_DIFFERENT_ORDER");
   assert.equal(db.purchases[0].square_order_id, db.redemptions[0].square_order_id);
 });
@@ -812,11 +1022,11 @@ check("discount use without an attached eligible customer becomes a monitored ex
   }
   const missing = await scenario({ customerId: undefined, hasTarget: true, eventId: "event-missing-customer" });
   assert.equal(missing.state, "REJECTED"); assert.equal(missing.last_error_code, "TARGET_DISCOUNT_WITHOUT_CUSTOMER");
-  assert.equal(missing.payload_json, "{}");
+  assert.equal(missing.payload_json, "{}"); assert.equal(missing.available_at, null);
   const unlinked = await scenario({ customerId: "UNKNOWN_CUSTOMER", hasTarget: true, eventId: "event-unlinked-customer" });
-  assert.equal(unlinked.state, "REJECTED"); assert.equal(unlinked.last_error_code, "TARGET_DISCOUNT_UNLINKED_CUSTOMER");
+  assert.equal(unlinked.state, "REJECTED"); assert.equal(unlinked.last_error_code, "TARGET_DISCOUNT_UNLINKED_CUSTOMER"); assert.equal(unlinked.available_at, null);
   const normal = await scenario({ customerId: undefined, hasTarget: false, eventId: "event-normal-order" });
-  assert.equal(normal.state, "IGNORED");
+  assert.equal(normal.state, "IGNORED"); assert.equal(normal.available_at, null);
 });
 
 check("ordinary first and later purchases remain idempotent and refundable without consuming eligibility", async () => {
@@ -836,6 +1046,7 @@ check("ordinary first and later purchases remain idempotent and refundable witho
   addEvent("event-first", "PAY_FIRST"); installServiceMocks(env, trace, state);
   await __test.processQueueMessage({ kind: "square_webhook", event_id: "event-first" }, env);
   assert.equal(db.claims[0].status, "READY"); assert.equal(db.purchases[0].discount_qualification, "not_qualified");
+  assert.equal(db.webhooks.find((row) => row.event_id === "event-first").available_at, null);
   const firstOutbox = db.outbox.find((row) => row.dedupe_key === "apps-order:ORDER_FIRST");
   await __test.processQueueMessage({ kind: "outbox", outbox_id: firstOutbox.outbox_id }, env); assert.equal(firstOutbox.state, "DONE");
 
@@ -847,7 +1058,7 @@ check("ordinary first and later purchases remain idempotent and refundable witho
       applied_discounts: [{ discount_uid: "offer", applied_money: { amount: 500, currency: "USD" } }] }] };
   addEvent("event-redeem", "PAY_REDEEM");
   await __test.processQueueMessage({ kind: "square_webhook", event_id: "event-redeem" }, env);
-  assert.equal(db.claims[0].status, "REDEEMED");
+  assert.equal(db.claims[0].status, "REDEEMED"); assert.equal(db.webhooks.find((row) => row.event_id === "event-redeem").available_at, null);
 
   state.payments.PAY_LATER = payment("PAY_LATER", "ORDER_LATER"); state.orders.ORDER_LATER = normalOrder("ORDER_LATER");
   addEvent("event-later", "PAY_LATER");
@@ -863,11 +1074,13 @@ check("ordinary first and later purchases remain idempotent and refundable witho
   state.payments.PAY_SPLIT = payment("PAY_SPLIT", "ORDER_LATER", 400); addEvent("event-split", "PAY_SPLIT");
   await __test.processQueueMessage({ kind: "square_webhook", event_id: "event-split" }, env);
   assert.equal(db.purchases.length, purchaseCount); assert.ok(db.purchasePayments.some((row) => row.square_payment_id === "PAY_SPLIT"));
+  assert.equal(db.webhooks.find((row) => row.event_id === "event-split").available_at, null);
 
   state.refund = { id: "REFUND_1", status: "COMPLETED", location_id: env.SQUARE_LOCATION_ID, payment_id: "PAY_SPLIT",
     order_id: "REFUND_ORDER_LATER", amount_money: { amount: 200, currency: "USD" }, created_at: now, updated_at: now };
   addEvent("event-later-refund", "REFUND_1", "refund.updated");
   await __test.processQueueMessage({ kind: "square_webhook", event_id: "event-later-refund" }, env);
+  assert.equal(db.webhooks.find((row) => row.event_id === "event-later-refund").available_at, null);
   const refundOutbox = db.outbox.find((row) => row.dedupe_key === "apps-refund:REFUND_1");
   assert.equal(JSON.parse(refundOutbox.payload_json).square_payment_id, "PAY_LATER");
   state.eventCommitOverride = { redemption_result: "no_redemption_found" };
@@ -923,6 +1136,7 @@ check("completed refund opens review and never reissues eligibility", async () =
   const redemptionOutbox = db.outbox.find((row) => row.action === "APPS_RECORD_REDEMPTION");
   assert.equal(JSON.parse(refundOutbox.payload_json).square_order_id, "ORDER_1", "refund order IDs never replace the original purchase order");
   assert.equal(db.webhooks.find((row) => row.event_id === "event-refund-0001")?.payload_json, "{}");
+  assert.equal(db.webhooks.find((row) => row.event_id === "event-refund-0001")?.available_at, null);
   await assert.rejects(() => __test.processQueueMessage({ kind: "outbox", outbox_id: refundOutbox.outbox_id }, env));
   assert.equal(refundOutbox.state, "RETRY", "refund Apps evidence waits durably for live redemption evidence");
   assert.equal(refundOutbox.attempts, 1); assert.equal(refundOutbox.last_error_code, "APPS_DEPENDENCY_NOT_READY");
@@ -960,7 +1174,7 @@ check("refund outbox dependencies become durable DEAD states instead of looping 
 });
 
 check("refund-before-payment delivery retries and reconciles after redemption", async () => {
-  const db = new MockD1(); const env = baseEnv(db, { send: async () => {} }); const state = {}; const trace = [];
+  const db = new MockD1(); const queued = []; const env = baseEnv(db, { send: async (body) => queued.push(body) }); const state = {}; const trace = [];
   const now = new Date().toISOString();
   db.claims.push({ claim_id: "claim_refund_first", submission_id: "submission-refund-first", coupon_code_hash: "hash", identity_hash: "identity",
     square_customer_id: "CUSTOMER_RF", reference_id: "SPN1-0123456789ABCDEFabcd_-", match_method: "created",
@@ -984,8 +1198,13 @@ check("refund-before-payment delivery retries and reconciles after redemption", 
   db.webhooks.push({ event_id: "event-payment-after-refund", event_type: "payment.updated", object_id: "PAYMENT_1", merchant_id: env.SQUARE_MERCHANT_ID,
     payload_json: "{}", state: "ENQUEUED", attempts: 0, created_at: now, updated_at: now });
   await __test.processQueueMessage({ kind: "square_webhook", event_id: "event-payment-after-refund" }, env);
+  db.webhooks[0].available_at = new Date(Date.now() - 1000).toISOString();
+  await runScheduled(env);
+  assert.ok(queued.some((body) => body.kind === "square_webhook" && body.event_id === "event-refund-first"));
+  assert.equal(db.webhooks[0].state, "ENQUEUED");
   await __test.processQueueMessage({ kind: "square_webhook", event_id: "event-refund-first" }, env);
   assert.equal(db.refundReviews.length, 1); assert.equal(db.claims[0].status, "REDEEMED"); assert.equal(db.claims[0].refund_review_required, 1);
+  assert.equal(db.webhooks[0].available_at, null); assert.equal(db.webhooks[0].payload_json, "{}");
 });
 
 check("source enforces raw webhook signing, no pass analytics, and no email sent to Square", () => {
@@ -999,6 +1218,39 @@ check("source enforces raw webhook signing, no pass analytics, and no email sent
   assert.ok(width > 0 && width <= 400, `mobile barcode width ${width} must fit without cropping`);
   const createBlock = source.slice(source.indexOf("const body = {\n    idempotency_key"), source.indexOf("const created = await squareRequest", source.indexOf("const body = {\n    idempotency_key")));
   assert.doesNotMatch(createBlock, /email/i);
+});
+
+check("reconciliation enqueues new and due events by CAS while preserving future retries", async () => {
+  const db = new MockD1(); const queued = []; const env = baseEnv(db, { send: async (body) => queued.push(body) });
+  env.SQUARE_CONSUMER_ENABLED = "false";
+  env.SQUARE_RECONCILIATION_ENABLED = "true";
+  const now = new Date().toISOString();
+  const past = new Date(Date.now() - 1000).toISOString();
+  const future = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  const newPayment = { id: "PAY_RECON_NEW", status: "COMPLETED", updated_at: "2026-08-17T10:00:00.000Z" };
+  const duePayment = { id: "PAY_RECON_DUE", status: "COMPLETED", updated_at: "2026-08-17T10:01:00.000Z" };
+  const futurePayment = { id: "PAY_RECON_FUTURE", status: "COMPLETED", updated_at: "2026-08-17T10:02:00.000Z" };
+  const dueEventId = await __test.reconciliationEventId("payment", duePayment.id, duePayment.updated_at);
+  const futureEventId = await __test.reconciliationEventId("payment", futurePayment.id, futurePayment.updated_at);
+  const stored = (event_id, object_id, available_at) => ({ event_id, event_type: "payment.updated", object_id,
+    merchant_id: env.SQUARE_MERCHANT_ID, payload_json: JSON.stringify({ object_id }), state: "RETRY", attempts: 1,
+    available_at, last_error_code: "ORDER_NOT_READY", lease_token: null, lease_expires_at: null,
+    created_at: now, updated_at: available_at === future ? now : past });
+  db.webhooks.push(stored(dueEventId, duePayment.id, past), stored(futureEventId, futurePayment.id, future));
+  const state = { reconciliationPayments: [newPayment, duePayment, futurePayment], reconciliationRefunds: [] };
+  installServiceMocks(env, [], state);
+
+  await runScheduled(env);
+
+  const newEventId = await __test.reconciliationEventId("payment", newPayment.id, newPayment.updated_at);
+  const newRow = db.webhooks.find((row) => row.event_id === newEventId);
+  const dueRow = db.webhooks.find((row) => row.event_id === dueEventId);
+  const futureRow = db.webhooks.find((row) => row.event_id === futureEventId);
+  assert.equal(newRow.state, "ENQUEUED"); assert.equal(newRow.available_at, null);
+  assert.equal(dueRow.state, "ENQUEUED"); assert.equal(dueRow.available_at, null);
+  assert.equal(futureRow.state, "RETRY"); assert.equal(futureRow.available_at, future);
+  assert.deepEqual(new Set(queued.map((body) => body.event_id)), new Set([newEventId, dueEventId]));
+  assert.ok(db.connectorState.has("last_reconciliation"));
 });
 
 check("reconciliation identifiers remain Apps-safe and deterministic", async () => {

@@ -4,16 +4,16 @@ This is an isolated Cloudflare Worker for the optional Spartan Nutrition first-d
 
 ## Isolated sandbox configuration
 
-`wrangler.sandbox.toml` is a separate, non-inheriting configuration. It uses the distinct Worker name `spartan-square-connector-sandbox`, Square's exact sandbox API base, sandbox-only D1/Queue/DLQ names and one dedicated `workers.dev` hostname, with no custom route or production zone. Its checked-in values include only non-secret sandbox resource, merchant/location, origin and public Turnstile identifiers. Discount, customer-group and qualifying-item identifiers remain empty. All five feature flags are `false`, canary-only mode is `true`, and the allowlist is empty.
+`wrangler.sandbox.toml` is a separate, non-inheriting configuration. It uses the distinct Worker name `spartan-square-connector-sandbox`, Square's exact sandbox API base, sandbox-only D1/Queue/DLQ names and one dedicated `workers.dev` hostname, with no custom route or production zone. Its checked-in values include only non-secret sandbox resource, merchant/location, origin, public Turnstile, fixed-discount, customer-group and qualifying-variation identifiers. All five feature flags are `false`, canary-only mode is `true`, and the allowlist is empty.
 
-The isolated sandbox Worker and its runtime/preview D1 databases, main Queue, one-day-retention DLQ and managed Turnstile widget were provisioned on August 17, 2026. Both migrations are applied to both databases. The Square sandbox token, Turnstile secret and independently generated hash/session secrets exist only as encrypted Worker secrets; Apps Script and webhook-signature secrets are intentionally absent. Public config reports `enabled:false`, and no production connector route, credential or automation is active.
+The isolated sandbox Worker and its runtime/preview D1 databases, main Queue, one-day-retention DLQ and managed Turnstile widget were provisioned on August 17, 2026. Migrations `0001`, `0002` and `0003` are applied to both databases. Inert Worker version `4df72c7b-bd37-46c9-ae78-9692d4fbff4c` contains the retry scheduler with every feature flag still disabled. The Turnstile secret and independently generated hash/session secrets exist only as encrypted Worker secrets; the stored Square token is revoked and must be replaced before activation, while Apps Script and webhook-signature secrets are intentionally absent. Public config reports `enabled:false`, and no production connector route, credential or automation is active.
 
 The runtime requires `CONNECTOR_ENVIRONMENT` and `SQUARE_ENVIRONMENT` to match. Production accepts only `https://connect.squareup.com`, location `3MDGSXS33HERT`, and the production webhook/origin set. Sandbox accepts only `https://connect.squareupsandbox.com`, a non-placeholder location that is not the production location, and one matching non-placeholder `workers.dev` origin/webhook. A mixed environment remains disabled and Square calls fail closed with `SQUARE_ENVIRONMENT_MISMATCH`.
 
 Remaining sandbox setup, only under the rollout gates:
 
-1. Create sandbox-only copies of the fixed discount, eligible/redeemed groups and qualifying prepared-drink variations. Never copy a production access token, location, discount, group, merchant, customer, payment or order ID.
-2. Configure a separate Apps Script test ledger and sandbox webhook subscription/signature. Secrets are not inherited from `wrangler.toml` and must never be committed.
+1. Create a fresh least-privilege sandbox runtime authorization, replace the revoked encrypted `SQUARE_ACCESS_TOKEN`, and reverify the already-created fixed discount, eligible/redeemed groups and qualifying Tea/Shake variations. Never copy a production access token, location, discount, group, merchant, customer, payment or order ID.
+2. Finish the separate Apps Script test ledger and configure the sandbox webhook subscription/signature. Secrets are not inherited from `wrangler.toml` and must never be committed.
 3. Run the synthetic API, Queue, webhook, recovery and failure matrix with all public features still off. Record exact evidence before adding one pre-seeded owner canary.
 4. Re-run `node scripts/validate-square-connector.mjs` and the external acceptance checks after every configuration or deployment change. Do not add a `spartandrink.com` route or zone.
 
@@ -62,7 +62,7 @@ Private Apps Script contract: `spartan-square-connector-v1-2026-08-17`
 - Webhooks use the untouched raw body. Verification is Base64 HMAC-SHA256 over the exact configured notification URL followed by that raw body. There is intentionally no Origin check on the webhook route.
 - Subscribe the endpoint to exactly `payment.created`, `payment.updated`, `refund.created`, and `refund.updated`; every accepted event is re-fetched from Square before a ledger decision.
 - A webhook receives `200` only after signature verification, a D1 idempotency insert, and durable Queue enqueue. Queue failures return a retryable error to Square.
-- Webhook and outbox consumers acquire unique, timestamped D1 leases with compare-and-set updates. Terminal/retry updates require the same lease token. The scheduled job reclaims only expired `PROCESSING` leases, labels them `STALE_PROCESSING_LEASE`, and re-enqueues them from D1 so a crash after lease acquisition cannot strand work forever.
+- Webhook and outbox consumers acquire unique, timestamped D1 leases with compare-and-set updates. Terminal/retry updates require the same lease token. A transient webhook failure records its next due time with bounded exponential backoff. The scheduled job rescues verified receipts still `PENDING`, reclaims expired `PROCESSING` leases, re-enqueues every due `RETRY`, and refreshes `ENQUEUED` deliveries that have remained untouched for 30 minutes. Queue sends happen before the compare-and-set transition, so a send failure cannot falsely mark work delivered; duplicates remain safe under the existing event, lease, redemption, purchase, and outbox idempotency controls.
 - Apps transport/service failures and bounded `offer_prepare_failed`, `offer_finalize_failed`, or `event_commit_failed` responses are classified as transient. Offer preparation/finalization safely returns temporary-unavailable so the same submission can retry; event commits use Queue/outbox backoff up to the attempt cap. Authentication, disabled/misconfigured journey, invalid payload/contract, and ledger-drift responses remain permanent failures requiring review.
 
 ## Square invariants
@@ -91,7 +91,7 @@ D1 commits the qualifying purchase, redemption, claim state, webhook state, and 
 
 ## Required bindings and secrets
 
-Create the D1 database and Queue/DLQ, replace the D1 placeholder in `wrangler.toml`, and apply every migration in numeric order (`0001_initial.sql`, then `0002_processing_leases.sql`). Never place secrets in `[vars]`.
+Create the D1 database and Queue/DLQ, replace the D1 placeholder in `wrangler.toml`, and apply every migration in numeric order: `0001_initial.sql`, `0002_processing_leases.sql`, then `0003_webhook_retry_schedule.sql`. Never place secrets in `[vars]`.
 
 Required Worker secrets:
 
@@ -120,7 +120,7 @@ The Apps Script project must have `SQUARE_JOURNEY_ENABLED=true` and matching loc
 ## Production release order after sandbox signoff
 
 1. Run `node scripts/validate-square-connector.mjs` from the repository root.
-2. Create bindings, set secrets, apply both D1 migrations in order, and deploy with all flags false.
+2. Create bindings, set secrets, apply all three D1 migrations in order, and deploy with all flags false.
 3. Confirm `/api/square/config` reports `enabled:false` and the existing coupon flow is unchanged.
 4. Register the exact webhook URL in Square and verify its signature settings while every write/consumer flag remains false.
 5. Before the owner submits the coupon, generate one valid `square-canary-<date>-<random-uuid>` submission ID, put only that exact ID in `SQUARE_CANARY_SUBMISSION_IDS`, and leave `SQUARE_CANARY_ONLY=true`. In that owner-controlled browser tab, set the standard `spartanPendingCouponSubmission` `sessionStorage` record to `{"id":"<the exact allowlisted ID>","createdAt":<current epoch milliseconds>}` immediately before submit; `prepareSubmission()` will use it. Never place it in the URL, analytics or `localStorage`. With an empty allowlist, nobody is eligible.
@@ -130,7 +130,7 @@ The Apps Script project must have `SQUARE_JOURNEY_ENABLED=true` and matching loc
 
 ## Recovery operations
 
-D1 is the durable delivery ledger. The five-minute scheduled job recovers expired processing leases and drains ready outbox rows; it does not expose a public or private replay endpoint. Configure external owner alerts for `REJECTED`, `DEAD`, repeated `STALE_PROCESSING_LEASE`, reconciliation overflow, and Queue/DLQ depth before activation.
+D1 is the durable delivery ledger. The five-minute scheduled job rescues verified webhook receipts still `PENDING`, recovers expired processing leases, sends due webhook retries, refreshes webhook deliveries still `ENQUEUED` after 30 minutes, and drains ready outbox rows; it does not expose a public or private replay endpoint. Retry attempt 1 waits 30 seconds, doubles through attempt 7, and caps at one hour from attempt 8 onward. A migrated `RETRY` row with no due time is treated as immediately due. Configure external owner alerts for repeated `PENDING` or stale `ENQUEUED` recovery, `REJECTED`, `DEAD`, repeated `STALE_PROCESSING_LEASE`, reconciliation overflow, and Queue/DLQ depth before activation.
 
 Cloudflare's `spartan-square-connector-dlq` must be inspected by an authorized owner. After the underlying error is understood and fixed, replay messages using Cloudflare's authenticated Queue tooling and verify the matching D1 event/outbox row reaches its expected terminal state. Do not delete DLQ messages, reset D1 attempts, or manually change ledger state merely to silence an alert. The connector's refund path remains review-only during recovery and never automatically reissues the offer.
 
