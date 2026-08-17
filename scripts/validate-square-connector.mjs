@@ -5,6 +5,7 @@ import worker, { __test } from "../square-worker/src/index.mjs";
 
 const ROOT = new URL("../", import.meta.url);
 const wrangler = readFileSync(new URL("square-worker/wrangler.toml", ROOT), "utf8");
+const sandboxWrangler = readFileSync(new URL("square-worker/wrangler.sandbox.toml", ROOT), "utf8");
 const migration = readFileSync(new URL("square-worker/migrations/0001_initial.sql", ROOT), "utf8");
 const leaseMigration = readFileSync(new URL("square-worker/migrations/0002_processing_leases.sql", ROOT), "utf8");
 const source = readFileSync(new URL("square-worker/src/index.mjs", ROOT), "utf8");
@@ -279,8 +280,10 @@ function baseEnv(db, queue) {
   return {
     DB: db,
     SQUARE_QUEUE: queue,
+    CONNECTOR_ENVIRONMENT: "production",
     ALLOWED_ORIGINS: "https://spartandrink.com,https://www.spartandrink.com",
-    SQUARE_API_BASE_URL: "https://square.test",
+    SQUARE_ENVIRONMENT: "production",
+    SQUARE_API_BASE_URL: "https://connect.squareup.com",
     SQUARE_API_VERSION: "2026-07-15",
     SQUARE_LOCATION_ID: "3MDGSXS33HERT",
     SQUARE_DISCOUNT_CATALOG_ID: "DISCOUNT_50",
@@ -406,6 +409,9 @@ check("static configuration is default-off and pinned", () => {
   for (const flag of ["SQUARE_OFFER_ENABLED", "SQUARE_WEBHOOK_ENABLED", "SQUARE_PASS_ENABLED", "SQUARE_CONSUMER_ENABLED", "SQUARE_RECONCILIATION_ENABLED"]) {
     assert.match(wrangler, new RegExp(`${flag} = "false"`));
   }
+  assert.match(wrangler, /CONNECTOR_ENVIRONMENT = "production"/);
+  assert.match(wrangler, /SQUARE_ENVIRONMENT = "production"/);
+  assert.match(wrangler, /SQUARE_API_BASE_URL = "https:\/\/connect\.squareup\.com"/);
   assert.match(wrangler, /SQUARE_API_VERSION = "2026-07-15"/);
   assert.match(wrangler, /SQUARE_LOCATION_ID = "3MDGSXS33HERT"/);
   assert.match(wrangler, /SQUARE_CANARY_ONLY = "true"/);
@@ -419,6 +425,55 @@ check("static configuration is default-off and pinned", () => {
   assert.match(leaseMigration, /ALTER TABLE webhook_events ADD COLUMN lease_token TEXT/);
   assert.match(leaseMigration, /ALTER TABLE square_outbox ADD COLUMN lease_expires_at TEXT/);
   assert.doesNotMatch(wrangler, /SQUARE_ACCESS_TOKEN\s*=/);
+});
+
+check("sandbox configuration is isolated, placeholder-gated, and default-off", async () => {
+  assert.match(sandboxWrangler, /^name = "spartan-square-connector-sandbox"/m);
+  assert.match(sandboxWrangler, /^workers_dev = true$/m);
+  assert.match(sandboxWrangler, /CONNECTOR_ENVIRONMENT = "sandbox"/);
+  assert.match(sandboxWrangler, /SQUARE_ENVIRONMENT = "sandbox"/);
+  assert.match(sandboxWrangler, /SQUARE_API_BASE_URL = "https:\/\/connect\.squareupsandbox\.com"/);
+  assert.match(sandboxWrangler, /database_name = "spartan-square-connector-sandbox"/);
+  assert.match(sandboxWrangler, /queue = "spartan-square-connector-sandbox"/);
+  assert.match(sandboxWrangler, /dead_letter_queue = "spartan-square-connector-sandbox-dlq"/);
+  assert.match(sandboxWrangler, /SQUARE_CANARY_ONLY = "true"/);
+  assert.match(sandboxWrangler, /SQUARE_CANARY_SUBMISSION_IDS = ""/);
+  for (const flag of ["SQUARE_OFFER_ENABLED", "SQUARE_WEBHOOK_ENABLED", "SQUARE_PASS_ENABLED", "SQUARE_CONSUMER_ENABLED", "SQUARE_RECONCILIATION_ENABLED"]) {
+    assert.match(sandboxWrangler, new RegExp(`${flag} = "false"`));
+  }
+  const readValue = (text, key) => text.match(new RegExp(`^${key} = "([^"]*)"$`, "m"))?.[1] || "";
+  const sandboxLocation = readValue(sandboxWrangler, "SQUARE_LOCATION_ID");
+  const sandboxDatabaseId = readValue(sandboxWrangler, "database_id");
+  const sandboxPreviewDatabaseId = readValue(sandboxWrangler, "preview_database_id");
+  const productionDatabaseId = readValue(wrangler, "database_id");
+  const sandboxOrigin = readValue(sandboxWrangler, "ALLOWED_ORIGINS");
+  const sandboxWebhook = new URL(readValue(sandboxWrangler, "SQUARE_WEBHOOK_NOTIFICATION_URL"));
+  assert.notEqual(sandboxLocation, "3MDGSXS33HERT"); assert.ok(sandboxLocation.length > 5);
+  for (const id of [sandboxDatabaseId, sandboxPreviewDatabaseId]) {
+    assert.ok(/^REPLACE_WITH_SANDBOX_|^[a-f0-9-]{16,}$/i.test(id), `invalid sandbox D1 placeholder/id: ${id}`);
+    assert.notEqual(id, productionDatabaseId);
+  }
+  assert.equal(sandboxWebhook.origin, sandboxOrigin);
+  assert.ok(sandboxWebhook.hostname.endsWith(".workers.dev"));
+  assert.equal(sandboxWebhook.pathname, "/api/square/webhook");
+  assert.doesNotMatch(sandboxWrangler, /connect\.squareup\.com|3MDGSXS33HERT|spartandrink\.com|zone_name|^routes\s*=/m);
+  assert.doesNotMatch(sandboxWrangler, /SQUARE_ACCESS_TOKEN\s*=|SQUARE_WEBHOOK_SIGNATURE_KEY\s*=|TURNSTILE_SECRET_KEY\s*=/);
+
+  const db = new MockD1(); const env = baseEnv(db, { send: async () => {} });
+  env.CONNECTOR_ENVIRONMENT = "sandbox"; env.SQUARE_ENVIRONMENT = "sandbox";
+  let response = await worker.fetch(new Request("https://sandbox-test.workers.dev/api/square/config"), env, {});
+  assert.equal((await response.json()).enabled, false, "sandbox mode rejects the production API base");
+  env.SQUARE_API_BASE_URL = "https://connect.squareupsandbox.com";
+  response = await worker.fetch(new Request("https://sandbox-test.workers.dev/api/square/config"), env, {});
+  assert.equal((await response.json()).enabled, false, "sandbox mode rejects the production location ID");
+  env.SQUARE_LOCATION_ID = "SANDBOX_LOCATION_1";
+  env.SQUARE_WEBHOOK_NOTIFICATION_URL = "https://sandbox-test.workers.dev/api/square/webhook";
+  env.ALLOWED_ORIGINS = "https://sandbox-test.workers.dev";
+  response = await worker.fetch(new Request("https://sandbox-test.workers.dev/api/square/config"), env, {});
+  assert.equal((await response.json()).enabled, true, "a fully sandbox-only runtime may be enabled deliberately");
+  env.SQUARE_API_BASE_URL = "https://connect.squareup.com";
+  response = await worker.fetch(new Request("https://sandbox-test.workers.dev/api/square/config"), env, {});
+  assert.equal((await response.json()).enabled, false, "sandbox can never fall back to production Square");
 });
 
 check("config has the exact browser contract and remains disabled by default", async () => {

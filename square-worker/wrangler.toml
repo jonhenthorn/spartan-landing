@@ -9,7 +9,9 @@ routes = [
 ]
 
 [vars]
+CONNECTOR_ENVIRONMENT = "production"
 ALLOWED_ORIGINS = "https://spartandrink.com,https://www.spartandrink.com"
+SQUARE_ENVIRONMENT = "production"
 SQUARE_API_BASE_URL = "https://connect.squareup.com"
 SQUARE_API_VERSION = "2026-07-15"
 SQUARE_LOCATION_ID = "3MDGSXS33HERT"

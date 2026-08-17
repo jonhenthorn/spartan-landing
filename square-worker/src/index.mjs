@@ -8,6 +8,9 @@ const MAX_JSON_BYTES = 8 * 1024;
 const MAX_WEBHOOK_BYTES = 256 * 1024;
 const DEFAULT_PROCESSING_LEASE_SECONDS = 900;
 const DEFAULT_PROCESSING_RECOVERY_LIMIT = 25;
+const PRODUCTION_SQUARE_API_BASE = "https://connect.squareup.com";
+const SANDBOX_SQUARE_API_BASE = "https://connect.squareupsandbox.com";
+const PRODUCTION_LOCATION_ID = "3MDGSXS33HERT";
 const encoder = new TextEncoder();
 
 export default {
@@ -1270,7 +1273,8 @@ function rejectEmailFields(value) {
 async function squareRequest(method, path, body, env) {
   if (!env.SQUARE_ACCESS_TOKEN) throw new ConnectorError("SQUARE_NOT_CONFIGURED", 503);
   if (env.SQUARE_API_VERSION !== EXPECTED_SQUARE_VERSION) throw new ConnectorError("SQUARE_VERSION_MISMATCH", 503);
-  const base = String(env.SQUARE_API_BASE_URL || "https://connect.squareup.com").replace(/\/$/, "");
+  const base = configuredSquareApiBase(env);
+  if (!base) throw new ConnectorError("SQUARE_ENVIRONMENT_MISMATCH", 503);
   const headers = {
     Authorization: `Bearer ${env.SQUARE_ACCESS_TOKEN}`,
     "Square-Version": EXPECTED_SQUARE_VERSION,
@@ -1341,7 +1345,7 @@ function exactEventEnvelope(event) {
 function offerConfigured(env) {
   return flag(env.SQUARE_OFFER_ENABLED) && flag(env.SQUARE_PASS_ENABLED) &&
     flag(env.SQUARE_WEBHOOK_ENABLED) && flag(env.SQUARE_CONSUMER_ENABLED) && webhookConfigured(env) && Boolean(
-    env.DB && env.SQUARE_ACCESS_TOKEN && env.SQUARE_API_VERSION === EXPECTED_SQUARE_VERSION &&
+    connectorEnvironmentConfigured(env) && env.DB && env.SQUARE_ACCESS_TOKEN && env.SQUARE_API_VERSION === EXPECTED_SQUARE_VERSION &&
     env.SQUARE_LOCATION_ID && env.SQUARE_DISCOUNT_CATALOG_ID && env.SQUARE_ELIGIBLE_GROUP_ID &&
     csvSet(env.SQUARE_QUALIFYING_VARIATION_IDS).size > 0 && env.TURNSTILE_SITE_KEY &&
     env.TURNSTILE_SECRET_KEY && secretReady(env.D1_HASH_SECRET) && secretReady(env.PASS_SESSION_SECRET) &&
@@ -1355,11 +1359,56 @@ function canaryEligible(submissionId, env) {
 }
 
 function webhookConfigured(env) {
-  return Boolean(env.DB && env.SQUARE_QUEUE && env.SQUARE_ACCESS_TOKEN &&
+  return Boolean(connectorEnvironmentConfigured(env) && env.DB && env.SQUARE_QUEUE && env.SQUARE_ACCESS_TOKEN &&
     env.SQUARE_API_VERSION === EXPECTED_SQUARE_VERSION && env.SQUARE_LOCATION_ID &&
     env.SQUARE_DISCOUNT_CATALOG_ID && env.SQUARE_ELIGIBLE_GROUP_ID &&
     csvSet(env.SQUARE_QUALIFYING_VARIATION_IDS).size > 0 && env.SQUARE_MERCHANT_ID &&
     env.SQUARE_WEBHOOK_SIGNATURE_KEY && env.SQUARE_WEBHOOK_NOTIFICATION_URL);
+}
+
+function configuredSquareApiBase(env) {
+  const connectorEnvironment = String(env.CONNECTOR_ENVIRONMENT || "").trim().toLowerCase();
+  const squareEnvironment = String(env.SQUARE_ENVIRONMENT || "").trim().toLowerCase();
+  const base = String(env.SQUARE_API_BASE_URL || "").replace(/\/$/, "");
+  const locationId = String(env.SQUARE_LOCATION_ID || "");
+  if (connectorEnvironment !== squareEnvironment) return "";
+  if (squareEnvironment === "production") {
+    return base === PRODUCTION_SQUARE_API_BASE && locationId === PRODUCTION_LOCATION_ID ? base : "";
+  }
+  if (squareEnvironment === "sandbox") {
+    return base === SANDBOX_SQUARE_API_BASE && locationId !== PRODUCTION_LOCATION_ID &&
+      locationId.length > 0 && !isPlaceholder(locationId) ? base : "";
+  }
+  return "";
+}
+
+function connectorEnvironmentConfigured(env) {
+  const base = configuredSquareApiBase(env);
+  if (!base) return false;
+  const mode = String(env.CONNECTOR_ENVIRONMENT || "").trim().toLowerCase();
+  const notification = safeUrl(env.SQUARE_WEBHOOK_NOTIFICATION_URL);
+  if (!notification || notification.protocol !== "https:" || notification.pathname !== "/api/square/webhook" ||
+      notification.search || notification.hash) return false;
+  const origins = csvSet(env.ALLOWED_ORIGINS);
+  if (mode === "production") {
+    return notification.href === "https://spartandrink.com/api/square/webhook" &&
+      origins.has("https://spartandrink.com") && origins.has("https://www.spartandrink.com") && origins.size === 2;
+  }
+  if (mode === "sandbox") {
+    const hostname = notification.hostname.toLowerCase();
+    return hostname.endsWith(".workers.dev") && !hostname.startsWith("replace-with-") &&
+      notification.origin !== "https://spartandrink.com" && notification.origin !== "https://www.spartandrink.com" &&
+      origins.size === 1 && origins.has(notification.origin);
+  }
+  return false;
+}
+
+function safeUrl(value) {
+  try { return new URL(String(value || "")); } catch { return null; }
+}
+
+function isPlaceholder(value) {
+  return /^REPLACE_WITH_/i.test(String(value || ""));
 }
 
 function originAllowed(origin, env, url) {
