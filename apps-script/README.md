@@ -76,6 +76,8 @@ Both Sheet properties are mandatory. There is no active-spreadsheet or first-tab
 
 `setupJourneyLedgerSheets()` is the corresponding repeat-safe initializer. It uses the same required `SPREADSHEET_ID` and `SHEET_NAME`, validates the historic lead-tab contract read-only, and then creates or initializes only the two reviewed ledger tabs. It never calls `ensureHeaders_()`, adds columns to the lead tab, appends a contact/event, changes consent/provider state, or changes spreadsheet sharing.
 
+`repairJourneyLedgerPlainTextFormatting()` is the explicit owner-run recovery for an initialized ledger whose configured identifier cells were changed to automatic formatting. It preflights both exact schemas and rejects formulas or header drift before making any change. It applies only the plain-text number format, performs no value writes or row appends, never edits the lead tab and is a verified no-op when formatting is already correct. Run `diagnoseSquareJourneyConfiguration()` afterward and require `ledger_ready=true` before re-enabling connector traffic.
+
 Safety behavior:
 
 - Both tab states pass preflight before either missing tab is created.

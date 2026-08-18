@@ -12,12 +12,14 @@ const WEBHOOK_ENQUEUED_STALE_SECONDS = 1800;
 const PRODUCTION_SQUARE_API_BASE = "https://connect.squareup.com";
 const SANDBOX_SQUARE_API_BASE = "https://connect.squareupsandbox.com";
 const PRODUCTION_LOCATION_ID = "3MDGSXS33HERT";
+const SANDBOX_OWNER_HARNESS_PATH = "/sandbox/owner-offer-test";
 const encoder = new TextEncoder();
 
 export default {
   async fetch(request, env, ctx) {
     try {
       const url = new URL(request.url);
+      if (url.pathname === SANDBOX_OWNER_HARNESS_PATH) return sandboxOwnerHarnessRoute(request, env);
       if (url.pathname === "/api/square/config") return await configRoute(request, env);
       if (url.pathname === "/api/square/offer") return await offerRoute(request, env);
       if (url.pathname === "/api/square/webhook") return await webhookRoute(request, env);
@@ -52,6 +54,50 @@ export default {
     if (env.DB) ctx.waitUntil(cleanupExpiredPasses(env));
   },
 };
+
+function sandboxOwnerHarnessRoute(request, env) {
+  const url = new URL(request.url);
+  if (!sandboxOwnerHarnessAvailable(url, env) || url.search) {
+    return new Response("Not found", { status: 404, headers: securityHeaders() });
+  }
+  if (request.method !== "GET") return methodNotAllowed("GET");
+  const nonce = randomToken(18);
+  return new Response(renderSandboxOwnerHarness(env, nonce), {
+    status: 200,
+    headers: sandboxHarnessSecurityHeaders(nonce, { "Content-Type": "text/html; charset=utf-8" }),
+  });
+}
+
+function sandboxOwnerHarnessAvailable(url, env) {
+  const siteKey = String(env.TURNSTILE_SITE_KEY || "");
+  const action = String(env.TURNSTILE_EXPECTED_ACTION || "");
+  const canaries = csvSet(env.SQUARE_CANARY_SUBMISSION_IDS);
+  return flag(env.SQUARE_SANDBOX_TEST_HARNESS_ENABLED) &&
+    String(env.CONNECTOR_ENVIRONMENT || "").trim().toLowerCase() === "sandbox" &&
+    String(env.SQUARE_ENVIRONMENT || "").trim().toLowerCase() === "sandbox" &&
+    configuredSquareApiBase(env) === SANDBOX_SQUARE_API_BASE && connectorEnvironmentConfigured(env) &&
+    url.protocol === "https:" && url.hostname.toLowerCase().endsWith(".workers.dev") &&
+    csvSet(env.ALLOWED_ORIGINS).size === 1 && csvSet(env.ALLOWED_ORIGINS).has(url.origin) &&
+    flag(env.SQUARE_CANARY_ONLY) && canaries.size === 1 &&
+    /^[A-Za-z0-9_-]{20,128}$/.test(siteKey) && /^[A-Za-z0-9_-]{1,32}$/.test(action);
+}
+
+function renderSandboxOwnerHarness(env, nonce) {
+  const siteKey = JSON.stringify(String(env.TURNSTILE_SITE_KEY)).replace(/</g, "\\u003c");
+  const action = JSON.stringify(String(env.TURNSTILE_EXPECTED_ACTION)).replace(/</g, "\\u003c");
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow,noarchive"><title>Spartan sandbox owner offer test</title>
+<style>html{color-scheme:light}*{box-sizing:border-box}body{margin:0;background:#f4f1e9;color:#14231b;font-family:system-ui,-apple-system,sans-serif;line-height:1.45}.wrap{margin:0 auto;max-width:700px;padding:24px 16px 48px}.warning{background:#fff2c7;border:2px solid #9b6500;border-radius:14px;margin-bottom:18px;padding:16px}.warning strong{display:block;letter-spacing:.08em;margin-bottom:6px;text-transform:uppercase}.card{background:#fff;border:1px solid #ccd5cf;border-radius:18px;box-shadow:0 10px 28px #0001;padding:clamp(18px,4vw,28px)}h1{font-size:clamp(1.55rem,5vw,2.2rem);line-height:1.15;margin:0 0 10px}p{margin:0 0 16px}.field{display:block;font-weight:750;margin:16px 0 6px}input[type=text]{border:1px solid #758078;border-radius:9px;font:inherit;padding:12px;width:100%}.confirm{align-items:flex-start;display:flex;gap:10px;margin:20px 0}.confirm input{margin-top:4px}.challenge{min-height:70px;margin:18px 0}.actions{align-items:center;display:flex;flex-wrap:wrap;gap:12px}button,.pass-link{background:#174c32;border:0;border-radius:999px;color:#fff;cursor:pointer;font:inherit;font-weight:800;padding:12px 20px;text-decoration:none}button:disabled{cursor:not-allowed;opacity:.55}.pass-link[hidden]{display:none}.status{background:#eef2ef;border-radius:10px;margin-top:18px;min-height:48px;padding:12px}.fine{color:#526057;font-size:.88rem;margin-top:20px}</style>
+<script nonce="${nonce}">(() => { const siteKey=${siteKey}; const action=${action}; let widgetId=null; let token="";
+const byId=(id)=>document.getElementById(id); const setStatus=(message)=>{byId("status").textContent=message;};
+const resetChallenge=()=>{token="";byId("submit").disabled=true;if(widgetId!==null&&window.turnstile)window.turnstile.reset(widgetId);};
+const renderChallenge=()=>{widgetId=window.turnstile.render("#challenge",{sitekey:siteKey,action,callback:(value)=>{token=value;byId("submit").disabled=false;setStatus("Challenge complete. Ready to submit the synthetic canary.");},"expired-callback":()=>{token="";byId("submit").disabled=true;setStatus("Challenge expired. Complete it again.");},"error-callback":()=>{token="";byId("submit").disabled=true;setStatus("Challenge could not load. Refresh and try again.");}});};
+window.spartanSandboxTurnstileReady=()=>{if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",renderChallenge,{once:true});else renderChallenge();};
+window.addEventListener("DOMContentLoaded",()=>{byId("submit").addEventListener("click",async()=>{const submissionId=byId("submission_id").value.trim();const couponCode=byId("coupon_code").value.trim().toUpperCase();if(!/^[A-Za-z0-9][A-Za-z0-9-]{7,79}$/.test(submissionId)){setStatus("Enter the exact synthetic canary submission ID.");return;}if(!/^[A-Z0-9-]{2,40}$/.test(couponCode)){setStatus("Enter the exact synthetic canary coupon code.");return;}if(!byId("confirm").checked){setStatus("Confirm that only the synthetic sandbox record will be used.");return;}if(!token){setStatus("Complete the challenge first.");return;}byId("submit").disabled=true;setStatus("Submitting to the sandbox connector…");try{const response=await fetch("/api/square/offer",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({submission_id:submissionId,coupon_code:couponCode,square_profile_consent:"yes",turnstile_token:token})});const body=await response.json();if(!response.ok||body.ok!==true){const messages={OFFER_DISABLED:"The sandbox connector is still disabled.",OFFER_NOT_AVAILABLE:"That submission is not the configured canary.",TURNSTILE_FAILED:"Challenge validation failed. Complete a fresh challenge.",CLAIM_COUPON_MISMATCH:"The coupon code does not match the canary ledger.",OFFER_TEMPORARILY_UNAVAILABLE:"A sandbox dependency is unavailable. Nothing was activated in production."};setStatus(messages[body.error_code]||"The sandbox request was rejected.");byId("pass").hidden=true;return;}setStatus(body.pass_available?"Sandbox offer prepared. Open the checkout code to finish the owner test.":"Sandbox offer prepared, but no checkout code was issued.");byId("pass").hidden=!body.pass_available;}catch{setStatus("The sandbox request could not be completed. No production request was made.");byId("pass").hidden=true;}finally{resetChallenge();}});});})();</script>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=spartanSandboxTurnstileReady&render=explicit" async defer></script>
+</head><body><main class="wrap"><section class="warning"><strong>Sandbox owner test only</strong>Never enter a real customer’s information. Use only the pre-seeded synthetic canary record. This page can create or update sandbox test data; it cannot reach production.</section><section class="card"><h1>First-visit offer canary</h1><p>Enter the two synthetic values from the private test ledger. They are sent in the request body, never in the page URL.</p><label class="field" for="submission_id">Synthetic submission ID</label><input id="submission_id" name="submission_id" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="80"><label class="field" for="coupon_code">Synthetic coupon code</label><input id="coupon_code" name="coupon_code" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="40"><label class="confirm"><input id="confirm" type="checkbox"><span>I confirm I am using only the pre-seeded synthetic owner-test record and understand this may create a Square sandbox profile and offer claim.</span></label><div id="challenge" class="challenge"></div><div class="actions"><button id="submit" type="button" disabled>Submit sandbox offer</button><a id="pass" class="pass-link" href="/api/square/pass" hidden>Open checkout code</a></div><div id="status" class="status" role="status" aria-live="polite">Complete the challenge, then submit the synthetic canary.</div><p class="fine">No analytics are loaded. No customer name, phone number, or email is collected on this page.</p></section></main></body></html>`;
+}
 
 async function configRoute(request, env) {
   const url = new URL(request.url);
@@ -1609,6 +1655,14 @@ function securityHeaders(extra = {}) {
 function passSecurityHeaders(extra = {}) {
   return securityHeaders({
     "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; form-action 'none'; base-uri 'none'",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), interest-cohort=()",
+    ...extra,
+  });
+}
+
+function sandboxHarnessSecurityHeaders(nonce, extra = {}) {
+  return securityHeaders({
+    "Content-Security-Policy": `default-src 'none'; script-src 'nonce-${nonce}' https://challenges.cloudflare.com; style-src 'unsafe-inline'; frame-src https://challenges.cloudflare.com; connect-src 'self' https://challenges.cloudflare.com; img-src 'self' data: https://challenges.cloudflare.com; frame-ancestors 'none'; form-action 'none'; base-uri 'none'`,
     "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), interest-cohort=()",
     ...extra,
   });

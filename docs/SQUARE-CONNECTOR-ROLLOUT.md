@@ -2,7 +2,7 @@
 
 Last reviewed: August 17, 2026
 
-Status: **Release candidate with an isolated, inert sandbox deployment; not deployed with production credentials or active for customers.** Every sandbox feature flag remains off, canary-only mode is on and the allowlist is empty. This document does not authorize production activation, a sandbox customer/group write, public scan-code display or live ledger event.
+Status: **The core isolated sandbox path is proven and has been returned to default-off; production remains inactive.** One synthetic browser offer, Code128 checkout profile code, qualifying redemption, group transition and full-refund review succeeded in sandbox. The final live sandbox has every automation and owner-harness flag off, an empty canary allowlist, a disabled webhook subscription and Apps journey processing off. This is not production approval: the remaining recovery, monitoring, backup/restore and production owner-canary gates below are incomplete.
 
 ## Outcome and non-negotiable fallback
 
@@ -12,7 +12,7 @@ The connector may reduce missed first-visit discounts by connecting a confirmed 
 Website confirms and displays coupon
 → customer may separately choose Connect my coupon to Square
 → connector searches or creates the minimum Square profile
-→ customer may receive an opaque QR/reference
+→ customer may receive an opaque Code128 checkout profile code
 → staff attaches the customer and applies the fixed discount to one quantity-one drink line
 → verified Square events update the append-only journey ledger
 ```
@@ -26,18 +26,18 @@ If the customer skips the action, the connector is unavailable or any match is a
 - Record the choice, exact language/version and UTC timestamp with the original claim. It is not email/SMS marketing consent and cannot alter Brevo consent, list membership, unsubscribe or suppression state.
 - Do not Square-sync filtered, duplicate, remembered or legacy claims automatically. A conflicting phone/email or multiple Square matches enters an exception state; never match by name alone.
 - The browser may submit claim data, the reviewed Square choice and an abuse-control token. It may not supply Square customer, group, merchant, location or discount IDs; eligibility/redemption state; amounts; or provider actions.
-- A QR/reference must be random and opaque. It must not contain PII, a Square customer ID, website submission ID, coupon code or an identifier-bearing URL. Treat it as an identifier, not proof of eligibility.
-- Do not store a redeemable QR/reference in analytics, logs or the current coupon `localStorage`. A connector result page must use `no-store`, a strict content-security policy and no Meta/GA scripts.
+- A Code128 checkout reference must be opaque and cryptographically derived from an unpredictable internal claim identifier. It must not contain PII, a Square customer ID, website submission ID, coupon code or an identifier-bearing URL. Treat it as an identifier, not proof of eligibility.
+- Do not store a redeemable barcode/reference in analytics, logs or the current coupon `localStorage`. A connector result page must use `no-store`, a strict content-security policy and no Meta/GA scripts.
 
 ## Staff redemption SOP
 
-1. Scan the approved QR or search Square by phone and attach the intended customer before payment.
-2. Confirm the displayed profile is the intended customer; a QR alone is not authorization.
+1. Scan the approved Code128 checkout profile code or search Square by phone and attach the intended customer before payment.
+2. Confirm the displayed profile is the intended customer; a barcode alone is not authorization.
 3. Open the selected eligible prepared-drink line.
 4. Confirm the line quantity is **1**. If identical drinks share one quantity-two line, split the eligible drink to its own line or transaction.
 5. Apply `50% Off First Drink — Enter 50%` from that drink line. Do not use the sale-level **Add discount** control.
 6. Confirm exactly one drink is discounted 50%, every other item remains full price and no other discount is stacked.
-7. Complete payment with the customer attached. Do not mark redemption from a screenshot, QR scan or open cart alone.
+7. Complete payment with the customer attached. Do not mark redemption from a screenshot, barcode scan or open cart alone.
 
 ## Separate Cloudflare service
 
@@ -72,7 +72,7 @@ If scoped OAuth is used, the implementation needs `CUSTOMERS_READ`, `CUSTOMERS_W
 
 Send Square only the consented customer name, canonical mobile number and opaque reference. Do not send email, discovery answer, UTM/referrer fields, consent wording, Brevo status or notes.
 
-D1 stores only internal/provider IDs, status, timestamps, amount/currency and audit references needed for the journey. It does not duplicate names, phones or emails and never stores card data, tender details or receipt URLs. Logs contain counts, bounded error codes and trace IDs—not bodies, authorization headers, QR values or customer/provider IDs.
+D1 stores only internal/provider IDs, status, timestamps, amount/currency and audit references needed for the journey. It does not duplicate names, phones or emails and never stores card data, tender details or receipt URLs. Logs contain counts, bounded error codes and trace IDs—not bodies, authorization headers, barcode/reference values or customer/provider IDs.
 
 Phase 1 uses these operating defaults. Changing them requires a dated decision before production activation:
 
@@ -122,14 +122,25 @@ An empty canary allowlist exposes the option to nobody. Reward automation is not
 
 ### 2. Sandbox gate
 
-- Separate sandbox credentials, IDs, database and queues are proven incapable of reaching production.
-- The checked-in workers.dev sandbox is intentionally an API, Queue, webhook and recovery harness. It does not serve the public website frontend, and same-origin controls correctly prevent the production page from calling it. Full real-browser signup/pass proof therefore occurs only in the one-owner production canary unless a separate same-origin sandbox site and test Apps ledger are built first; do not weaken origin or cookie controls to bridge the two.
-- New, duplicate, filtered, declined-consent, ambiguous-match and provider-outage cases return the correct bounded state.
-- Exact claim and webhook retries create one customer/link/event; forged signature, altered body/URL and unrecognized merchant/location create none.
-- Out-of-order payment/refund events, customer-created/group-failed and ledger-committed/group-removal-failed cases recover through idempotent retry or the exception queue.
-- Logs, analytics and browser responses contain no PII, QR value, provider ID or secret.
-- Credential replacement/revocation, backup/restore, queue retry and dead-letter recovery are demonstrated. If the connector later migrates to OAuth, refresh and revoke behavior must also be demonstrated.
-- A deliberately interrupted Queue job recovers from `PROCESSING`; a dead-letter item can be inspected and replayed without duplicating an event.
+Verified in the isolated sandbox on August 17, 2026:
+
+- Separate sandbox credentials, merchant/location and catalog IDs, D1 databases, Queue/DLQ, Apps project and workers.dev hostname were used. No production route, credential, customer, order, Apps deployment or website flow was changed.
+- `/sandbox/owner-offer-test` provided a same-origin owner harness only when the environment was sandbox, its separate default-off flag was enabled, the exact workers.dev origin matched and one canary was allowlisted. Production returns `404`; the harness contains no private fixture value, PII, analytics or identifier-bearing URL and used the real host-scoped Turnstile action.
+- One synthetic confirmed claim created exactly one Square profile/link, joined the Eligible group and displayed the non-PII Code128 checkout profile code. The established website coupon remained independent.
+- A real signed webhook safely ignored one unrelated $2 sandbox order with no linked customer. A separate qualifying order applied one $5 discount to one quantity-one $10 Tea while leaving the $2 Add-On full price. Its exact $7 completed payment created one purchase and one redemption, removed Eligible and added Redeemed.
+- A full $7 refund created one append-only review event. The claim stayed redeemed, the barcode remained unusable, Redeemed remained attached and no new offer or eligibility was issued.
+- Sandbox Apps Version `2` contains the repaired exact-row ledger writer. After the initial append revealed Automatic formatting on identifier cells, processing was paused; the owner repair changed 15 formats with no value write, row append or lead-tab write, then returned a zero-change no-op on repeat. Final diagnosis reported `ledger_ready=true`, with one identity and the four expected journey events.
+- A sandbox-only Apps shared secret that appeared in diagnostic output was rotated immediately in Apps Script and the Worker. The temporary sandbox transaction authorization was revoked. No exposed credential value is retained in Git or in this record.
+- The active sandbox Worker version is `ef14512d-35c4-4570-b6bd-e9768585c8ae` in deployment `8ec3705a-9428-46d3-9aff-dc727ffff559`. Every automation and owner-harness flag is now `false`, canary-only mode has an empty allowlist, the Square webhook subscription is disabled and Apps `SQUARE_JOURNEY_ENABLED=false`.
+- The connector validation passes 26 local checks, and the Apps Script, website frontend, form backend and full-site validations pass. These local checks support the implementation but are not substitutes for the remaining live provider tests.
+
+Still required before sandbox signoff and any production owner canary:
+
+- Prove filtered, declined-consent, ambiguous-match and provider-outage cases against the sandbox providers, plus exact claim replay and forged/altered/unrecognized webhook cases without a duplicate customer, link, event or redemption.
+- Prove out-of-order payment/refund delivery, customer-created/group-failed and ledger-committed/group-removal-failed recovery through idempotent retry or the exception queue. The completed refund was for the qualifying purchase; it does not prove a later return purchase.
+- Deliberately interrupt a Queue job, prove stale `PROCESSING` recovery, inspect and replay one DLQ item without duplication, and verify reconciliation before enabling it.
+- Demonstrate backup/restore, retention/deletion application, external alerts and owner rollback. If the connector later migrates to OAuth, refresh and revoke behavior must also be demonstrated.
+- Physically scan the generated Code128 pass on the intended checkout device during the production owner canary; rendering it in the sandbox browser does not prove device scanning.
 
 ### 3. Production owner canary
 
@@ -171,18 +182,20 @@ Send one daily digest with aggregate claims, passes, redemptions, ordinary purch
 
 ## Rollback
 
-1. Hide the optional Square action and QR first; the confirmed manual coupon remains available.
-2. Set `SQUARE_OFFER_ENABLED=false` and `SQUARE_PASS_ENABLED=false`. Keep verified webhook ingest/consumer read-only long enough to drain and reconcile accepted events; disable them immediately only for an active security incident. Project 2 has no reward automation.
+1. Hide the optional Square action and Code128 pass first; the confirmed manual coupon remains available. Set `SQUARE_OFFER_ENABLED=false`, `SQUARE_PASS_ENABLED=false` and the sandbox owner-harness flag to `false`, then empty the canary allowlist.
+2. Keep verified webhook ingest/consumer read-only only long enough to drain and reconcile accepted events; disable them immediately only for an active security incident. Project 2 has no reward automation.
 3. Drain/reconcile Queue and dead-letter items; append corrections or mark links inactive. Do not delete Square customers, payments, Sheet rows or ledger events as rollback.
 4. Revoke/rotate Square and webhook credentials if compromise is suspected.
-5. Unsubscribe the webhook only after the cutoff is recorded and a recent-payment/refund reconciliation is complete.
-6. Re-enable only through a new sandbox and owner canary with a dated decision record.
+5. Unsubscribe the webhook only after the cutoff is recorded and a recent-payment/refund reconciliation is complete. Then disable webhook, consumer and reconciliation flags, and disable Apps journey processing last.
+6. Preserve the D1, Queue/DLQ, Square and Apps evidence. Re-enable only through a new sandbox and owner canary with a dated decision record.
 
 ## Definition of done
 
+The core sandbox exercise does not satisfy the overall definition of done. Physical checkout-device scanning, the remaining recovery matrix, monitoring, backup/restore, retention/deletion operations and the production owner canary remain open.
+
 - Coupon access never depends on Square and Brevo permission remains independent.
 - One new consented claim can create or link exactly one Square customer without exposing PII or provider capability to the browser.
-- The QR attaches the intended customer; staff reliably discounts exactly one quantity-one prepared-drink line.
+- The Code128 checkout profile code attaches the intended customer; staff reliably discounts exactly one quantity-one prepared-drink line.
 - Completed, repeat and refunded orders become one reproducible append-only event sequence despite retries and out-of-order delivery.
 - Ambiguous identity and partial failure remain visible and recoverable; no silent merge, deletion or automatic refund reissue occurs.
 - Required retention, access, backup, restore, credential rotation and owner rollback are tested and dated.

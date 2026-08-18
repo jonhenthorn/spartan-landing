@@ -475,6 +475,8 @@ check("sandbox configuration is isolated, placeholder-gated, and default-off", a
   assert.match(sandboxWrangler, /dead_letter_queue = "spartan-square-connector-sandbox-dlq"/);
   assert.match(sandboxWrangler, /SQUARE_CANARY_ONLY = "true"/);
   assert.match(sandboxWrangler, /SQUARE_CANARY_SUBMISSION_IDS = ""/);
+  assert.match(sandboxWrangler, /SQUARE_SANDBOX_TEST_HARNESS_ENABLED = "false"/);
+  assert.doesNotMatch(wrangler, /SQUARE_SANDBOX_TEST_HARNESS_ENABLED/);
   for (const flag of ["SQUARE_OFFER_ENABLED", "SQUARE_WEBHOOK_ENABLED", "SQUARE_PASS_ENABLED", "SQUARE_CONSUMER_ENABLED", "SQUARE_RECONCILIATION_ENABLED"]) {
     assert.match(sandboxWrangler, new RegExp(`${flag} = "false"`));
   }
@@ -511,6 +513,73 @@ check("sandbox configuration is isolated, placeholder-gated, and default-off", a
   env.SQUARE_API_BASE_URL = "https://connect.squareup.com";
   response = await worker.fetch(new Request("https://sandbox-test.workers.dev/api/square/config"), env, {});
   assert.equal((await response.json()).enabled, false, "sandbox can never fall back to production Square");
+});
+
+check("owner test harness is sandbox-only, fail-closed, and contains no private fixture values", async () => {
+  const path = "/sandbox/owner-offer-test";
+  const production = baseEnv(new MockD1(), { send: async () => {} });
+  production.SQUARE_SANDBOX_TEST_HARNESS_ENABLED = "true";
+  let response = await worker.fetch(new Request(`https://spartandrink.com${path}`), production, {});
+  assert.equal(response.status, 404, "production must not reveal the harness even if its flag is set");
+  response = await worker.fetch(new Request(`https://spartandrink.com${path}`, { method: "POST" }), production, {});
+  assert.equal(response.status, 404, "production must not reveal the harness for non-GET requests");
+
+  const sandbox = baseEnv(new MockD1(), { send: async () => {} });
+  Object.assign(sandbox, {
+    CONNECTOR_ENVIRONMENT: "sandbox",
+    SQUARE_ENVIRONMENT: "sandbox",
+    SQUARE_API_BASE_URL: "https://connect.squareupsandbox.com",
+    SQUARE_LOCATION_ID: "SANDBOX_LOCATION_1",
+    SQUARE_WEBHOOK_NOTIFICATION_URL: "https://sandbox-test.workers.dev/api/square/webhook",
+    ALLOWED_ORIGINS: "https://sandbox-test.workers.dev",
+    TURNSTILE_SITE_KEY: "sandbox-public-site-key-1234",
+    TURNSTILE_EXPECTED_ACTION: "square_offer_sandbox",
+    SQUARE_CANARY_ONLY: "true",
+    SQUARE_CANARY_SUBMISSION_IDS: "submission-owner1",
+    SQUARE_SANDBOX_TEST_HARNESS_ENABLED: "false",
+  });
+  response = await worker.fetch(new Request(`https://sandbox-test.workers.dev${path}`), sandbox, {});
+  assert.equal(response.status, 404, "the sandbox harness defaults off");
+
+  sandbox.SQUARE_SANDBOX_TEST_HARNESS_ENABLED = "true";
+  sandbox.SQUARE_CANARY_SUBMISSION_IDS = "";
+  response = await worker.fetch(new Request(`https://sandbox-test.workers.dev${path}`), sandbox, {});
+  assert.equal(response.status, 404, "the harness requires exactly one configured canary");
+  sandbox.SQUARE_CANARY_SUBMISSION_IDS = "submission-owner1,submission-owner2";
+  response = await worker.fetch(new Request(`https://sandbox-test.workers.dev${path}`), sandbox, {});
+  assert.equal(response.status, 404, "the harness rejects a broader canary window");
+  sandbox.SQUARE_CANARY_SUBMISSION_IDS = "submission-owner1";
+  response = await worker.fetch(new Request(`https://sandbox-test.workers.dev${path}?submission_id=submission-owner1`), sandbox, {});
+  assert.equal(response.status, 404, "query strings are never accepted");
+  response = await worker.fetch(new Request(`https://other-test.workers.dev${path}`), sandbox, {});
+  assert.equal(response.status, 404, "the harness is bound to the configured sandbox origin");
+
+  response = await worker.fetch(new Request(`https://sandbox-test.workers.dev${path}`), sandbox, {});
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("Cache-Control"), "no-store, max-age=0");
+  assert.equal(response.headers.get("Referrer-Policy"), "no-referrer");
+  assert.match(response.headers.get("Content-Security-Policy") || "", /script-src 'nonce-[A-Za-z0-9_-]+' https:\/\/challenges\.cloudflare\.com/);
+  assert.match(response.headers.get("Content-Security-Policy") || "", /connect-src 'self' https:\/\/challenges\.cloudflare\.com/);
+  const html = await response.text();
+  assert.match(html, /Sandbox owner test only/);
+  assert.match(html, /id="submission_id"[^>]*type="text"/);
+  assert.match(html, /id="coupon_code"[^>]*type="text"/);
+  assert.match(html, /fetch\("\/api\/square\/offer"/);
+  assert.match(html, /sandbox-public-site-key-1234/);
+  assert.match(html, /square_offer_sandbox/);
+  for (const forbidden of [
+    sandbox.SQUARE_CANARY_SUBMISSION_IDS,
+    sandbox.SQUARE_LOCATION_ID,
+    sandbox.SQUARE_DISCOUNT_CATALOG_ID,
+    sandbox.SQUARE_ELIGIBLE_GROUP_ID,
+    sandbox.SQUARE_MERCHANT_ID,
+    sandbox.SQUARE_ACCESS_TOKEN,
+    sandbox.SQUARE_WEBHOOK_SIGNATURE_KEY,
+    sandbox.TURNSTILE_SECRET_KEY,
+    sandbox.APPS_SCRIPT_SHARED_SECRET,
+  ]) assert.doesNotMatch(html, new RegExp(forbidden.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.doesNotMatch(html, /google-analytics|googletagmanager|segment\.com|mixpanel|amplitude/i);
+  assert.doesNotMatch(html, /value="submission-|value="SPN50-/);
 });
 
 check("config has the exact browser contract and remains disabled by default", async () => {

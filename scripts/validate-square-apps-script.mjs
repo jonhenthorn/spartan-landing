@@ -17,8 +17,14 @@ function makeSheet(rows, sheetId, sheetName) {
   let writeOperationCount = 0;
   const headerFontWeights = [];
   const plainTextColumns = new Set();
+  const numberFormatOverrides = new Map();
   const formulas = [];
   const maxRows = 1000;
+  const formatKey = (rowIndex, columnIndex) => `${rowIndex}:${columnIndex}`;
+  const getNumberFormat = (rowIndex, columnIndex) => (
+    numberFormatOverrides.get(formatKey(rowIndex, columnIndex))
+      || (plainTextColumns.has(columnIndex) ? "@" : "General")
+  );
 
   return {
     getName: () => sheetName,
@@ -76,9 +82,12 @@ function makeSheet(rows, sheetId, sheetName) {
         },
         getNumberFormats: () => Array.from(
           { length: rowCount },
-          () => Array.from(
+          (_, rowOffset) => Array.from(
             { length: columnCount },
-            (_, columnOffset) => plainTextColumns.has(column - 1 + columnOffset) ? "@" : "General"
+            (_, columnOffset) => getNumberFormat(
+              row - 1 + rowOffset,
+              column - 1 + columnOffset
+            )
           )
         ),
         setNumberFormat: (format) => {
@@ -86,16 +95,34 @@ function makeSheet(rows, sheetId, sheetName) {
           if (row === 1 && rowCount === maxRows && columnCount === 1 && format === "@") {
             plainTextColumns.add(column - 1);
           }
+          for (let rowOffset = 0; rowOffset < rowCount; rowOffset += 1) {
+            for (let columnOffset = 0; columnOffset < columnCount; columnOffset += 1) {
+              const rowIndex = row - 1 + rowOffset;
+              const columnIndex = column - 1 + columnOffset;
+              const baseFormat = plainTextColumns.has(columnIndex) ? "@" : "General";
+              const key = formatKey(rowIndex, columnIndex);
+              if (format === baseFormat) numberFormatOverrides.delete(key);
+              else numberFormatOverrides.set(key, format);
+            }
+          }
           return range;
         }
       };
       return range;
     },
     appendRow: (row) => {
+      const targetRowIndex = rows.length;
       rows.push(Array.from(row));
+      // Reproduce the Google Sheets behavior that triggered the production
+      // block: appendRow can put the newly appended cells back on Automatic
+      // even when their columns were preformatted as plain text.
+      plainTextColumns.forEach((columnIndex) => {
+        numberFormatOverrides.set(formatKey(targetRowIndex, columnIndex), "General");
+      });
       writeOperationCount += 1;
     },
     __rows: rows,
+    __getNumberFormat: (rowIndex, columnIndex) => getNumberFormat(rowIndex, columnIndex),
     __getWriteOperationCount: () => writeOperationCount
   };
 }
@@ -337,6 +364,24 @@ const eventRows = ledgerSheets.get("Journey Events").__rows;
 assert.equal(identityRows.length, 2);
 assert.equal(eventRows.length, 2);
 
+const runtimeAfterFirstFinalize = JSON.parse(JSON.stringify(context.diagnoseJourneyLedgerRuntime()));
+assert.equal(runtimeAfterFirstFinalize.ready, true);
+assert.deepEqual(
+  runtimeAfterFirstFinalize.sheets.map((sheet) => sheet.state),
+  ["active", "active"],
+  "Runtime must remain ready after the first identity and journey-event append"
+);
+for (const spec of JSON.parse(vm.runInContext("JSON.stringify(JOURNEY_LEDGER_SHEET_SPECS)", context))) {
+  const ledgerSheet = ledgerSheets.get(spec.name);
+  for (const header of spec.plainTextHeaders) {
+    assert.equal(
+      ledgerSheet.__getNumberFormat(1, spec.headers.indexOf(header)),
+      "@",
+      `${spec.name}.${header} must remain plain text on its first data row`
+    );
+  }
+}
+
 const finalizeRetry = post(sign("offer_finalize", baseFinalize));
 assert.equal(finalizeRetry.ok, true);
 assert.equal(finalizeRetry.offer_finalize_result, "already_linked");
@@ -346,6 +391,58 @@ assert.equal(eventRows.length, 2, "Finalize retry must not duplicate identity ev
 const runtime = JSON.parse(JSON.stringify(context.diagnoseJourneyLedgerRuntime()));
 assert.equal(runtime.ready, true);
 assert.deepEqual(runtime.sheets.map((sheet) => sheet.state), ["active", "active"]);
+
+const identitySpec = JSON.parse(vm.runInContext(
+  "JSON.stringify(JOURNEY_LEDGER_SHEET_SPECS[0])",
+  context
+));
+const eventSpec = JSON.parse(vm.runInContext(
+  "JSON.stringify(JOURNEY_LEDGER_SHEET_SPECS[1])",
+  context
+));
+ledgerSheets.get("Identity Links")
+  .getRange(2, identitySpec.headers.indexOf("identity_link_id") + 1, 1, 1)
+  .setNumberFormat("General");
+ledgerSheets.get("Journey Events")
+  .getRange(2, eventSpec.headers.indexOf("event_id") + 1, 1, 1)
+  .setNumberFormat("General");
+assert.equal(
+  JSON.parse(JSON.stringify(context.diagnoseSquareJourneyConfiguration())).ledger_ready,
+  false,
+  "A damaged existing ID-cell format must block runtime readiness"
+);
+const rowsBeforeFormattingRepair = new Map(
+  Array.from(ledgerSheets, ([name, ledgerSheet]) => [name, structuredClone(ledgerSheet.__rows)])
+);
+const formattingRepair = JSON.parse(JSON.stringify(
+  context.repairJourneyLedgerPlainTextFormatting()
+));
+assert.equal(formattingRepair.ready, true);
+assert.equal(formattingRepair.format_change_count, 2);
+assert.equal(formattingRepair.value_write_count, 0);
+assert.equal(formattingRepair.rows_appended, 0);
+for (const [name, ledgerSheet] of ledgerSheets) {
+  assert.deepEqual(
+    ledgerSheet.__rows,
+    rowsBeforeFormattingRepair.get(name),
+    `${name} formatting repair must not change any cell value`
+  );
+}
+assert.equal(
+  JSON.parse(JSON.stringify(context.diagnoseSquareJourneyConfiguration())).ledger_ready,
+  true,
+  "Owner formatting repair must restore runtime readiness"
+);
+const repeatedFormattingRepair = JSON.parse(JSON.stringify(
+  context.repairJourneyLedgerPlainTextFormatting()
+));
+assert.equal(repeatedFormattingRepair.format_change_count, 0);
+assert.equal(repeatedFormattingRepair.write_operation_count, 0);
+const finalizeRetryAfterRepair = post(sign("offer_finalize", baseFinalize));
+assert.equal(finalizeRetryAfterRepair.ok, true);
+assert.equal(finalizeRetryAfterRepair.offer_finalize_result, "already_linked");
+assert.equal(identityRows.length, 2, "Formatting repair must preserve identity idempotency");
+assert.equal(eventRows.length, 2, "Formatting repair must preserve event idempotency");
 
 const eventBase = {
   operation: "event_commit",

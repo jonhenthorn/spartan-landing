@@ -1061,6 +1061,12 @@ function ensureJourneyLedgerFormat_(sheet, spec) {
     sheet.setFrozenRows(1);
     changeCount += 1;
   }
+  changeCount += ensureJourneyLedgerPlainTextFormat_(sheet, spec);
+  return changeCount;
+}
+
+function ensureJourneyLedgerPlainTextFormat_(sheet, spec) {
+  let changeCount = 0;
   const maxRows = sheet.getMaxRows();
   spec.plainTextHeaders.forEach(header => {
     const column = spec.headers.indexOf(header) + 1;
@@ -1193,6 +1199,80 @@ function setupJourneyLedgerSheets() {
       writes_to_lead_sheet: 0,
       journey_rows_appended: 0,
       sheets: sheetResults
+    };
+    console.log(JSON.stringify(result));
+    return result;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Owner-run, repeat-safe formatting repair for an already initialized journey
+ * ledger. It accepts only the exact reviewed schemas with no formulas, changes
+ * only the number format of the configured identifier columns and never calls
+ * setValues(), appendRow() or any provider service.
+ */
+function repairJourneyLedgerPlainTextFormatting() {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(LOCK_TIMEOUT_MS);
+
+  try {
+    const config = getJourneyLedgerSetupConfig_();
+    const plans = JOURNEY_LEDGER_SHEET_SPECS.map(
+      spec => inspectJourneyLedgerSheet_(config.spreadsheet, spec)
+    );
+    const repairableStates = ['verified', 'nonempty'];
+    const rejectedPlans = plans.filter(
+      plan => !repairableStates.includes(plan.state)
+        || !plan.headerRowBold
+        || plan.frozenHeaderRows !== 1
+    );
+
+    if (rejectedPlans.length) {
+      const problems = rejectedPlans.map(
+        plan => `${plan.spec.name} (${plan.issue || (
+          !plan.headerRowBold || plan.frozenHeaderRows !== 1
+            ? 'non-identifier formatting is not ready'
+            : plan.state
+        )})`
+      );
+      throw new Error(`Journey ledger formatting repair preflight failed: ${problems.join(', ')}.`);
+    }
+
+    let formatChangeCount = 0;
+    plans.forEach(plan => {
+      formatChangeCount += ensureJourneyLedgerPlainTextFormat_(plan.sheet, plan.spec);
+    });
+    if (formatChangeCount) SpreadsheetApp.flush();
+
+    const verification = JOURNEY_LEDGER_SHEET_SPECS.map(
+      spec => inspectJourneyLedgerSheet_(config.spreadsheet, spec)
+    );
+    if (verification.some(
+      plan => !repairableStates.includes(plan.state)
+        || !plan.headerRowBold
+        || plan.frozenHeaderRows !== 1
+        || !plan.plainTextColumnsReady
+    )) {
+      throw new Error('Journey ledger formatting repair did not verify.');
+    }
+
+    const result = {
+      ledger_version: JOURNEY_LEDGER_VERSION,
+      configured_lead_sheet: config.configuredSheetName,
+      ready: true,
+      format_change_count: formatChangeCount,
+      write_operation_count: formatChangeCount,
+      value_write_count: 0,
+      rows_appended: 0,
+      writes_to_lead_sheet: 0,
+      sheets: verification.map(plan => ({
+        sheet_name: plan.spec.name,
+        state: plan.state === 'nonempty' ? 'active' : 'verified_empty',
+        data_row_count: plan.dataRowCount,
+        plain_text_id_columns: true
+      }))
     };
     console.log(JSON.stringify(result));
     return result;
@@ -1743,7 +1823,7 @@ function appendSquareIdentityLinkIfAbsent_(runtime, data) {
 
   const identityLinkId = Utilities.getUuid();
   const contactId = Utilities.getUuid();
-  appendRecord_(entry.sheet, entry.headers, {
+  appendJourneyLedgerRecord_(entry, {
     identity_link_id: identityLinkId,
     link_key: `square:${data.squareCustomerId}`,
     contact_id: contactId,
@@ -1844,8 +1924,41 @@ function appendJourneyEventIfAbsent_(entry, record) {
     }
     return { eventId: existing.event_id, created: false, record: existing };
   }
-  appendRecord_(entry.sheet, entry.headers, record);
+  appendJourneyLedgerRecord_(entry, record);
   return { eventId: record.event_id, created: true, record };
+}
+
+function appendJourneyLedgerRecord_(entry, record) {
+  const spec = entry && entry.inspection && entry.inspection.spec;
+  if (!spec || !entry.sheet || !Array.isArray(entry.headers)) {
+    throw new Error('Journey ledger append configuration is incomplete.');
+  }
+  const missingPlainTextHeaders = spec.plainTextHeaders.filter(
+    header => entry.headers.indexOf(header) < 0
+  );
+  if (missingPlainTextHeaders.length) {
+    throw new Error('Journey ledger plain-text column configuration is incomplete.');
+  }
+
+  const row = entry.headers.map(header => {
+    if (!header || record[header] === undefined) return '';
+    return safeSheetValue_(record[header]);
+  });
+  const targetRow = entry.sheet.getLastRow() + 1;
+  const maxRows = entry.sheet.getMaxRows();
+  if (targetRow > maxRows) {
+    entry.sheet.insertRowsAfter(maxRows, targetRow - maxRows);
+  }
+
+  // appendRow() may apply automatic formatting to the new row even when the
+  // column was preformatted. Format each configured identifier cell first,
+  // then write the complete row into that exact range.
+  spec.plainTextHeaders.forEach(header => {
+    const column = entry.headers.indexOf(header) + 1;
+    entry.sheet.getRange(targetRow, column, 1, 1).setNumberFormat('@');
+  });
+  entry.sheet.getRange(targetRow, 1, 1, entry.headers.length).setValues([row]);
+  return targetRow;
 }
 
 function findJourneyEventByIdempotencyKey_(sheet, headers, idempotencyKey) {
