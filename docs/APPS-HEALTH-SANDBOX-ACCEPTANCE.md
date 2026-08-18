@@ -2,7 +2,18 @@
 
 Last reviewed: August 18, 2026
 
-Status: **prepared and locally validated; not approved or executed.** The sandbox Apps contract and schema-4 operations Worker are deployed inertly, but the dedicated URL/secret are absent and every capability flag is false. This worksheet does not authorize credential creation, a signed request, a flag change or a D1 write.
+Status: **executed once on August 18, 2026; did not pass Phase 3.** Phases 0–2 passed, but the first enabled full inspection took `5016 ms`, exceeding the strict `<5000 ms` gate by 16 ms. The immediate repeat returned a valid healthy result in `3878 ms`, but it does not override the stop condition. Phases 4 and 5 were not run. Emergency cleanup is complete: the Apps endpoint is disabled, the dedicated Apps property and both Worker secrets are removed, every operations capability flag is false, and the final all-off cron wrote nothing. Do not retry until the live-latency path or reviewed timeout is changed offline and a new run is separately approved.
+
+## August 18 execution outcome
+
+- Approval was received and the read-only baseline was captured at `2026-08-18T17:20:16.773Z`: operations Worker `804dae4f-44d8-45de-a6e1-6ca3182d682e`, eight monitor runs, two resolved incidents, zero active incidents, deliveries, backups or restores, and zero bounded connector exception signals.
+- During the private Apps-property preflight, the existing sandbox connector shared secret was rendered into automation output. The run stopped before any health credential or flag change. That connector secret was immediately revoked and replaced in both disabled sandbox stores; connector version `cf69ea69-4d5e-4aae-8e59-b85341b8eb3a` is at 100% with every connector automation and owner-harness flag false. The deployment screen also rendered the private Apps URL. The URL alone cannot authenticate the HMAC-protected contract, and no health secret existed at that point, but historical output from this attempt remains sensitive.
+- Dedicated health credentials were then installed while all six operations flags remained false. Credential-inert version `470d9ef0-f349-44e5-b3a6-7a9723327375` produced no D1 count or prior-timestamp change across multiple scheduled intervals.
+- Enabled-test version `f68abb5f-2507-4af3-8f46-40b4b87a61ea` had only aggregate monitoring and the Apps source true. Queue, alerts, backups and restores stayed false; the exact runtime D1 bindings and two reviewed secret names were verified before deployment.
+- Two direct disabled probes returned valid signed `DISABLED` results in `1500 ms` and `1485 ms`. The supervised interval ran longer than planned and produced nine—not two—consecutive five-minute `FAILED` / `UNAVAILABLE` observations from `2026-08-18T17:45:54.816Z` through `2026-08-18T18:25:54.803Z`. They remained one warning incident with occurrence count nine and zero deliveries.
+- After enabling only the metadata inspection, the first direct healthy probe failed the deadline at `5016 ms`. The immediate repeat returned valid signed `COMPLETE`, configuration healthy, in `3878 ms`. Per the stop rule, the run ended without the forced-environment or configuration-mismatch phases and without waiting for a healthy recovery cron.
+- Emergency cleanup first redeployed the known all-off rollback version, then used a tracked all-off cleanup version so Cloudflare could delete both versioned secret bindings. Final operations version `65e97390-997e-46e8-9afa-f8721c644ef0` is at 100%, has the exact runtime D1 bindings, no secret or unexpected binding, and all six flags false. Apps Version 3 has health disabled, environment `sandbox` and no health secret. Keychain items, browser-held values and clipboards were cleared.
+- Final operations D1 contains 17 monitor runs and three incidents. The new `APPS_HEALTH_UNAVAILABLE` warning remains open with occurrence count nine as preserved failed-run evidence; deliveries, backups and restores remain zero. The all-off cron after cleanup changed no count or prior maximum timestamp. No production, customer, order, coupon, Square, Brevo, website or form state changed.
 
 ## Purpose
 
@@ -149,12 +160,12 @@ Rollback exposure first:
 5. Deploy the tracked sandbox configuration so all six capability flags are false. Verify no secret name, route, email/Queue/R2 binding or unexpected variable remains.
 6. Wait through one final cron plus settling minute. Require every count and prior maximum timestamp to remain unchanged.
 
-Final required state:
+Passing target (not achieved by the August 18 run):
 
 - Apps: Version 3, `OPS_HEALTH_ENABLED=false`, environment `sandbox`, no health secret.
 - Operations Worker: schema 4, all six capabilities false, no Apps URL/secret, no Queue token, email or R2 binding, scheduled-only and no public route.
-- D1: preserved fixed monitor/incident evidence; zero active incident, delivery, backup and restore rows.
-- Connector and production: unchanged.
+- D1: preserved fixed monitor/incident evidence; zero active incident, delivery, backup and restore rows. The failed run ended with one open warning incident, so this criterion is **not met**.
+- Production and business state unchanged; the sandbox connector remains disabled, with any credential-exposure remediation and resulting version recorded separately.
 
 ## Emergency rollback
 
@@ -164,21 +175,21 @@ Final required state:
 4. Clear temporary credential material. Rotate the dedicated health secret if it appeared anywhere.
 5. Preserve D1 evidence and stop. Do not touch connector or production state while diagnosing.
 
-## Evidence record — fill only after an approved run
+## Evidence record — August 18 failed run
 
 | Evidence | Result |
 |---|---|
-| Approval and UTC start | `[FILL AFTER RUN]` |
-| Baseline Worker/version and D1 counts | `[FILL AFTER RUN]` |
-| Credential-inert version and zero-write cron | `[FILL AFTER RUN]` |
-| Disabled first-call/immediate-repeat elapsed results | `[FILL AFTER RUN]` |
-| Two disabled cron observations | `[FILL AFTER RUN]` |
-| First enabled full-inspection and immediate-repeat elapsed results and recovery | `[FILL AFTER RUN]` |
-| Signed failed result and recovery | `[FILL AFTER RUN]` |
-| Configuration-mismatch version/result and recovery | `[FILL AFTER RUN]` |
-| Source-off and final all-off zero-write crons | `[FILL AFTER RUN]` |
-| Secret names removed and Apps disabled | `[FILL AFTER RUN]` |
-| Final D1 reconciliation | `[FILL AFTER RUN]` |
-| Production/connector unchanged | `[FILL AFTER RUN]` |
+| Approval and UTC start | Approved by owner; baseline captured `2026-08-18T17:20:16.773Z` |
+| Baseline Worker/version and D1 counts | `804dae4f-44d8-45de-a6e1-6ca3182d682e`; 8 runs, 2 resolved/0 active incidents, 0 deliveries/backups/restores |
+| Credential-inert version and zero-write cron | `470d9ef0-f349-44e5-b3a6-7a9723327375`; counts and prior timestamps unchanged |
+| Disabled first-call/immediate-repeat elapsed results | Signed `DISABLED`; `1500 ms` and `1485 ms` |
+| Two disabled cron observations | Passed and continued to 9 identical observations because the supervised interval ran longer than planned; one warning incident, 0 deliveries |
+| First enabled full-inspection and immediate-repeat elapsed results and recovery | First failed at `5016 ms`; repeat signed healthy at `3878 ms`; no recovery cron was permitted after the stop condition |
+| Signed failed result and recovery | Not run after Phase 3 failure |
+| Configuration-mismatch version/result and recovery | Not run after Phase 3 failure |
+| Source-off and final all-off zero-write crons | Emergency rollback used; final all-off cron changed no count or prior timestamp |
+| Secret names removed and Apps disabled | Confirmed: Apps property absent; Worker secret list empty; Apps health false/environment sandbox; temporary Keychain/clipboard material cleared |
+| Final D1 reconciliation | 17 runs; 3 incidents; 1 open `APPS_HEALTH_UNAVAILABLE` occurrence 9; 0 deliveries/backups/restores |
+| Production/business state and connector exception | No business-data or production change; sandbox connector credential was rotated after preflight exposure while all connector flags remained false |
 
-Passing this worksheet proves only the isolated Apps-health source. Queue monitoring, alert delivery, backups/restores, physical scanner compatibility and production canary approval remain separate gates.
+This execution did **not** pass the worksheet and does not approve another live retry. Queue monitoring, alert delivery, backups/restores, physical scanner compatibility and production canary approval remain separate gates.
