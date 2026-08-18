@@ -2,7 +2,7 @@
 
 Last reviewed: August 18, 2026
 
-Status: **the bounded D1-only monitor is remotely proven in the isolated sandbox, and the counts-only alert engine is implemented and locally validated. The permanent sandbox service remains scheduled-only with every capability flag false; migration `0002`, alert sender/bindings, recurring backup and restore automation are not live.** Project 2 production activation remains blocked.
+Status: **the bounded D1-only monitor is remotely proven in the isolated sandbox, and the counts-only alert engine plus migration `0002` are deployed inertly. The permanent sandbox service remains scheduled-only with every capability flag false; alert sender/bindings, recurring backup and restore automation are not live.** Project 2 production activation remains blocked.
 
 ## Purpose and authority
 
@@ -15,11 +15,11 @@ The Square connector ledger remains authoritative for claims, provider links, pu
 - Production retains placeholder resources. Sandbox has separate runtime/preview operations D1 databases and a concrete aggregate source binding; every `OPS_*_ENABLED` flag is `false`.
 - The Worker has only a scheduled handler and no route, `fetch` handler or `workers.dev` exposure.
 - With missing or false flags, it returns without touching any binding, scheduling background work or making a network request.
-- Monitoring runs only when its flag is true and the exact five-minute cron fires. The local alert engine can run only on that same cron, requires monitoring plus schema `2`, and requires two distinct role bindings and a bounded sender. A wrong or missing cron touches none of those bindings. Backup and restore flags remain fail-closed because those lanes are not implemented.
-- Migration `0001` is applied to both sandbox operations databases. Migration `0002` is locally validated but has not been applied remotely. The sandbox intentionally omits R2 because that account feature and the backup lane are not approved; production retains the future placeholder.
-- Permanent sandbox Worker version `337e95fc-61f3-4fa2-aa1a-91b5893887c0` is bound to the real sandbox connector source with every capability false. A scheduled interval produced zero writes in this state.
+- Monitoring runs only when its flag is true and the exact five-minute cron fires. The deployed but disabled alert engine can run only on that same cron, requires monitoring plus schema `2`, and requires two distinct role bindings and a bounded sender. A wrong or missing cron touches none of those bindings. Backup and restore flags remain fail-closed because those lanes are not implemented.
+- Migrations `0001` and `0002` are applied to both sandbox operations databases. Runtime preserved eight monitor runs and two resolved incidents with zero active incidents; preview remained empty; both have zero delivery, backup and restore rows and zero orphan deliveries. Remote inspection found 27 delivery columns, all 12 required fields and the required delivery index. An exported runtime copy passed SQLite integrity and foreign-key checks. The sandbox intentionally omits R2 because that account feature and the backup lane are not approved; production retains the future placeholder.
+- Permanent sandbox Worker version `a49059b4-6226-4cc9-be6e-ba65d94ab509` is bound to runtime operations D1 `2e2fc9f6-0a81-453b-9af6-8d4104965f8e` and connector D1 `9531221e-cabe-4ed4-b7d4-f715798b8945`, has only a scheduled handler and retains every capability false. The five-minute trigger after deployment left all counts and prior update timestamps unchanged, including zero alert deliveries.
 - A separate disposable proof Worker and disposable schema-complete/empty source databases proved healthy, warning, critical, source-unavailable, malformed-timestamp and recovery behavior. Concurrent older-warning/newer-healthy D1 batches left only a resolved history row and no active incident. Those disposable resources and direct guard rows were deleted afterward.
-- No checked configuration contains an email binding, sender or recipient. No connector configuration, sandbox runtime flag, Queue, webhook, Apps Script property or production account is changed by this local alert slice.
+- No checked configuration contains an email binding, sender or recipient. No connector configuration, sandbox runtime flag, Queue, webhook, Apps Script property or production account is changed by this inert schema-2 deployment.
 
 Do not enable monitoring merely because the inert service exists. Each active lane still requires a separate reviewed change, bounded proof and explicit approval.
 
@@ -59,13 +59,13 @@ Not yet covered by this slice: Cloudflare Queue/DLQ depth, external credential/p
 
 ### Alert lane
 
-The disabled local planner/drainer creates separate role deliveries: one `OPEN`; an immediate one-time `ESCALATION` when an existing warning episode becomes critical, even if that role's warning delivery failed; one `REMINDER` only when the latest successfully sent open/escalation is at least 60 minutes old; and `RECOVERY` only for a role that actually received an active notice. A born-critical episode receives a critical `OPEN`, not a redundant escalation. A critical escalation cancels an older unsent warning retry without rewriting its snapshot. Resolution cancels other unsent active notices, and recurrence starts a new episode while suppressing a stale old recovery.
+The disabled deployed planner/drainer creates separate role deliveries: one `OPEN`; an immediate one-time `ESCALATION` when an existing warning episode becomes critical, even if that role's warning delivery failed; one `REMINDER` only when the latest successfully sent open/escalation is at least 60 minutes old; and `RECOVERY` only for a role that actually received an active notice. A born-critical episode receives a critical `OPEN`, not a redundant escalation. A critical escalation cancels an older unsent warning retry without rewriting its snapshot. Resolution cancels other unsent active notices, and recurrence starts a new episode while suppressing a stale old recovery.
 
 Each delivery stores immutable environment, fixed condition/reason, severity, count and UTC observation snapshots plus a canonical-sender fingerprint and fixed message-template version. It stores no recipient, body, customer/provider/incident identifier in content, link, HTML, raw error or provider message ID. Cloudflare receives separate `{from, subject, text}` messages through `OPS_OWNER_EMAIL` or `OPS_BACKUP_OWNER_EMAIL`; the recipient field is omitted because the role binding owns it.
 
 D1 compare-and-set claims and leases prevent ordinary overlapping sends. Transient provider failures retry after bounded backoff and become `DEAD` by attempt three; permanent/configuration/content failures become `DEAD` immediately. If transport accepts a message but D1 finalization fails, an expired lease deliberately retries the same logical row—even if the incident resolved during the lease—before that role can receive recovery. This favors a possible physical duplicate over a stale alert with no recovery; sender/template checks preserve identical retry content or fail closed. If the active notice still cannot be confirmed by attempt three, it remains `DEAD`, recovery completion stays unset and manual reconciliation is required. Any persisted delivery failure produces one fixed invocation error, never a recursive alert about the alert transport itself.
 
-Still deferred and unchecked: applying migration `0002` remotely, sender/domain onboarding, both deploy-only role bindings and destinations, real owner/backup delivery acceptance, the labeled monthly live `TEST`, a daily digest, and independent alert-transport self-monitoring. Cloudflare account notifications may eventually supplement this path, but they do not replace tested business-condition alerts.
+Still deferred and unchecked: sender/domain onboarding, both deploy-only role bindings and destinations, real owner/backup delivery acceptance, the labeled monthly live `TEST`, a daily digest, and independent alert-transport self-monitoring. Cloudflare account notifications may eventually supplement this path, but they do not replace tested business-condition alerts.
 
 ### Nightly backup lane
 
@@ -122,7 +122,7 @@ Repository design items may be complete while every live activation item remains
 - [ ] A private sandbox backup bucket is provisioned only after the owner approves enabling R2 and the backup writer/lifecycle controls are implemented.
 - [x] Migration `0001` passes local validation and isolated remote application; an export restored with five tables, integrity `ok`, no foreign-key failures and matching zero-row baseline.
 - [x] Migration `0002` and the default-off two-role alert state machine pass local SQLite upgrade, integrity, privacy, concurrency, retry and recovery validation.
-- [ ] Migration `0002` is applied to isolated sandbox operations D1 and the resulting schema/evidence is verified before any alert flag or transport is configured.
+- [x] Migration `0002` is applied to isolated sandbox runtime and preview D1, with preserved counts, zero orphan/delivery rows and exported runtime integrity/foreign-key proof; the schema-2 Worker is deployed with all flags false and no email binding.
 - [x] Five-minute monitoring proves default-off zero writes, healthy, warning, critical, missing/malformed source, severity escalation and recovery in the isolated remote sandbox; concurrent direct remote-D1 batches separately prove the incident-ordering guards.
 - [ ] A dedicated operations sender and deploy-only `OPS_OWNER_EMAIL`/`OPS_BACKUP_OWNER_EMAIL` destinations are configured outside Git and approved.
 - [ ] Owner plus backup-owner live delivery, 60-minute reminder, failure, recovery and possible-duplicate behavior are proven end to end with all flags returned to false.
@@ -130,9 +130,9 @@ Repository design items may be complete while every live activation item remains
 - [ ] Nightly export, checksum, retention and 26/48-hour freshness alerts are proven.
 - [ ] Quarterly restore, row/unique-key reconciliation, deletion-manifest replay and cleanup are proven.
 - [x] Rollback returned all flags to false, deleted the disposable proof resources and preserved aggregate monitor/incident evidence with zero active incidents.
-- [x] Repository validators and both Wrangler dry-runs pass for the default-off monitoring and local alert-engine slice.
+- [x] Repository validators and both Wrangler dry-runs pass for the default-off monitoring and default-off alert-engine slice.
 - [x] The owner approved the inert sandbox deployment on August 17, 2026. A later separate decision is still required for each activation lane and any production resource.
 
 ## Definition of done
 
-The operations plane is done only when it can detect and externally report the required connector failures, maintain verified private backups, prove isolated restoration and clean rollback, all without PII duplication or a public surface. Every alert and backup must have age, delivery/integrity and recovery evidence. Default-off must remain a tested zero-operation state. The remote proof approves only the inert sandbox deployment and migration `0001`; the local alert proof does not approve migration `0002`, email bindings, a send, enabling any operations lane or production activation.
+The operations plane is done only when it can detect and externally report the required connector failures, maintain verified private backups, prove isolated restoration and clean rollback, all without PII duplication or a public surface. Every alert and backup must have age, delivery/integrity and recovery evidence. Default-off must remain a tested zero-operation state. The remote proof approves only the inert schema-2 sandbox deployment; it does not approve email bindings, a send, enabling any operations lane or production activation.
