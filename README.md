@@ -22,6 +22,7 @@ This repository contains the static website published at [spartandrink.com](http
 - `docs/SQUARE-CONNECTOR-ROLLOUT.md` — the connector's security, privacy, sandbox, canary and rollback gates.
 - `square-ops/` — the scheduled-only, default-off operations plane. Its aggregate D1 monitor, unbound counts-only alert engine, read-only Queue/DLQ source and signed Apps Script health source are deployed inertly on schema 4 in the isolated sandbox. The matching Apps Script v3 contract is published but disabled; the operations Worker has no health URL/secret, every live capability is false, and the service has no public route.
 - `docs/SQUARE-OPERATIONS-RUNBOOK.md` — the operations plane's non-PII data boundary, alert/backup design, activation gates and rollback order.
+- `docs/APPS-HEALTH-SANDBOX-ACCEPTANCE.md` — the owner-controlled signed Apps-health test matrix, direct-verifier contract, stop rules and exposure-first rollback worksheet. It is prepared but not approved or executed.
 - `docs/MARKETING-MEASUREMENT-DICTIONARY.md` — canonical customer milestones, source-of-truth boundaries, KPI formulas, cohorts, alerts and staged data architecture for the marketing portfolio.
 - `docs/EXTERNAL-CONFIGURATION.md` — dated, non-secret evidence of the current Cloudflare, Google and social-link configuration.
 - `spartan-landing/index.html` and `index_updated.html` — noindex browser fallbacks retained behind the active Cloudflare redirects.
@@ -95,6 +96,8 @@ node scripts/validate-square-connector.mjs
 node scripts/validate-square-apps-script.mjs
 node scripts/validate-square-frontend.mjs
 node scripts/validate-square-ops.mjs
+node scripts/validate-apps-health.mjs
+node scripts/validate-apps-health-probe.mjs
 node scripts/validate-form-backend.mjs
 node scripts/validate-site.mjs
 ```

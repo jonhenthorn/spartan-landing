@@ -70,6 +70,7 @@ Run `node scripts/validate-apps-health.mjs` from the repository root before any 
 - `OPS_HEALTH_ENABLED` is exact `false` and `OPS_HEALTH_ENVIRONMENT` is `sandbox`. `OPS_HEALTH_SHARED_SECRET` is absent, so no signed health inspection can run.
 - The v1 health contract marker is present in the saved code, while the public GET still returns the existing v3.2 form-service contract. No signed health POST was sent, so the health path made no Sheet read, external-provider call or write.
 - Activation remains blocked until the existing deployment URL is configured in the operations Worker as `OPS_APPS_SCRIPT_HEALTH_URL`, a new dedicated secret is installed as Apps `OPS_HEALTH_SHARED_SECRET` and Worker `OPS_APPS_SCRIPT_HEALTH_SHARED_SECRET`, cold and warm signed checks both finish under the five-second Worker deadline, all disabled/healthy/failure/mismatch/recovery cases reconcile, and `OPS_HEALTH_ENABLED=false`, `OPS_APPS_SCRIPT_MONITORING_ENABLED=false` and `OPS_MONITORING_ENABLED=false` are restored afterward.
+- The exact owner-controlled sequence and secret-safe direct verifier are documented in `docs/APPS-HEALTH-SANDBOX-ACCEPTANCE.md`. Preparing that worksheet is not approval to run it.
 
 ### Verified production snapshot — August 10, 2026
 
