@@ -1,5 +1,6 @@
 export const OPS_FLAG_NAMES = Object.freeze([
   "OPS_MONITORING_ENABLED",
+  "OPS_QUEUE_MONITORING_ENABLED",
   "OPS_ALERTS_ENABLED",
   "OPS_BACKUPS_ENABLED",
   "OPS_RESTORE_TESTS_ENABLED",
@@ -76,7 +77,15 @@ const DEFAULT_RECONCILIATION_MAX_AGE_SECONDS = 1800;
 const DEFAULT_REJECTION_LOOKBACK_HOURS = 24;
 const DEFAULT_MONITOR_RETENTION_DAYS = 30;
 const DEFAULT_ALERT_DEDUPE_SECONDS = 3600;
-const ALERT_SCHEMA_VERSION = "2";
+const DEFAULT_QUEUE_WARNING_AGE_SECONDS = 600;
+const DEFAULT_QUEUE_CRITICAL_AGE_SECONDS = 1800;
+const QUEUE_WARNING_MIN_CONFIRMATION_SECONDS = 240;
+const QUEUE_WARNING_MAX_CONFIRMATION_SECONDS = 540;
+const QUEUE_METRICS_TIMEOUT_MS = 5000;
+const QUEUE_METRICS_MAX_RESPONSE_BYTES = 8192;
+const QUEUE_METRICS_FUTURE_TOLERANCE_MS = 5 * 60 * 1000;
+const CLOUDFLARE_API_ORIGIN = "https://api.cloudflare.com";
+const ALERT_SCHEMA_VERSION = "3";
 const ALERT_MESSAGE_VERSION = "OPS_ALERT_V1";
 const ALERT_MAX_ATTEMPTS = 3;
 const ALERT_LEASE_SECONDS = 240;
@@ -112,7 +121,7 @@ const PERMANENT_EMAIL_ERROR_CODES = Object.freeze(new Set([
   "E_HEADERS_TOO_MANY",
 ]));
 
-const FIXED_ALERT_KEYS = Object.freeze([
+const CONNECTOR_ALERT_KEYS = Object.freeze([
   "SOURCE_UNAVAILABLE",
   "WEBHOOK_STALE",
   "OUTBOX_STALE",
@@ -121,6 +130,15 @@ const FIXED_ALERT_KEYS = Object.freeze([
   "WEBHOOK_REJECTED_WARNING",
   "RECONCILIATION_OVERFLOW",
   "RECONCILIATION_STALE",
+]);
+const MAIN_QUEUE_ALERT_KEYS = Object.freeze(["QUEUE_BACKLOG_STALE"]);
+const DLQ_ALERT_KEYS = Object.freeze(["QUEUE_DLQ_NONEMPTY"]);
+const QUEUE_SOURCE_ALERT_KEYS = Object.freeze(["QUEUE_METRICS_UNAVAILABLE"]);
+const FIXED_ALERT_KEYS = Object.freeze([
+  ...CONNECTOR_ALERT_KEYS,
+  ...MAIN_QUEUE_ALERT_KEYS,
+  ...DLQ_ALERT_KEYS,
+  ...QUEUE_SOURCE_ALERT_KEYS,
 ]);
 const ALERT_REASON_BY_KEY = Object.freeze({
   SOURCE_UNAVAILABLE: "CONNECTOR_SIGNAL_SOURCE_UNAVAILABLE",
@@ -131,6 +149,9 @@ const ALERT_REASON_BY_KEY = Object.freeze({
   WEBHOOK_REJECTED_WARNING: "WEBHOOK_POLICY_REJECTED",
   RECONCILIATION_OVERFLOW: "RECONCILIATION_PAGE_LIMIT",
   RECONCILIATION_STALE: "RECONCILIATION_HEARTBEAT_STALE",
+  QUEUE_METRICS_UNAVAILABLE: "QUEUE_METRICS_SOURCE_UNAVAILABLE",
+  QUEUE_BACKLOG_STALE: "QUEUE_MESSAGE_AGE_STALE",
+  QUEUE_DLQ_NONEMPTY: "QUEUE_DEAD_LETTER_NONEMPTY",
   ALERT_PATH_TEST: "MONTHLY_ALERT_PATH_TEST",
 });
 
@@ -140,12 +161,15 @@ export default {
     if (enabledFlags.length === 0) return;
 
     const unsupported = enabledFlags.filter((flagName) =>
-      !new Set(["OPS_MONITORING_ENABLED", "OPS_ALERTS_ENABLED"]).has(flagName));
+      !new Set(["OPS_MONITORING_ENABLED", "OPS_QUEUE_MONITORING_ENABLED", "OPS_ALERTS_ENABLED"])
+        .has(flagName));
     if (unsupported.length > 0) throw new Error("SQUARE_OPS_SCAFFOLD_NOT_ACTIVATION_READY");
 
     if (controller?.cron !== MONITOR_CRON) return;
     const monitoringEnabled = flag(env?.OPS_MONITORING_ENABLED);
+    const queueMonitoringEnabled = flag(env?.OPS_QUEUE_MONITORING_ENABLED);
     const alertsEnabled = flag(env?.OPS_ALERTS_ENABLED);
+    if (queueMonitoringEnabled && !monitoringEnabled) throw new Error("OPS_QUEUE_MONITORING_REQUIRES_MONITORING");
     if (alertsEnabled && !monitoringEnabled) throw new Error("OPS_ALERTS_REQUIRE_MONITORING");
     const alertConfig = alertsEnabled ? await validateAlertConfiguration(env) : null;
     const scheduledAt = finiteDate(controller?.scheduledTime) || new Date();
@@ -162,12 +186,22 @@ async function runMonitor(env, scheduledAt, observedAt = new Date()) {
 
   const startedAt = observationTime.toISOString();
   let sourceState = "AVAILABLE";
-  let signals;
+  const signals = [];
+  const resolvableKeys = new Set();
   try {
-    signals = await readConnectorSignals(env, observationTime);
+    signals.push(...await readConnectorSignals(env, observationTime));
+    for (const alertKey of CONNECTOR_ALERT_KEYS) resolvableKeys.add(alertKey);
   } catch {
     sourceState = "UNAVAILABLE";
-    signals = [makeSignal("SOURCE_UNAVAILABLE", "CRITICAL", 1, "CONNECTOR_SIGNAL_SOURCE_UNAVAILABLE")];
+    signals.push(makeSignal("SOURCE_UNAVAILABLE", "CRITICAL", 1, "CONNECTOR_SIGNAL_SOURCE_UNAVAILABLE"));
+    resolvableKeys.add("SOURCE_UNAVAILABLE");
+  }
+
+  if (flag(env?.OPS_QUEUE_MONITORING_ENABLED)) {
+    const queueResult = await readQueueSignals(env, observationTime);
+    signals.push(...queueResult.signals);
+    for (const alertKey of queueResult.resolvableKeys) resolvableKeys.add(alertKey);
+    if (queueResult.sourceState === "UNAVAILABLE") sourceState = "UNAVAILABLE";
   }
 
   const completedAt = new Date(Math.max(Date.now(), observationTime.getTime())).toISOString();
@@ -212,7 +246,22 @@ async function runMonitor(env, scheduledAt, observedAt = new Date()) {
     statements.push(opsStatement(env.OPS_DB, "ops_incident_update", `
       UPDATE alert_incidents
          SET severity_code = CASE WHEN severity_code = 'CRITICAL' OR ?1 = 'CRITICAL' THEN 'CRITICAL' ELSE 'WARNING' END,
-             occurrence_count = CASE WHEN alert_incident_id = ?2 THEN occurrence_count ELSE occurrence_count + 1 END,
+             occurrence_count = CASE
+               WHEN alert_incident_id = ?2 THEN occurrence_count
+               WHEN ?9 = 1 AND (
+                 CAST(strftime('%s', ?5) AS INTEGER) - CAST(strftime('%s', last_seen_at) AS INTEGER)
+               ) < ?10 THEN occurrence_count
+               WHEN ?9 = 1 AND (
+                 CAST(strftime('%s', ?5) AS INTEGER) - CAST(strftime('%s', last_seen_at) AS INTEGER)
+               ) > ?11 THEN 1
+               ELSE occurrence_count + 1
+             END,
+             first_seen_at = CASE
+               WHEN alert_incident_id <> ?2 AND ?9 = 1 AND (
+                 CAST(strftime('%s', ?5) AS INTEGER) - CAST(strftime('%s', last_seen_at) AS INTEGER)
+               ) > ?11 THEN ?5
+               ELSE first_seen_at
+             END,
              latest_signal_count = ?3,
              reason_code = ?4, last_seen_at = ?5, updated_at = ?5
        WHERE environment_code = ?6 AND alert_key = ?7 AND incident_state <> 'RESOLVED'
@@ -220,22 +269,22 @@ async function runMonitor(env, scheduledAt, observedAt = new Date()) {
            SELECT 1 FROM monitor_runs WHERE environment_code = ?6 AND started_at > ?8
          )
     `, [signal.severity, incidentId, signal.count, signal.reasonCode, incidentObservedAt, environment,
-      signal.alertKey, startedAt]));
+      signal.alertKey, startedAt,
+      signal.alertKey === "QUEUE_BACKLOG_STALE" && signal.severity === "WARNING" ? 1 : 0,
+      QUEUE_WARNING_MIN_CONFIRMATION_SECONDS, QUEUE_WARNING_MAX_CONFIRMATION_SECONDS]));
   }
 
-  if (sourceState === "AVAILABLE") {
-    for (const alertKey of FIXED_ALERT_KEYS) {
-      if (observedKeys.has(alertKey)) continue;
-      statements.push(opsStatement(env.OPS_DB, "ops_incident_resolve", `
-        UPDATE alert_incidents
-           SET incident_state = 'RESOLVED', resolved_at = ?1, updated_at = ?1
-         WHERE environment_code = ?2 AND alert_key = ?3
-           AND incident_state <> 'RESOLVED' AND last_seen_at <= ?1
-           AND NOT EXISTS (
-             SELECT 1 FROM monitor_runs WHERE environment_code = ?2 AND started_at > ?1
-           )
-      `, [incidentObservedAt, environment, alertKey]));
-    }
+  for (const alertKey of resolvableKeys) {
+    if (observedKeys.has(alertKey)) continue;
+    statements.push(opsStatement(env.OPS_DB, "ops_incident_resolve", `
+      UPDATE alert_incidents
+         SET incident_state = 'RESOLVED', resolved_at = ?1, updated_at = ?1
+       WHERE environment_code = ?2 AND alert_key = ?3
+         AND incident_state <> 'RESOLVED' AND last_seen_at <= ?1
+         AND NOT EXISTS (
+           SELECT 1 FROM monitor_runs WHERE environment_code = ?2 AND started_at > ?1
+         )
+    `, [incidentObservedAt, environment, alertKey]));
   }
 
   const retentionCutoff = new Date(Date.parse(completedAt) - clampInt(env.OPS_MONITOR_RETENTION_DAYS,
@@ -245,7 +294,15 @@ async function runMonitor(env, scheduledAt, observedAt = new Date()) {
   `, [retentionCutoff]));
 
   await env.OPS_DB.batch(statements);
-  return { runState, sourceState, signals, observedSignalCount, warningCount, criticalCount };
+  return {
+    runState,
+    sourceState,
+    signals,
+    resolvableKeys: Object.freeze([...resolvableKeys]),
+    observedSignalCount,
+    warningCount,
+    criticalCount,
+  };
 }
 
 async function runAlertEngine(env, observedAt = new Date(), providedConfig = null) {
@@ -541,10 +598,19 @@ async function planAlertDeliveries(db, nowIso, dedupeSeconds = DEFAULT_ALERT_DED
              incident.environment_code, incident.alert_key, incident.severity_code,
              incident.latest_signal_count, incident.reason_code, ?5, 'OPS_ALERT_V1',
              'PENDING', 0, ?4, ?4, incident.first_seen_at, incident.last_seen_at, NULL, ?4, ?4
-        FROM alert_incidents AS incident
+       FROM alert_incidents AS incident
        WHERE incident.incident_state <> 'RESOLVED'
          AND incident.environment_code = ?6
-    `, common);
+         AND (
+           incident.alert_key <> 'QUEUE_BACKLOG_STALE' OR
+           incident.severity_code = 'CRITICAL' OR
+           (
+             incident.occurrence_count >= 2 AND
+             CAST(strftime('%s', incident.last_seen_at) AS INTEGER) -
+               CAST(strftime('%s', incident.first_seen_at) AS INTEGER) >= ?7
+           )
+         )
+    `, [...common, QUEUE_WARNING_MIN_CONFIRMATION_SECONDS]);
     await opsRun(db, "ops_alert_plan_escalation", `
       INSERT OR IGNORE INTO alert_deliveries (
         alert_delivery_id, alert_incident_id, delivery_kind, channel_code, target_role_code,
@@ -848,6 +914,196 @@ async function readConnectorSignals(env, now) {
   return signals;
 }
 
+async function readQueueSignals(env, now, fetchImpl = globalThis.fetch) {
+  let config;
+  try {
+    config = validateQueueMetricsConfiguration(env);
+  } catch {
+    return Object.freeze({
+      sourceState: "UNAVAILABLE",
+      signals: Object.freeze([
+        makeSignal("QUEUE_METRICS_UNAVAILABLE", "CRITICAL", 2, "QUEUE_METRICS_SOURCE_UNAVAILABLE"),
+      ]),
+      resolvableKeys: Object.freeze([]),
+    });
+  }
+
+  const [mainResult, dlqResult] = await Promise.all([
+    settleQueueMetrics(() => fetchQueueMetrics(config.accountId, config.mainQueueId, config.token, now, fetchImpl)),
+    settleQueueMetrics(() => fetchQueueMetrics(config.accountId, config.dlqQueueId, config.token, now, fetchImpl)),
+  ]);
+  const signals = [];
+  const resolvableKeys = new Set();
+  let failedSourceCount = 0;
+
+  if (mainResult.ok && !(mainResult.metrics.backlogCount > 0 && mainResult.metrics.oldestMessageAt === null)) {
+    resolvableKeys.add("QUEUE_BACKLOG_STALE");
+    if (mainResult.metrics.backlogCount > 0) {
+      const ageSeconds = Math.max(0,
+        Math.floor((now.getTime() - mainResult.metrics.oldestMessageAt.getTime()) / 1000));
+      if (ageSeconds >= config.warningAgeSeconds) {
+        signals.push(makeSignal(
+          "QUEUE_BACKLOG_STALE",
+          ageSeconds >= config.criticalAgeSeconds ? "CRITICAL" : "WARNING",
+          mainResult.metrics.backlogCount,
+          "QUEUE_MESSAGE_AGE_STALE",
+          mainResult.metrics.oldestMessageAt.toISOString(),
+        ));
+      }
+    }
+  } else {
+    failedSourceCount += 1;
+  }
+
+  if (dlqResult.ok) {
+    resolvableKeys.add("QUEUE_DLQ_NONEMPTY");
+    if (dlqResult.metrics.backlogCount > 0) {
+      signals.push(makeSignal(
+        "QUEUE_DLQ_NONEMPTY",
+        "CRITICAL",
+        dlqResult.metrics.backlogCount,
+        "QUEUE_DEAD_LETTER_NONEMPTY",
+        dlqResult.metrics.oldestMessageAt?.toISOString() || null,
+      ));
+    }
+  } else {
+    failedSourceCount += 1;
+  }
+
+  if (failedSourceCount === 0) {
+    resolvableKeys.add("QUEUE_METRICS_UNAVAILABLE");
+  } else {
+    signals.push(makeSignal(
+      "QUEUE_METRICS_UNAVAILABLE",
+      "CRITICAL",
+      failedSourceCount,
+      "QUEUE_METRICS_SOURCE_UNAVAILABLE",
+    ));
+  }
+
+  return Object.freeze({
+    sourceState: failedSourceCount === 0 ? "AVAILABLE" : "UNAVAILABLE",
+    signals: Object.freeze(signals),
+    resolvableKeys: Object.freeze([...resolvableKeys]),
+  });
+}
+
+function validateQueueMetricsConfiguration(env) {
+  if (String(env?.OPS_SCHEMA_VERSION || "").trim() !== ALERT_SCHEMA_VERSION) {
+    throw new Error("OPS_QUEUE_SCHEMA_VERSION_INVALID");
+  }
+  const accountId = String(env?.OPS_CLOUDFLARE_ACCOUNT_ID || "").trim();
+  const mainQueueId = String(env?.OPS_CONNECTOR_QUEUE_ID || "").trim();
+  const dlqQueueId = String(env?.OPS_CONNECTOR_DLQ_ID || "").trim();
+  if (![accountId, mainQueueId, dlqQueueId].every((value) => /^[0-9a-f]{32}$/.test(value))) {
+    throw new Error("OPS_QUEUE_RESOURCE_ID_INVALID");
+  }
+  if (mainQueueId === dlqQueueId) throw new Error("OPS_QUEUE_RESOURCE_IDS_MUST_BE_DISTINCT");
+  const token = String(env?.OPS_CLOUDFLARE_QUEUES_READ_TOKEN || "");
+  if (token.length < 20 || token.length > 512 || token !== token.trim() || /\s/.test(token)) {
+    throw new Error("OPS_QUEUE_READ_TOKEN_INVALID");
+  }
+  const warningAgeSeconds = clampInt(env?.OPS_QUEUE_WARNING_AGE_SECONDS,
+    DEFAULT_QUEUE_WARNING_AGE_SECONDS, 60, 86400);
+  const criticalAgeSeconds = clampInt(env?.OPS_QUEUE_CRITICAL_AGE_SECONDS,
+    DEFAULT_QUEUE_CRITICAL_AGE_SECONDS, warningAgeSeconds, 172800);
+  return Object.freeze({ accountId, mainQueueId, dlqQueueId, token, warningAgeSeconds, criticalAgeSeconds });
+}
+
+async function settleQueueMetrics(operation) {
+  try {
+    return Object.freeze({ ok: true, metrics: await operation() });
+  } catch {
+    return Object.freeze({ ok: false, metrics: null });
+  }
+}
+
+async function fetchQueueMetrics(accountId, queueId, token, now, fetchImpl) {
+  if (typeof fetchImpl !== "function") throw new Error("OPS_QUEUE_FETCH_UNAVAILABLE");
+  const endpoint = new URL(`/client/v4/accounts/${accountId}/queues/${queueId}/metrics`, CLOUDFLARE_API_ORIGIN);
+  if (endpoint.origin !== CLOUDFLARE_API_ORIGIN || endpoint.search || endpoint.hash) {
+    throw new Error("OPS_QUEUE_ENDPOINT_INVALID");
+  }
+  let response;
+  try {
+    response = await fetchImpl(endpoint.toString(), {
+      method: "GET",
+      headers: Object.freeze({
+        Accept: "application/json",
+        Authorization: `Bearer ${token}`,
+      }),
+      redirect: "error",
+      signal: AbortSignal.timeout(QUEUE_METRICS_TIMEOUT_MS),
+    });
+  } catch {
+    throw new Error("OPS_QUEUE_REQUEST_FAILED");
+  }
+  const responseText = await readBoundedResponseText(response, QUEUE_METRICS_MAX_RESPONSE_BYTES);
+  if (!response?.ok) throw new Error("OPS_QUEUE_RESPONSE_REJECTED");
+  let payload;
+  try {
+    payload = JSON.parse(responseText);
+  } catch {
+    throw new Error("OPS_QUEUE_RESPONSE_INVALID");
+  }
+  if (!isPlainRecord(payload) || payload.success !== true || !isPlainRecord(payload.result)) {
+    throw new Error("OPS_QUEUE_RESPONSE_INVALID");
+  }
+  if (Object.hasOwn(payload, "errors") &&
+      (!Array.isArray(payload.errors) || payload.errors.length > 0)) {
+    throw new Error("OPS_QUEUE_RESPONSE_INVALID");
+  }
+  const backlogCount = queueMetricInteger(payload.result.backlog_count, 1000000000);
+  const backlogBytes = queueMetricInteger(payload.result.backlog_bytes, Number.MAX_SAFE_INTEGER);
+  const oldestTimestampMs = queueMetricInteger(payload.result.oldest_message_timestamp_ms, Number.MAX_SAFE_INTEGER);
+  if (oldestTimestampMs > now.getTime() + QUEUE_METRICS_FUTURE_TOLERANCE_MS) {
+    throw new Error("OPS_QUEUE_TIMESTAMP_INVALID");
+  }
+  return Object.freeze({
+    backlogCount,
+    backlogBytes,
+    oldestMessageAt: backlogCount > 0 && oldestTimestampMs > 0 ? new Date(oldestTimestampMs) : null,
+  });
+}
+
+async function readBoundedResponseText(response, maximumBytes) {
+  if (!response || !response.body || typeof response.body.getReader !== "function") {
+    throw new Error("OPS_QUEUE_RESPONSE_INVALID");
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let byteCount = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!(value instanceof Uint8Array)) throw new Error("OPS_QUEUE_RESPONSE_INVALID");
+    byteCount += value.byteLength;
+    if (byteCount > maximumBytes) {
+      try { await reader.cancel(); } catch { /* no-op */ }
+      throw new Error("OPS_QUEUE_RESPONSE_TOO_LARGE");
+    }
+    chunks.push(value);
+  }
+  const combined = new Uint8Array(byteCount);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder("utf-8", { fatal: true }).decode(combined);
+}
+
+function queueMetricInteger(value, maximum) {
+  if (!Number.isSafeInteger(value) || value < 0 || value > maximum) {
+    throw new Error("OPS_QUEUE_METRIC_INVALID");
+  }
+  return value;
+}
+
+function isPlainRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 function summarizeAgeRows(rows, now) {
   let count = 0;
   let oldest = null;
@@ -929,6 +1185,8 @@ function flag(value) {
 export const __test = Object.freeze({
   runMonitor,
   readConnectorSignals,
+  readQueueSignals,
+  fetchQueueMetrics,
   runAlertEngine,
   planAlertDeliveries,
   buildAlertMessage,

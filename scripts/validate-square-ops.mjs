@@ -15,6 +15,7 @@ const TEST_PRIVATE_EMAIL = ["private.person", "example.com"].join("@");
 
 const expectedFlags = [
   "OPS_MONITORING_ENABLED",
+  "OPS_QUEUE_MONITORING_ENABLED",
   "OPS_ALERTS_ENABLED",
   "OPS_BACKUPS_ENABLED",
   "OPS_RESTORE_TESTS_ENABLED",
@@ -28,6 +29,8 @@ const expectedMonitorVars = {
   OPS_REJECTION_LOOKBACK_HOURS: "24",
   OPS_MONITOR_RETENTION_DAYS: "30",
   OPS_ALERT_DEDUPE_SECONDS: "3600",
+  OPS_QUEUE_WARNING_AGE_SECONDS: "600",
+  OPS_QUEUE_CRITICAL_AGE_SECONDS: "1800",
 };
 
 const expectedColumns = {
@@ -69,7 +72,7 @@ function validateWranglerConfiguration(relativePath, environment) {
   assert.doesNotMatch(config, /^routes?\s*=/m, `${relativePath} must remain scheduled-only`);
   assert.match(config, /\[triggers\][\s\S]*?crons\s*=/, `${relativePath} needs a scheduled trigger`);
   assert.match(config, new RegExp(`^OPS_ENVIRONMENT\\s*=\\s*"${environment}"$`, "m"));
-  assert.match(config, /^OPS_SCHEMA_VERSION\s*=\s*"2"$/m, `${relativePath} must require operations schema 2`);
+  assert.match(config, /^OPS_SCHEMA_VERSION\s*=\s*"3"$/m, `${relativePath} must require operations schema 3`);
 
   for (const flagName of expectedFlags) {
     assert.match(config, new RegExp(`^${flagName}\\s*=\\s*"false"$`, "m"), `${flagName} must default false`);
@@ -84,6 +87,13 @@ function validateWranglerConfiguration(relativePath, environment) {
       `${relativePath} must retain two D1 placeholders`);
     assert.match(config, /bucket_name\s*=\s*"replace-with-[a-z0-9-]+"/,
       `${relativePath} must retain the R2 placeholder`);
+    for (const expectedLine of [
+      'OPS_CLOUDFLARE_ACCOUNT_ID = "REPLACE_WITH_CLOUDFLARE_ACCOUNT_ID"',
+      'OPS_CONNECTOR_QUEUE_ID = "REPLACE_WITH_CONNECTOR_QUEUE_ID"',
+      'OPS_CONNECTOR_DLQ_ID = "REPLACE_WITH_CONNECTOR_DLQ_ID"',
+    ]) {
+      assert.ok(config.includes(expectedLine), `${relativePath} must retain ${expectedLine}`);
+    }
   } else {
     for (const expectedLine of [
       'database_name = "spartan-square-ops-sandbox"',
@@ -92,6 +102,9 @@ function validateWranglerConfiguration(relativePath, environment) {
       'database_name = "spartan-square-connector-sandbox"',
       'database_id = "9531221e-cabe-4ed4-b7d4-f715798b8945"',
       'preview_database_id = "ffd69503-aa8d-4677-ac4f-8875a0860bb2"',
+      'OPS_CLOUDFLARE_ACCOUNT_ID = "b20efd8c50c039e95d591b9cec95a58b"',
+      'OPS_CONNECTOR_QUEUE_ID = "abf546a264de4b01b13b73fee606d6c4"',
+      'OPS_CONNECTOR_DLQ_ID = "94a08dbb85f745e8a4a7ac4e58b9e818"',
     ]) {
       assert.ok(config.includes(expectedLine), `${relativePath} must retain ${expectedLine}`);
     }
@@ -102,6 +115,10 @@ function validateWranglerConfiguration(relativePath, environment) {
   }
   assert.doesNotMatch(config, /\[\[send_email\]\]|destination_address|allowed_destination_addresses/,
     `${relativePath} must not bind an alert destination yet`);
+  assert.doesNotMatch(config, /\[\[queues\.(?:producers|consumers)\]\]/,
+    `${relativePath} must not gain a producer-capable or consuming Queue binding`);
+  assert.doesNotMatch(config, /OPS_CLOUDFLARE_QUEUES_READ_TOKEN/,
+    `${relativePath} must not contain the deploy-only Queue read token`);
 }
 
 function validateMigration() {
@@ -505,6 +522,112 @@ function validateAlertMigrationUpgrade() {
     "1", "A rejected orphan migration must atomically preserve its original evidence");
 }
 
+function validateQueueAlertMigrationUpgrade() {
+  const databasePath = path.join(tempRoot, "ops-queue-alert-upgrade.sqlite");
+  applyOpsMigrationAtomically(databasePath, "square-ops/migrations/0001_ops_state.sql");
+  applyOpsMigrationAtomically(databasePath, "square-ops/migrations/0002_alert_delivery_engine.sql");
+  const incident = {
+    alert_incident_id: "v2-preserved-incident",
+    environment_code: "sandbox",
+    alert_key: "WEBHOOK_STALE",
+    severity_code: "WARNING",
+    incident_state: "OPEN",
+    occurrence_count: 2,
+    latest_signal_count: 3,
+    reason_code: "WEBHOOK_DELIVERY_STALE",
+    first_seen_at: "2026-08-18T12:00:00.000Z",
+    last_seen_at: "2026-08-18T12:05:00.000Z",
+    dedupe_until: "2026-08-18T13:00:00.000Z",
+    created_at: "2026-08-18T12:00:00.000Z",
+    updated_at: "2026-08-18T12:05:00.000Z",
+  };
+  const delivery = {
+    alert_delivery_id: "v2-preserved-delivery",
+    alert_incident_id: incident.alert_incident_id,
+    delivery_kind: "OPEN",
+    channel_code: "OWNER_EMAIL",
+    target_role_code: "OWNER",
+    environment_code: "sandbox",
+    alert_key: incident.alert_key,
+    severity_code: "WARNING",
+    signal_count: 3,
+    reason_code: incident.reason_code,
+    sender_fingerprint: "a".repeat(64),
+    message_version: "OPS_ALERT_V1",
+    delivery_state: "PENDING",
+    attempt_count: 0,
+    queued_at: "2026-08-18T12:05:00.000Z",
+    available_at: "2026-08-18T12:05:00.000Z",
+    first_observed_at: "2026-08-18T12:00:00.000Z",
+    latest_observed_at: "2026-08-18T12:05:00.000Z",
+    created_at: "2026-08-18T12:05:00.000Z",
+    updated_at: "2026-08-18T12:05:00.000Z",
+  };
+  sqlite(databasePath, `${insertStatement("alert_incidents", incident)}\n${insertStatement("alert_deliveries", delivery)}`);
+  const before = execFileSync("sqlite3", ["-json", databasePath,
+    "SELECT * FROM alert_deliveries ORDER BY alert_delivery_id;"], { encoding: "utf8" }).trim();
+  applyOpsMigrationAtomically(databasePath, "square-ops/migrations/0003_queue_monitoring_alerts.sql");
+  const after = execFileSync("sqlite3", ["-json", databasePath,
+    "SELECT * FROM alert_deliveries ORDER BY alert_delivery_id;"], { encoding: "utf8" }).trim();
+  assert.deepEqual(JSON.parse(after), JSON.parse(before), "Migration 0003 must preserve every v2 delivery value");
+  assert.deepEqual(nonemptyLines(sqlite(databasePath,
+    "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='alert_deliveries' AND name NOT LIKE 'sqlite_%' ORDER BY name;")),
+  ["alert_deliveries_incident_state_idx", "alert_deliveries_pending_idx"],
+  "Migration 0003 must recreate both reviewed delivery indexes");
+
+  const queuePairs = [
+    ["QUEUE_METRICS_UNAVAILABLE", "QUEUE_METRICS_SOURCE_UNAVAILABLE"],
+    ["QUEUE_BACKLOG_STALE", "QUEUE_MESSAGE_AGE_STALE"],
+    ["QUEUE_DLQ_NONEMPTY", "QUEUE_DEAD_LETTER_NONEMPTY"],
+  ];
+  for (const [index, [alertKey, reasonCode]] of queuePairs.entries()) {
+    const queueIncident = {
+      ...incident,
+      alert_incident_id: `queue-incident-${index}`,
+      alert_key: alertKey,
+      reason_code: reasonCode,
+    };
+    const queueDelivery = {
+      ...delivery,
+      alert_delivery_id: `queue-delivery-${index}`,
+      alert_incident_id: queueIncident.alert_incident_id,
+      alert_key: alertKey,
+      reason_code: reasonCode,
+    };
+    sqlite(databasePath,
+      `${insertStatement("alert_incidents", queueIncident)}\n${insertStatement("alert_deliveries", queueDelivery)}`);
+  }
+  assert.equal(sqlite(databasePath, "SELECT COUNT(*) FROM alert_deliveries;").trim(), "4");
+  assertCheckRejected(databasePath, "Migration 0003 must continue rejecting unreviewed alert/reason pairs",
+    insertStatement("alert_deliveries", {
+      ...delivery,
+      alert_delivery_id: "queue-bad-pair",
+      alert_incident_id: "queue-incident-1",
+      alert_key: "QUEUE_BACKLOG_STALE",
+      reason_code: "QUEUE_DEAD_LETTER_NONEMPTY",
+    }));
+  assert.equal(sqlite(databasePath, "PRAGMA integrity_check;").trim(), "ok");
+  assert.equal(sqlite(databasePath, "PRAGMA foreign_key_check;").trim(), "");
+
+  const mismatchedPath = path.join(tempRoot, "ops-queue-alert-mismatch.sqlite");
+  applyOpsMigrationAtomically(mismatchedPath, "square-ops/migrations/0001_ops_state.sql");
+  applyOpsMigrationAtomically(mismatchedPath, "square-ops/migrations/0002_alert_delivery_engine.sql");
+  sqlite(mismatchedPath, `${insertStatement("alert_incidents", incident)}\n${insertStatement("alert_deliveries", {
+    ...delivery,
+    environment_code: "production",
+  })}`);
+  const rejectedUpgrade = spawnSync("sqlite3", [mismatchedPath], {
+    input: atomicMigrationInput("square-ops/migrations/0003_queue_monitoring_alerts.sql"),
+    encoding: "utf8",
+  });
+  assert.notEqual(rejectedUpgrade.status, 0,
+    "Migration 0003 must reject environment-mismatched delivery evidence before rebuilding");
+  assert.match(rejectedUpgrade.stderr || "", /CHECK constraint failed/);
+  assert.equal(sqlite(mismatchedPath,
+    "SELECT environment_code FROM alert_deliveries WHERE alert_delivery_id='v2-preserved-delivery';").trim(),
+  "production", "A rejected migration 0003 must atomically preserve the original v2 table");
+}
+
 class MockStatement {
   constructor(db, op, sql) {
     this.db = db;
@@ -597,7 +720,18 @@ class MockOpsDB {
       if (!incident) return changed(0);
       incident.severity_code = incident.severity_code === "CRITICAL" || values[0] === "CRITICAL"
         ? "CRITICAL" : "WARNING";
-      if (incident.alert_incident_id !== values[1]) incident.occurrence_count += 1;
+      if (incident.alert_incident_id !== values[1]) {
+        const isQueueWarning = values[8] === 1;
+        const observationGapSeconds = Math.floor(
+          (Date.parse(values[4]) - Date.parse(incident.last_seen_at)) / 1000,
+        );
+        if (isQueueWarning && observationGapSeconds > values[10]) {
+          incident.occurrence_count = 1;
+          incident.first_seen_at = values[4];
+        } else if (!isQueueWarning || observationGapSeconds >= values[9]) {
+          incident.occurrence_count += 1;
+        }
+      }
       incident.latest_signal_count = values[2];
       incident.reason_code = values[3];
       incident.last_seen_at = values[4];
@@ -675,6 +809,11 @@ class SqliteD1 {
     const op = sql.match(/\/\*op:([a-z0-9_]+)\*\//i)?.[1];
     assert.ok(op, "Every alert operation must carry an operation tag");
     return new SqliteD1Statement(this, op, sql);
+  }
+  async batch(statements) {
+    const results = [];
+    for (const statement of statements) results.push(await statement.run());
+    return results;
   }
   execute(op, values, mode, sql) {
     this.executed.push({ op, values: [...values], sql });
@@ -844,7 +983,17 @@ async function validateSourceContract() {
 async function validateWorkerBoundary() {
   const sourcePath = path.join(root, "square-ops/src/index.mjs");
   const source = read("square-ops/src/index.mjs");
-  assert.doesNotMatch(source, /\bfetch\s*\(/, "Operations monitor must not make network requests");
+  assert.match(source, /const CLOUDFLARE_API_ORIGIN = "https:\/\/api\.cloudflare\.com";/,
+    "Queue metrics must use the fixed Cloudflare API origin");
+  assert.match(source, /const QUEUE_METRICS_TIMEOUT_MS = 5000;/,
+    "Queue metrics must retain the reviewed five-second timeout");
+  assert.match(source, /AbortSignal\.timeout\(QUEUE_METRICS_TIMEOUT_MS\)/,
+    "Every Queue metrics request must carry the reviewed timeout signal");
+  assert.match(source, /method: "GET"/, "Queue metrics must use a read-only GET request");
+  assert.equal((source.match(/fetchImpl\s*\(/g) || []).length, 1,
+    "The reviewed Queue metrics adapter must remain the only network call");
+  assert.doesNotMatch(source, /\/messages(?:[/'"`?]|$)|graphql|sendBatch\s*\(/i,
+    "Operations monitoring must not list, pull, acknowledge, retry or send Queue messages");
   assert.doesNotMatch(source, /\.put\s*\(/, "Operations monitor must not write R2 objects");
 
   const workerModule = await import(`${pathToFileURL(sourcePath).href}?validation=${Date.now()}`);
@@ -853,37 +1002,56 @@ async function validateWorkerBoundary() {
   assert.equal(Object.hasOwn(workerModule.default, "fetch"), false, "Public fetch handler is forbidden");
   assert.deepEqual(Object.keys(workerModule.default).sort(), ["scheduled"], "Only the scheduled handler is allowed");
 
-  for (const mode of ["missing", "explicit-false"]) {
-    let bindingReads = 0;
-    let waitUntilCalls = 0;
-    const baseEnvironment = mode === "explicit-false"
-      ? Object.fromEntries(expectedFlags.map((flagName) => [flagName, "false"]))
-      : {};
-    const environment = new Proxy(baseEnvironment, {
+  const originalFetch = globalThis.fetch;
+  let prohibitedFetchCalls = 0;
+  globalThis.fetch = async () => {
+    prohibitedFetchCalls += 1;
+    throw new Error("POISON_FETCH_TOUCHED");
+  };
+  try {
+    for (const mode of ["missing", "explicit-false"]) {
+      let bindingReads = 0;
+      let waitUntilCalls = 0;
+      const baseEnvironment = mode === "explicit-false"
+        ? Object.fromEntries(expectedFlags.map((flagName) => [flagName, "false"]))
+        : {};
+      const environment = new Proxy(baseEnvironment, {
+        get(target, property, receiver) {
+          if (["OPS_DB", "CONNECTOR_DB", "BACKUP_BUCKET", "OPS_OWNER_EMAIL", "OPS_BACKUP_OWNER_EMAIL",
+            "OPS_ALERT_FROM_EMAIL", "OPS_CLOUDFLARE_QUEUES_READ_TOKEN", "OPS_CLOUDFLARE_ACCOUNT_ID",
+            "OPS_CONNECTOR_QUEUE_ID", "OPS_CONNECTOR_DLQ_ID"].includes(String(property))) bindingReads += 1;
+          return Reflect.get(target, property, receiver);
+        },
+      });
+      const context = { waitUntil() { waitUntilCalls += 1; } };
+      await workerModule.default.scheduled({ cron: "*/5 * * * *", scheduledTime: Date.now() }, environment, context);
+      assert.equal(bindingReads, 0, `${mode} flags must not touch a binding or Queue credential`);
+      assert.equal(waitUntilCalls, 0, `${mode} flags must not schedule background work`);
+    }
+
+    let wrongCronBindingReads = 0;
+    const wrongCronEnvironment = new Proxy({
+      OPS_MONITORING_ENABLED: "true",
+      OPS_QUEUE_MONITORING_ENABLED: "true",
+      OPS_ALERTS_ENABLED: "true",
+    }, {
       get(target, property, receiver) {
-        if (["OPS_DB", "CONNECTOR_DB", "BACKUP_BUCKET", "OPS_OWNER_EMAIL", "OPS_BACKUP_OWNER_EMAIL",
-          "OPS_ALERT_FROM_EMAIL"].includes(String(property))) bindingReads += 1;
+        if (["OPS_DB", "CONNECTOR_DB", "OPS_OWNER_EMAIL", "OPS_BACKUP_OWNER_EMAIL",
+          "OPS_ALERT_FROM_EMAIL", "OPS_CLOUDFLARE_QUEUES_READ_TOKEN", "OPS_CLOUDFLARE_ACCOUNT_ID",
+          "OPS_CONNECTOR_QUEUE_ID", "OPS_CONNECTOR_DLQ_ID"].includes(String(property))) {
+          wrongCronBindingReads += 1;
+        }
         return Reflect.get(target, property, receiver);
       },
     });
-    const context = { waitUntil() { waitUntilCalls += 1; } };
-    await workerModule.default.scheduled({ cron: "*/5 * * * *", scheduledTime: Date.now() }, environment, context);
-    assert.equal(bindingReads, 0, `${mode} flags must not touch a binding`);
-    assert.equal(waitUntilCalls, 0, `${mode} flags must not schedule background work`);
+    await workerModule.default.scheduled({ cron: "15 3 * * *", scheduledTime: Date.now() }, wrongCronEnvironment, {});
+    assert.equal(wrongCronBindingReads, 0, "Monitoring must not run on the reserved backup cron");
+    await workerModule.default.scheduled({ scheduledTime: Date.now() }, wrongCronEnvironment, {});
+    assert.equal(wrongCronBindingReads, 0, "Monitoring must require the exact five-minute cron");
+  } finally {
+    globalThis.fetch = originalFetch;
   }
-
-  let wrongCronBindingReads = 0;
-  const wrongCronEnvironment = new Proxy({ OPS_MONITORING_ENABLED: "true", OPS_ALERTS_ENABLED: "true" }, {
-    get(target, property, receiver) {
-      if (["OPS_DB", "CONNECTOR_DB", "OPS_OWNER_EMAIL", "OPS_BACKUP_OWNER_EMAIL",
-        "OPS_ALERT_FROM_EMAIL"].includes(String(property))) wrongCronBindingReads += 1;
-      return Reflect.get(target, property, receiver);
-    },
-  });
-  await workerModule.default.scheduled({ cron: "15 3 * * *", scheduledTime: Date.now() }, wrongCronEnvironment, {});
-  assert.equal(wrongCronBindingReads, 0, "Monitoring must not run on the reserved backup cron");
-  await workerModule.default.scheduled({ scheduledTime: Date.now() }, wrongCronEnvironment, {});
-  assert.equal(wrongCronBindingReads, 0, "Monitoring must require the exact five-minute cron");
+  assert.equal(prohibitedFetchCalls, 0, "Default-off and wrong-cron paths must perform zero network requests");
 
   for (const unsupportedFlag of ["OPS_BACKUPS_ENABLED", "OPS_RESTORE_TESTS_ENABLED"]) {
     await assert.rejects(
@@ -906,8 +1074,18 @@ async function validateWorkerBoundary() {
     /OPS_ALERTS_REQUIRE_MONITORING/,
     "Alert draining must require the monitor on the exact five-minute cron",
   );
+  await assert.rejects(
+    workerModule.default.scheduled(
+      { cron: "*/5 * * * *", scheduledTime: Date.now() },
+      { OPS_QUEUE_MONITORING_ENABLED: "true", OPS_MONITORING_ENABLED: "false" },
+      {},
+    ),
+    /OPS_QUEUE_MONITORING_REQUIRES_MONITORING/,
+    "Queue monitoring must require the aggregate monitor on the exact five-minute cron",
+  );
 
   await validateMonitorBehavior(workerModule);
+  await validateQueueMonitorBehavior(workerModule);
   await validateAlertBehavior(workerModule);
 }
 
@@ -1145,6 +1323,339 @@ async function validateMonitorBehavior(workerModule) {
     "Monitor retention must preserve unexpired run rows");
 }
 
+async function validateQueueMonitorBehavior(workerModule) {
+  const base = new Date("2026-08-18T12:00:00.000Z");
+  const accountId = "a".repeat(32);
+  const mainQueueId = "b".repeat(32);
+  const dlqQueueId = "c".repeat(32);
+  const token = ["queue", "read", "fixture", "value"].join("-");
+  const at = (seconds) => new Date(base.getTime() + seconds * 1000);
+  const payload = ({ count = 0, bytes = 0, oldestMs = 0, errors, success = true } = {}) => {
+    const value = {
+      success,
+      result: { backlog_count: count, backlog_bytes: bytes, oldest_message_timestamp_ms: oldestMs },
+    };
+    if (errors !== undefined) value.errors = errors;
+    return value;
+  };
+  const response = (value, status = 200) => new Response(JSON.stringify(value), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+  const baseEnvironment = (ops = new MockOpsDB(), connector = new MockConnectorDB(), extra = {}) => ({
+    OPS_ENVIRONMENT: "sandbox",
+    OPS_SCHEMA_VERSION: "3",
+    OPS_MONITORING_ENABLED: "true",
+    OPS_QUEUE_MONITORING_ENABLED: "true",
+    OPS_ALERTS_ENABLED: "false",
+    OPS_EXPECT_RECONCILIATION: "false",
+    OPS_WARNING_AGE_SECONDS: "600",
+    OPS_CRITICAL_AGE_SECONDS: "1800",
+    OPS_RECONCILIATION_MAX_AGE_SECONDS: "1800",
+    OPS_REJECTION_LOOKBACK_HOURS: "24",
+    OPS_MONITOR_RETENTION_DAYS: "30",
+    OPS_ALERT_DEDUPE_SECONDS: "3600",
+    OPS_CLOUDFLARE_ACCOUNT_ID: accountId,
+    OPS_CONNECTOR_QUEUE_ID: mainQueueId,
+    OPS_CONNECTOR_DLQ_ID: dlqQueueId,
+    OPS_QUEUE_WARNING_AGE_SECONDS: "600",
+    OPS_QUEUE_CRITICAL_AGE_SECONDS: "1800",
+    OPS_CLOUDFLARE_QUEUES_READ_TOKEN: token,
+    OPS_DB: ops,
+    CONNECTOR_DB: connector,
+    ...extra,
+  });
+  const routedFetch = ({ main = payload(), dlq = payload(), calls = [] } = {}) =>
+    async (url, options = {}) => {
+      calls.push({ url, options });
+      const parsed = new URL(url);
+      const queueId = parsed.pathname.split("/").at(-2);
+      const selected = queueId === mainQueueId ? main : queueId === dlqQueueId ? dlq : null;
+      if (selected === null) throw new Error("UNEXPECTED_QUEUE_ID");
+      if (selected instanceof Error) throw selected;
+      if (typeof selected === "function") return selected(url, options);
+      return response(selected);
+    };
+
+  const contractCalls = [];
+  const exactMetrics = await workerModule.__test.fetchQueueMetrics(
+    accountId,
+    mainQueueId,
+    token,
+    base,
+    routedFetch({
+      calls: contractCalls,
+      main: payload({ count: 2, bytes: 240, oldestMs: base.getTime() - 300000, errors: [] }),
+    }),
+  );
+  assert.deepEqual(
+    [exactMetrics.backlogCount, exactMetrics.backlogBytes, exactMetrics.oldestMessageAt.toISOString()],
+    [2, 240, "2026-08-18T11:55:00.000Z"],
+  );
+  assert.equal(contractCalls.length, 1);
+  assert.equal(contractCalls[0].url,
+    `https://api.cloudflare.com/client/v4/accounts/${accountId}/queues/${mainQueueId}/metrics`);
+  assert.deepEqual({
+    method: contractCalls[0].options.method,
+    redirect: contractCalls[0].options.redirect,
+    accept: contractCalls[0].options.headers.Accept,
+    authorization: contractCalls[0].options.headers.Authorization,
+    hasBody: Object.hasOwn(contractCalls[0].options, "body"),
+    hasAbortSignal: contractCalls[0].options.signal instanceof AbortSignal,
+  }, {
+    method: "GET", redirect: "error", accept: "application/json",
+    authorization: `Bearer ${token}`, hasBody: false, hasAbortSignal: true,
+  }, "Queue metrics must use one exact read-only request contract");
+
+  for (const acceptedErrors of [undefined, []]) {
+    await workerModule.__test.fetchQueueMetrics(accountId, mainQueueId, token, base,
+      async () => response(payload({ errors: acceptedErrors })));
+  }
+  for (const rejectedErrors of ["provider detail", { code: 1000 }, [{ message: TEST_PRIVATE_EMAIL }]]) {
+    await assert.rejects(
+      workerModule.__test.fetchQueueMetrics(accountId, mainQueueId, token, base,
+        async () => response(payload({ errors: rejectedErrors }))),
+      /OPS_QUEUE_RESPONSE_INVALID/,
+      "Only an absent or empty-array Cloudflare errors field is valid",
+    );
+  }
+  for (const status of [401, 403, 404, 429, 500, 503]) {
+    await assert.rejects(
+      workerModule.__test.fetchQueueMetrics(accountId, mainQueueId, token, base,
+        async () => response(payload(), status)),
+      /OPS_QUEUE_RESPONSE_REJECTED/,
+      `HTTP ${status} must fail closed`,
+    );
+  }
+  for (const [label, fetchImpl] of [
+    ["network rejection", async () => { throw new Error(TEST_PRIVATE_EMAIL); }],
+    ["malformed JSON", async () => new Response("not-json")],
+    ["provider failure", async () => response(payload({ success: false }))],
+    ["negative count", async () => response(payload({ count: -1 }))],
+    ["future timestamp", async () => response(payload({ count: 1, oldestMs: base.getTime() + 301000 }))],
+    ["oversized response", async () => new Response(JSON.stringify({
+      ...payload(), padding: "x".repeat(9000),
+    }))],
+  ]) {
+    await assert.rejects(
+      workerModule.__test.fetchQueueMetrics(accountId, mainQueueId, token, base, fetchImpl),
+      /OPS_QUEUE_/,
+      `${label} must fail closed`,
+    );
+  }
+  const exactFutureBoundary = await workerModule.__test.fetchQueueMetrics(
+    accountId,
+    mainQueueId,
+    token,
+    base,
+    async () => response(payload({ count: 1, oldestMs: base.getTime() + 300000 })),
+  );
+  assert.equal(exactFutureBoundary.oldestMessageAt.toISOString(), "2026-08-18T12:05:00.000Z",
+    "The exact five-minute provider-clock tolerance is accepted; any later value is rejected");
+
+  let poisonFetchCalls = 0;
+  const invalidConfig = await workerModule.__test.readQueueSignals({
+    ...baseEnvironment(),
+    OPS_CONNECTOR_QUEUE_ID: "not-a-queue-id",
+  }, base, async () => {
+    poisonFetchCalls += 1;
+    throw new Error("POISON_FETCH_TOUCHED");
+  });
+  assert.equal(poisonFetchCalls, 0, "Invalid Queue configuration must fail before any request");
+  assert.deepEqual([
+    invalidConfig.sourceState,
+    invalidConfig.signals[0].alertKey,
+    invalidConfig.signals[0].count,
+  ], ["UNAVAILABLE", "QUEUE_METRICS_UNAVAILABLE", 2]);
+
+  const zeroWithOldest = await workerModule.__test.readQueueSignals(baseEnvironment(), base,
+    routedFetch({
+      main: payload({ count: 0, bytes: 0, oldestMs: base.getTime() - 7200000 }),
+      dlq: payload({ count: 0, bytes: 0, oldestMs: base.getTime() - 7200000 }),
+    }));
+  assert.deepEqual([zeroWithOldest.sourceState, zeroWithOldest.signals.length], ["AVAILABLE", 0],
+    "A zero backlog is clear even if best-effort metrics retain a nonzero oldest timestamp");
+  assert.deepEqual([...zeroWithOldest.resolvableKeys].sort(), [
+    "QUEUE_BACKLOG_STALE", "QUEUE_DLQ_NONEMPTY", "QUEUE_METRICS_UNAVAILABLE",
+  ]);
+
+  const mainSignalAtAge = async (ageSeconds) => workerModule.__test.readQueueSignals(baseEnvironment(), base,
+    routedFetch({ main: payload({ count: 1, bytes: 10, oldestMs: base.getTime() - ageSeconds * 1000 }) }));
+  assert.equal((await mainSignalAtAge(599)).signals.some((item) => item.alertKey === "QUEUE_BACKLOG_STALE"), false);
+  assert.equal((await mainSignalAtAge(600)).signals.find((item) => item.alertKey === "QUEUE_BACKLOG_STALE").severity,
+    "WARNING");
+  assert.equal((await mainSignalAtAge(1799)).signals.find((item) => item.alertKey === "QUEUE_BACKLOG_STALE").severity,
+    "WARNING");
+  assert.equal((await mainSignalAtAge(1800)).signals.find((item) => item.alertKey === "QUEUE_BACKLOG_STALE").severity,
+    "CRITICAL");
+
+  const unknownMainAge = await workerModule.__test.readQueueSignals(baseEnvironment(), base,
+    routedFetch({ main: payload({ count: 1, bytes: 10, oldestMs: 0 }) }));
+  assert.deepEqual([
+    unknownMainAge.sourceState,
+    unknownMainAge.signals.find((item) => item.alertKey === "QUEUE_METRICS_UNAVAILABLE").count,
+  ], ["UNAVAILABLE", 1]);
+  assert.equal(unknownMainAge.resolvableKeys.includes("QUEUE_BACKLOG_STALE"), false,
+    "Unknown positive-backlog age must preserve any existing main-queue incident");
+
+  const nonemptyDlq = await workerModule.__test.readQueueSignals(baseEnvironment(), base,
+    routedFetch({ dlq: payload({ count: 1, bytes: 20, oldestMs: 0 }) }));
+  assert.deepEqual([
+    nonemptyDlq.sourceState,
+    nonemptyDlq.signals.find((item) => item.alertKey === "QUEUE_DLQ_NONEMPTY").severity,
+  ], ["AVAILABLE", "CRITICAL"], "Any DLQ backlog is critical even when oldest age is unknown");
+
+  const mainFailed = await workerModule.__test.readQueueSignals(baseEnvironment(), base,
+    routedFetch({ main: new Error("main-private-detail"), dlq: payload() }));
+  assert.deepEqual([...mainFailed.resolvableKeys], ["QUEUE_DLQ_NONEMPTY"]);
+  const dlqFailed = await workerModule.__test.readQueueSignals(baseEnvironment(), base,
+    routedFetch({ main: payload(), dlq: new Error("dlq-private-detail") }));
+  assert.deepEqual([...dlqFailed.resolvableKeys], ["QUEUE_BACKLOG_STALE"]);
+
+  const originalFetch = globalThis.fetch;
+  let observation = base;
+  let mainAgeSeconds = 600;
+  let mainFailure = false;
+  let dlqFailure = false;
+  globalThis.fetch = routedFetch({
+    main: () => mainFailure
+      ? Promise.reject(new Error(`main-${TEST_PRIVATE_EMAIL}`))
+      : Promise.resolve(response(payload({ count: 1, bytes: 10,
+        oldestMs: observation.getTime() - mainAgeSeconds * 1000 }))),
+    dlq: () => dlqFailure
+      ? Promise.reject(new Error(`dlq-${TEST_PRIVATE_EMAIL}`))
+      : Promise.resolve(response(payload())),
+  });
+  try {
+    const confirmationOps = new MockOpsDB();
+    const confirmationEnv = baseEnvironment(confirmationOps);
+    await workerModule.__test.runMonitor(confirmationEnv, observation, observation);
+    let incident = confirmationOps.incidents.find((row) => row.alert_key === "QUEUE_BACKLOG_STALE");
+    assert.deepEqual([incident.occurrence_count, incident.first_seen_at, incident.last_seen_at],
+      [1, base.toISOString(), base.toISOString()]);
+    observation = at(239);
+    await workerModule.__test.runMonitor(confirmationEnv, observation, observation);
+    incident = confirmationOps.incidents.find((row) => row.alert_key === "QUEUE_BACKLOG_STALE");
+    assert.equal(incident.occurrence_count, 1, "A warning sample before 240 seconds cannot confirm the condition");
+    observation = at(479);
+    await workerModule.__test.runMonitor(confirmationEnv, observation, observation);
+    assert.equal(incident.occurrence_count, 2,
+      "A later qualifying sample with at least 240 seconds separation confirms the warning");
+    validateCapturedQueueWarningStatements(confirmationOps.executed, {
+      occurrenceCount: 2,
+      firstSeenAt: base.toISOString(),
+      lastSeenAt: at(479).toISOString(),
+    });
+
+    const exactGapOps = new MockOpsDB();
+    const exactGapEnv = baseEnvironment(exactGapOps);
+    observation = base;
+    await workerModule.__test.runMonitor(exactGapEnv, observation, observation);
+    observation = at(540);
+    await workerModule.__test.runMonitor(exactGapEnv, observation, observation);
+    assert.equal(exactGapOps.incidents.find((row) => row.alert_key === "QUEUE_BACKLOG_STALE").occurrence_count, 2,
+      "The exact 540-second maximum confirmation gap remains consecutive");
+
+    const resetOps = new MockOpsDB();
+    const resetEnv = baseEnvironment(resetOps);
+    observation = base;
+    await workerModule.__test.runMonitor(resetEnv, observation, observation);
+    observation = at(541);
+    await workerModule.__test.runMonitor(resetEnv, observation, observation);
+    const resetIncident = resetOps.incidents.find((row) => row.alert_key === "QUEUE_BACKLOG_STALE");
+    assert.deepEqual([resetIncident.occurrence_count, resetIncident.first_seen_at], [1, at(541).toISOString()],
+      "A warning gap above 540 seconds starts a new confirmation sequence in the same incident");
+
+    const outOfOrderOps = new MockOpsDB();
+    const outOfOrderEnv = baseEnvironment(outOfOrderOps);
+    observation = at(600);
+    await workerModule.__test.runMonitor(outOfOrderEnv, observation, observation);
+    observation = base;
+    await workerModule.__test.runMonitor(outOfOrderEnv, observation, observation);
+    const outOfOrderIncident = outOfOrderOps.incidents.find((row) => row.alert_key === "QUEUE_BACKLOG_STALE");
+    assert.deepEqual([outOfOrderIncident.occurrence_count, outOfOrderIncident.first_seen_at,
+      outOfOrderIncident.last_seen_at], [1, at(600).toISOString(), at(600).toISOString()],
+    "An older Queue warning observation cannot confirm or rewrite a newer warning sample");
+
+    const partialOps = new MockOpsDB();
+    for (const [id, alertKey, reason] of [
+      ["main-existing", "QUEUE_BACKLOG_STALE", "QUEUE_MESSAGE_AGE_STALE"],
+      ["dlq-existing", "QUEUE_DLQ_NONEMPTY", "QUEUE_DEAD_LETTER_NONEMPTY"],
+    ]) {
+      partialOps.incidents.push({
+        alert_incident_id: id, environment_code: "sandbox", alert_key: alertKey,
+        severity_code: "WARNING", incident_state: "OPEN", occurrence_count: 1, latest_signal_count: 1,
+        reason_code: reason, first_seen_at: at(-600).toISOString(), last_seen_at: at(-600).toISOString(),
+        dedupe_until: at(3000).toISOString(), created_at: at(-600).toISOString(),
+        updated_at: at(-600).toISOString(), resolved_at: null,
+      });
+    }
+    observation = at(600);
+    mainFailure = true;
+    dlqFailure = false;
+    await workerModule.__test.runMonitor(baseEnvironment(partialOps), observation, observation);
+    assert.equal(partialOps.incidents.find((row) => row.alert_key === "QUEUE_BACKLOG_STALE").incident_state, "OPEN");
+    assert.equal(partialOps.incidents.find((row) => row.alert_key === "QUEUE_DLQ_NONEMPTY").incident_state, "RESOLVED");
+    assert.equal(partialOps.incidents.find((row) => row.alert_key === "QUEUE_METRICS_UNAVAILABLE").incident_state, "OPEN");
+    assert.doesNotMatch(JSON.stringify(partialOps.executed), /private\.person|example\.com/,
+      "Raw Queue provider failures must not enter operations evidence");
+
+    mainFailure = false;
+    dlqFailure = false;
+    mainAgeSeconds = 0;
+    observation = at(900);
+    await workerModule.__test.runMonitor(baseEnvironment(partialOps), observation, observation);
+    assert.equal(partialOps.incidents.filter((row) => row.incident_state !== "RESOLVED").length, 0,
+      "Verified metrics recovery resolves only the source domains that actually succeeded");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const suppressed = createAlertFixture();
+  insertAlertIncident(suppressed.databasePath, {
+    id: "queue-warning-unconfirmed", alertKey: "QUEUE_BACKLOG_STALE", severity: "WARNING",
+    occurrenceCount: 1, firstSeenAt: base.toISOString(), lastSeenAt: base.toISOString(),
+  });
+  await workerModule.__test.runAlertEngine(suppressed.env, base);
+  assert.deepEqual([suppressed.owner.calls.length, suppressed.backup.calls.length], [0, 0],
+    "A single Queue warning observation must not create an external delivery");
+  sqlite(suppressed.databasePath, `
+    UPDATE alert_incidents
+       SET occurrence_count=2, last_seen_at='${at(300).toISOString()}', updated_at='${at(300).toISOString()}'
+     WHERE alert_incident_id='queue-warning-unconfirmed';
+  `);
+  await workerModule.__test.runAlertEngine(suppressed.env, at(300));
+  assert.deepEqual([suppressed.owner.calls.length, suppressed.backup.calls.length], [1, 1],
+    "A confirmed Queue warning creates one role-isolated delivery per owner role");
+
+  const immediateCritical = createAlertFixture();
+  insertAlertIncident(immediateCritical.databasePath, {
+    id: "queue-critical-immediate", alertKey: "QUEUE_BACKLOG_STALE", severity: "CRITICAL",
+    occurrenceCount: 1, firstSeenAt: base.toISOString(), lastSeenAt: base.toISOString(),
+  });
+  await workerModule.__test.runAlertEngine(immediateCritical.env, base);
+  assert.deepEqual([immediateCritical.owner.calls.length, immediateCritical.backup.calls.length], [1, 1],
+    "A critical Queue age bypasses warning confirmation without duplicating notice kinds");
+}
+
+function validateCapturedQueueWarningStatements(executed, expected) {
+  const databasePath = path.join(tempRoot, `ops-captured-queue-warning-${Date.now()}.sqlite`);
+  applyOpsMigrations(databasePath);
+  for (const entry of executed) {
+    assert.ok(entry.sql, `Missing captured Queue SQL for ${entry.op}`);
+    sqlite(databasePath, bindSql(entry.sql, entry.values));
+  }
+  const row = parseRows(sqlite(databasePath, `
+    SELECT occurrence_count, first_seen_at, last_seen_at
+      FROM alert_incidents
+     WHERE alert_key='QUEUE_BACKLOG_STALE' AND incident_state='OPEN';
+  `))[0];
+  assert.deepEqual(row, [String(expected.occurrenceCount), expected.firstSeenAt, expected.lastSeenAt],
+    "Captured Queue warning SQL must preserve the reviewed confirmation behavior on real SQLite");
+  assert.equal(sqlite(databasePath, "PRAGMA integrity_check;").trim(), "ok");
+  assert.equal(sqlite(databasePath, "PRAGMA foreign_key_check;").trim(), "");
+}
+
 let alertFixtureSequence = 0;
 
 function createAlertFixture({ ownerOutcomes = [], backupOutcomes = [], failSentFinalizations = 0,
@@ -1157,7 +1668,7 @@ function createAlertFixture({ ownerOutcomes = [], backupOutcomes = [], failSentF
   const db = new SqliteD1(databasePath, { failSentFinalizations, mutateCandidates, beforeClaimOnce });
   const env = {
     OPS_ENVIRONMENT: "sandbox",
-    OPS_SCHEMA_VERSION: "2",
+    OPS_SCHEMA_VERSION: "3",
     OPS_MONITORING_ENABLED: "true",
     OPS_ALERTS_ENABLED: "true",
     OPS_ALERT_DEDUPE_SECONDS: "3600",
@@ -1179,7 +1690,16 @@ function insertAlertIncident(databasePath, {
   lastSeenAt = firstSeenAt,
   resolvedAt = null,
   environment = "sandbox",
+  occurrenceCount = 1,
 }) {
+  const reasonCode = {
+    WEBHOOK_STALE: "WEBHOOK_DELIVERY_STALE",
+    OUTBOX_DEAD: "OUTBOX_DELIVERY_DEAD",
+    QUEUE_METRICS_UNAVAILABLE: "QUEUE_METRICS_SOURCE_UNAVAILABLE",
+    QUEUE_BACKLOG_STALE: "QUEUE_MESSAGE_AGE_STALE",
+    QUEUE_DLQ_NONEMPTY: "QUEUE_DEAD_LETTER_NONEMPTY",
+  }[alertKey];
+  assert.ok(reasonCode, `Missing test reason for ${alertKey}`);
   const dedupeUntil = new Date(Date.parse(firstSeenAt) + 3600 * 1000).toISOString();
   sqlite(databasePath, insertStatement("alert_incidents", {
     alert_incident_id: id,
@@ -1187,9 +1707,9 @@ function insertAlertIncident(databasePath, {
     alert_key: alertKey,
     severity_code: severity,
     incident_state: state,
-    occurrence_count: 1,
+    occurrence_count: occurrenceCount,
     latest_signal_count: count,
-    reason_code: alertKey === "OUTBOX_DEAD" ? "OUTBOX_DELIVERY_DEAD" : "WEBHOOK_DELIVERY_STALE",
+    reason_code: reasonCode,
     first_seen_at: firstSeenAt,
     last_seen_at: lastSeenAt,
     dedupe_until: dedupeUntil,
@@ -1227,7 +1747,7 @@ async function validateAlertBehavior(workerModule) {
   await assert.rejects(workerModule.__test.runAlertEngine({
     OPS_DB: poisonDb,
     OPS_ENVIRONMENT: "sandbox",
-    OPS_SCHEMA_VERSION: "2",
+    OPS_SCHEMA_VERSION: "3",
     OPS_ALERT_FROM_EMAIL: TEST_ALERT_FROM,
   }, base), /OPS_ALERT_BINDING_NOT_CONFIGURED/);
   assert.equal(poisonPrepareCalls, 0, "Missing email bindings must fail before a D1 operation");
@@ -1235,7 +1755,7 @@ async function validateAlertBehavior(workerModule) {
   await assert.rejects(workerModule.__test.runAlertEngine({
     OPS_DB: poisonDb,
     OPS_ENVIRONMENT: "sandbox",
-    OPS_SCHEMA_VERSION: "2",
+    OPS_SCHEMA_VERSION: "3",
     OPS_ALERT_FROM_EMAIL: TEST_ALERT_FROM,
     OPS_OWNER_EMAIL: sharedBinding,
     OPS_BACKUP_OWNER_EMAIL: sharedBinding,
@@ -1244,7 +1764,7 @@ async function validateAlertBehavior(workerModule) {
   await assert.rejects(workerModule.__test.runAlertEngine({
     OPS_DB: poisonDb,
     OPS_ENVIRONMENT: "unknown",
-    OPS_SCHEMA_VERSION: "2",
+    OPS_SCHEMA_VERSION: "3",
   }, base), /OPS_ENVIRONMENT_INVALID/);
   assert.equal(poisonPrepareCalls, 0, "An invalid alert environment must fail before D1 is touched");
 
@@ -1758,6 +2278,7 @@ function applyOpsMigrations(databasePath) {
   for (const migrationPath of [
     "square-ops/migrations/0001_ops_state.sql",
     "square-ops/migrations/0002_alert_delivery_engine.sql",
+    "square-ops/migrations/0003_queue_monitoring_alerts.sql",
   ]) {
     applyOpsMigrationAtomically(databasePath, migrationPath);
   }
@@ -1812,6 +2333,7 @@ try {
   validateWranglerConfiguration("square-ops/wrangler.sandbox.toml", "sandbox");
   validateMigration();
   validateAlertMigrationUpgrade();
+  validateQueueAlertMigrationUpgrade();
   await validateSourceContract();
   await validateWorkerBoundary();
   validateDryRuns();

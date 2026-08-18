@@ -2,7 +2,7 @@
 
 Last reviewed: August 18, 2026
 
-Status: **the bounded D1-only monitor is remotely proven in the isolated sandbox, and the counts-only alert engine plus migration `0002` are deployed inertly. The permanent sandbox service remains scheduled-only with every capability flag false; alert sender/bindings, recurring backup and restore automation are not live.** Project 2 production activation remains blocked.
+Status: **the bounded D1 monitor is remotely proven in the isolated sandbox, and the counts-only alert engine plus migration `0002` are deployed inertly. A read-only Queue/DLQ metrics source and migration `0003` are implemented and locally validated but not remotely applied, deployed or enabled. The permanent sandbox service remains scheduled-only with every capability flag false; Queue token, alert sender/bindings, recurring backup and restore automation are not live.** Project 2 production activation remains blocked.
 
 ## Purpose and authority
 
@@ -15,11 +15,11 @@ The Square connector ledger remains authoritative for claims, provider links, pu
 - Production retains placeholder resources. Sandbox has separate runtime/preview operations D1 databases and a concrete aggregate source binding; every `OPS_*_ENABLED` flag is `false`.
 - The Worker has only a scheduled handler and no route, `fetch` handler or `workers.dev` exposure.
 - With missing or false flags, it returns without touching any binding, scheduling background work or making a network request.
-- Monitoring runs only when its flag is true and the exact five-minute cron fires. The deployed but disabled alert engine can run only on that same cron, requires monitoring plus schema `2`, and requires two distinct role bindings and a bounded sender. A wrong or missing cron touches none of those bindings. Backup and restore flags remain fail-closed because those lanes are not implemented.
+- Monitoring runs only when its flag is true and the exact five-minute cron fires. The locally implemented Queue source additionally requires its own flag, schema `3`, three exact resource IDs and a deploy-only Queues Read token. The deployed but disabled alert engine can run only on that same cron, requires monitoring and two distinct role bindings plus a bounded sender. A wrong or missing cron touches none of those bindings or credentials. Backup and restore flags remain fail-closed because those lanes are not implemented.
 - Migrations `0001` and `0002` are applied to both sandbox operations databases. Runtime preserved eight monitor runs and two resolved incidents with zero active incidents; preview remained empty; both have zero delivery, backup and restore rows and zero orphan deliveries. Remote inspection found 27 delivery columns, all 12 required fields and the required delivery index. An exported runtime copy passed SQLite integrity and foreign-key checks. The sandbox intentionally omits R2 because that account feature and the backup lane are not approved; production retains the future placeholder.
 - Permanent sandbox Worker version `a49059b4-6226-4cc9-be6e-ba65d94ab509` is bound to runtime operations D1 `2e2fc9f6-0a81-453b-9af6-8d4104965f8e` and connector D1 `9531221e-cabe-4ed4-b7d4-f715798b8945`, has only a scheduled handler and retains every capability false. The five-minute trigger after deployment left all counts and prior update timestamps unchanged, including zero alert deliveries.
 - A separate disposable proof Worker and disposable schema-complete/empty source databases proved healthy, warning, critical, source-unavailable, malformed-timestamp and recovery behavior. Concurrent older-warning/newer-healthy D1 batches left only a resolved history row and no active incident. Those disposable resources and direct guard rows were deleted afterward.
-- No checked configuration contains an email binding, sender or recipient. No connector configuration, sandbox runtime flag, Queue, webhook, Apps Script property or production account is changed by this inert schema-2 deployment.
+- No checked configuration contains an email binding, sender, recipient, Queue binding or token. The Queue metrics account/main/DLQ IDs are non-secret sandbox configuration only; the source flag is false. No connector configuration, sandbox runtime flag, Queue message, webhook, Apps Script property or production account is changed by the local schema-3 candidate.
 
 Do not enable monitoring merely because the inert service exists. Each active lane still requires a separate reviewed change, bounded proof and explicit approval.
 
@@ -53,9 +53,13 @@ The implemented evaluator uses four fixed, aggregate-only connector D1 queries. 
 
 The checked-in warning and critical overdue thresholds are 10 and 30 minutes. Monitoring uses actual observation time, while preserving the scheduled time for audit. A missing/query-failed/malformed signal source records `FAILED/UNAVAILABLE` and cannot clear another active incident. Monotonic run guards prevent an older observation that finishes late from reopening or resolving a newer incident. A later successful reconciliation clears an older overflow marker.
 
+The default-off Queue/DLQ candidate uses two fixed read-only REST requests to Cloudflare's Queue metrics endpoint. It intentionally has no Queue producer/consumer binding and no message-list, pull, acknowledge, retry, send or purge path. The future token must be limited to Account → Queues → Read for the one Spartan Cloudflare account and stored only as `OPS_CLOUDFLARE_QUEUES_READ_TOKEN`; Cloudflare currently scopes that permission to the account rather than individual queue IDs, so the Worker separately validates and allowlists the configured main/DLQ IDs.
+
+Queue metrics are best-effort operational signals, not ledger evidence. A main-queue backlog younger than 10 minutes is normal. A warning requires two qualifying observations separated by at least 240 and no more than 540 seconds; an oldest message at or above 30 minutes is immediately critical. Any positive DLQ count is immediately critical. A zero backlog wins over a stale nonzero oldest timestamp. A positive main backlog with no usable oldest timestamp is source-unavailable rather than healthy. Main and DLQ failures resolve only their own successfully observed domains; the shared source-unavailable condition clears only after both calls succeed in the same run. No message body, ID, metadata, account/queue ID, token, response body or raw provider error may enter operations D1 or an alert.
+
 One active incident is retained per environment/fixed alert key. Severity can escalate within that episode and intentionally does not downgrade until the condition verifies clear; recurrence after resolution creates a new historical episode. `occurrence_count` counts monitor observations and `latest_signal_count` records the latest aggregate affected-row count. Monitor-run rows are retained for 30 days. Alert reminder eligibility is based on the most recent successfully sent open/escalation notice, not the incident's older `dedupe_until` value.
 
-Not yet covered by this slice: Cloudflare Queue/DLQ depth, external credential/provider health, Apps Script probing, live external alert delivery, backup/restore freshness, or ledger/group comparison beyond the bounded connector codes. These require separately reviewed sources/transports. A monitor run is never `HEALTHY` when its connector source is unavailable.
+Not yet remotely covered by this slice: enabled Cloudflare Queue/DLQ depth, external credential/provider health, Apps Script probing, live external alert delivery, backup/restore freshness, or ledger/group comparison beyond the bounded connector codes. Queue code and local tests are complete, but migration, token, request and live failure/recovery evidence remain separate gates. A monitor run is never `HEALTHY` when a configured source is unavailable.
 
 ### Alert lane
 
@@ -105,7 +109,7 @@ Ordinary customer inactivity is a marketing signal, not an operations alert.
 
 ## Rollback order
 
-1. Set `OPS_ALERTS_ENABLED`, `OPS_BACKUPS_ENABLED`, `OPS_RESTORE_TESTS_ENABLED` and `OPS_MONITORING_ENABLED` to `false` in that order; verify the next scheduled invocation performs no binding access or external operation.
+1. Set `OPS_ALERTS_ENABLED`, `OPS_QUEUE_MONITORING_ENABLED`, `OPS_BACKUPS_ENABLED`, `OPS_RESTORE_TESTS_ENABLED` and `OPS_MONITORING_ENABLED` to `false` in that order; verify the next scheduled invocation performs no binding/credential access or external operation.
 2. Disable the optional Square website action/pass under the connector rollback plan if customer-facing correctness is at risk. The manual coupon remains available.
 3. Preserve operations D1, connector D1, Queue/DLQ and provider evidence. Do not delete business or provider records to make an alert clear.
 4. Revoke/rotate affected credentials for an active security incident.
@@ -123,6 +127,9 @@ Repository design items may be complete while every live activation item remains
 - [x] Migration `0001` passes local validation and isolated remote application; an export restored with five tables, integrity `ok`, no foreign-key failures and matching zero-row baseline.
 - [x] Migration `0002` and the default-off two-role alert state machine pass local SQLite upgrade, integrity, privacy, concurrency, retry and recovery validation.
 - [x] Migration `0002` is applied to isolated sandbox runtime and preview D1, with preserved counts, zero orphan/delivery rows and exported runtime integrity/foreign-key proof; the schema-2 Worker is deployed with all flags false and no email binding.
+- [x] Candidate migration `0003` and the default-off Queue/DLQ source pass local schema-preservation, fixed-endpoint, threshold, confirmation, partial-failure, recovery and privacy validation.
+- [ ] Migration `0003` is applied to preview then runtime with preserved counts/indexes, zero orphans and integrity/foreign-key proof; the schema-3 Worker is deployed with every flag false and one scheduled interval proves zero writes and zero network access.
+- [ ] A dedicated account-scoped Queues Read token is stored only as a deploy secret, then labeled empty/stale/DLQ/partial-failure/recovery tests are completed and the Queue source is returned to false.
 - [x] Five-minute monitoring proves default-off zero writes, healthy, warning, critical, missing/malformed source, severity escalation and recovery in the isolated remote sandbox; concurrent direct remote-D1 batches separately prove the incident-ordering guards.
 - [ ] A dedicated operations sender and deploy-only `OPS_OWNER_EMAIL`/`OPS_BACKUP_OWNER_EMAIL` destinations are configured outside Git and approved.
 - [ ] Owner plus backup-owner live delivery, 60-minute reminder, failure, recovery and possible-duplicate behavior are proven end to end with all flags returned to false.
@@ -135,4 +142,4 @@ Repository design items may be complete while every live activation item remains
 
 ## Definition of done
 
-The operations plane is done only when it can detect and externally report the required connector failures, maintain verified private backups, prove isolated restoration and clean rollback, all without PII duplication or a public surface. Every alert and backup must have age, delivery/integrity and recovery evidence. Default-off must remain a tested zero-operation state. The remote proof approves only the inert schema-2 sandbox deployment; it does not approve email bindings, a send, enabling any operations lane or production activation.
+The operations plane is done only when it can detect and externally report the required connector failures, maintain verified private backups, prove isolated restoration and clean rollback, all without PII duplication or a public surface. Every alert and backup must have age, delivery/integrity and recovery evidence. Default-off must remain a tested zero-operation state. The remote proof currently approves only the inert schema-2 sandbox deployment; local schema-3 Queue validation does not approve its migration, token, request, email bindings, any send, enabling any operations lane or production activation.
