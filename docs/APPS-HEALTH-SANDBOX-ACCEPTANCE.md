@@ -4,6 +4,8 @@ Last reviewed: August 18, 2026
 
 Status: **executed once on August 18, 2026; did not pass Phase 3.** Phases 0–2 passed, but the first enabled full inspection took `5016 ms`, exceeding the strict `<5000 ms` gate by 16 ms. The immediate repeat returned a valid healthy result in `3878 ms`, but it does not override the stop condition. Phases 4 and 5 were not run. Emergency cleanup is complete: the Apps endpoint is disabled, the dedicated Apps property and both Worker secrets are removed, every operations capability flag is false, and the final all-off cron wrote nothing. Do not retry until the live-latency path or reviewed timeout is changed offline and a new run is separately approved.
 
+Local follow-up: an undeployed exact-semantic optimization now removes duplicate/disabled property reads and reuses one workbook-tab enumeration without narrowing the formula or allocated-row formatting checks. The five-second gate is unchanged. This source change is not evidence of improved live latency and does not authorize deployment, credential creation or another signed request.
+
 ## August 18 execution outcome
 
 - Approval was received and the read-only baseline was captured at `2026-08-18T17:20:16.773Z`: operations Worker `804dae4f-44d8-45de-a6e1-6ca3182d682e`, eight monitor runs, two resolved incidents, zero active incidents, deliveries, backups or restores, and zero bounded connector exception signals.
@@ -193,3 +195,5 @@ Passing target (not achieved by the August 18 run):
 | Production/business state and connector exception | No business-data or production change; sandbox connector credential was rotated after preflight exposure while all connector flags remained false |
 
 This execution did **not** pass the worksheet and does not approve another live retry. Queue monitoring, alert delivery, backups/restores, physical scanner compatibility and production canary approval remain separate gates.
+
+Before any revised run, publish the reviewed optimized Apps version while health remains disabled, repeat the inert no-write proof, and obtain a new explicit approval. The new run must use a fresh dedicated health credential and must preserve this failed-run record rather than overwriting it.

@@ -84,6 +84,7 @@ The next reviewed slices must land separately:
 3. Implement an isolated quarterly restore test, compare rows/unique keys, pass integrity/foreign-key checks, apply the deletion manifest, and delete the restore copy within seven days.
 4. Separately create the account-scoped Queues Read token and prove empty, stale, DLQ, partial-failure and recovery behavior before returning `OPS_QUEUE_MONITORING_ENABLED=false` and removing/revoking the test token if it will not remain managed.
 5. Before any Apps-health retry, resolve the failed first-enabled latency gate offline: optimize the reviewed metadata inspection or approve and test a new deadline, update the acceptance worksheet, and obtain a new explicit approval. The August 18 run did not pass; its dedicated credential is removed, every flag is false, and the open fixed-code warning is preserved.
+   A local exact-semantic Apps optimization now removes duplicate/disabled property reads and repeated tab enumeration while retaining the complete formula and allocated-row format checks. It remains undeployed; live Version 3 and the five-second gate are unchanged.
 6. Add the still-missing credential/provider and ledger/group comparison sources without weakening the aggregate privacy boundary.
 7. Complete sandbox acceptance for those remaining lanes, return every flag to false, then require a separate dated production activation decision.
 

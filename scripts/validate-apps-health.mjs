@@ -53,20 +53,33 @@ const scriptProperties = {
 
 const counters = {
   sheetOpens: 0,
-  leadDataReads: 0,
+  sheetLists: 0,
+  sheetByNameReads: 0,
+  dataRowValueReads: 0,
   numberFormatReads: 0,
   writes: 0,
   logs: 0,
-  providerCalls: 0
+  providerCalls: 0,
+  propertyReads: [],
+  numberFormatRanges: []
 };
 let spreadsheetFailure = false;
 let activeSpreadsheet = null;
 
 function resetCounters() {
-  Object.keys(counters).forEach((key) => { counters[key] = 0; });
+  for (const [key, value] of Object.entries(counters)) {
+    if (Array.isArray(value)) value.length = 0;
+    else counters[key] = 0;
+  }
 }
 
-function makeSheet({ name, headers, plainTextHeaders = [], readyFormatting = true }) {
+function makeSheet({
+  name,
+  headers,
+  plainTextHeaders = [],
+  readyFormatting = true,
+  futurePlainTextDrift = false
+}) {
   const plainTextColumns = new Set(
     plainTextHeaders.map((header) => headers.indexOf(header)).filter((index) => index >= 0)
   );
@@ -84,8 +97,8 @@ function makeSheet({ name, headers, plainTextHeaders = [], readyFormatting = tru
     getRange(row, column, requestedRows, requestedColumns) {
       return {
         getValues: () => {
-          if (row !== 1) {
-            if (name === "spartan leads") counters.leadDataReads += 1;
+          if (row !== 1 || requestedRows !== 1) {
+            counters.dataRowValueReads += 1;
             throw new Error("Health inspection must not read customer cell values.");
           }
           return Array.from({ length: requestedRows }, (_, rowOffset) => (
@@ -107,13 +120,26 @@ function makeSheet({ name, headers, plainTextHeaders = [], readyFormatting = tru
         ),
         getNumberFormats: () => {
           counters.numberFormatReads += 1;
+          counters.numberFormatRanges.push({
+            name,
+            row,
+            column,
+            requestedRows,
+            requestedColumns
+          });
           return Array.from(
             { length: requestedRows },
-            () => Array.from(
+            (_, rowOffset) => Array.from(
               { length: requestedColumns },
-              (_, index) => (
-                readyFormatting && plainTextColumns.has(column - 1 + index) ? "@" : "General"
-              )
+              (_, index) => {
+                const absoluteColumn = column - 1 + index;
+                const isFutureDrift = futurePlainTextDrift
+                  && row + rowOffset === 1000
+                  && absoluteColumn === Math.min(...plainTextColumns);
+                return readyFormatting && plainTextColumns.has(absoluteColumn) && !isFutureDrift
+                  ? "@"
+                  : "General";
+              }
             )
           );
         },
@@ -139,7 +165,10 @@ const context = {
   },
   PropertiesService: {
     getScriptProperties: () => ({
-      getProperty: (key) => scriptProperties[key] ?? null
+      getProperty: (key) => {
+        counters.propertyReads.push(key);
+        return scriptProperties[key] ?? null;
+      }
     })
   },
   SpreadsheetApp: {
@@ -211,6 +240,40 @@ const ledgerSpecs = JSON.parse(vm.runInContext(
   "JSON.stringify(JOURNEY_LEDGER_SHEET_SPECS)",
   context
 ));
+const enabledBasePropertyReads = [
+  "OPS_HEALTH_SHARED_SECRET",
+  "WORKER_SHARED_SECRET",
+  "SQUARE_CONNECTOR_SHARED_SECRET",
+  "OPS_HEALTH_ENVIRONMENT",
+  "OPS_HEALTH_ENABLED",
+  "SPREADSHEET_ID",
+  "SHEET_NAME",
+  "OWNER_NOTIFICATION_ENABLED",
+  "SQUARE_JOURNEY_ENABLED"
+];
+
+function expectedEnabledPropertyReads({ ownerEnabled = false, squareEnabled = false } = {}) {
+  const reads = [...enabledBasePropertyReads];
+  if (ownerEnabled) reads.splice(reads.indexOf("SQUARE_JOURNEY_ENABLED"), 0, "OWNER_NOTIFICATION_EMAIL");
+  if (squareEnabled) {
+    reads.push(
+      "SQUARE_LOCATION_ID",
+      "SQUARE_FIRST_DRINK_DISCOUNT_ID",
+      "SQUARE_FIRST_VISIT_GROUP_ID"
+    );
+  }
+  return reads;
+}
+
+function expectedLedgerNumberFormatRanges(repetitions = 1) {
+  return Array.from({ length: repetitions }, () => ledgerSpecs.map((spec) => ({
+    name: spec.name,
+    row: 1,
+    column: 1,
+    requestedRows: 1000,
+    requestedColumns: spec.headers.length
+  }))).flat();
+}
 
 assert.equal(healthVersion, "spartan-ops-apps-health-v1-2026-08-18");
 assert.deepEqual(requestFields, [
@@ -224,7 +287,11 @@ assert.deepEqual(requestFields, [
 ]);
 assert.equal(responseSignedFields.at(-1), "request_nonce");
 
-function buildSpreadsheet({ leadReady = true, ledgerReady = true } = {}) {
+function buildSpreadsheet({
+  leadReady = true,
+  ledgerReady = true,
+  ledgerFuturePlainTextDrift = false
+} = {}) {
   const leadHeaders = leadReady
     ? [...requiredHeaders]
     : ["wrong_timestamp", ...requiredHeaders.slice(1)];
@@ -239,14 +306,19 @@ function buildSpreadsheet({ leadReady = true, ledgerReady = true } = {}) {
       name: spec.name,
       headers: index === 0 && !ledgerReady ? [...spec.headers, "unexpected"] : spec.headers,
       plainTextHeaders: spec.plainTextHeaders,
-      readyFormatting: ledgerReady
+      readyFormatting: ledgerReady,
+      futurePlainTextDrift: index === 0 && ledgerFuturePlainTextDrift
     })
   ]));
   return {
-    getSheetByName: (name) => (
-      name === "spartan leads" ? leadSheet : (ledgerSheets.get(name) || null)
-    ),
-    getSheets: () => [leadSheet, ...ledgerSheets.values()]
+    getSheetByName: (name) => {
+      counters.sheetByNameReads += 1;
+      return name === "spartan leads" ? leadSheet : (ledgerSheets.get(name) || null);
+    },
+    getSheets: () => {
+      counters.sheetLists += 1;
+      return [leadSheet, ...ledgerSheets.values()];
+    }
   };
 }
 
@@ -295,7 +367,7 @@ function assertNoSideEffects({ allowSheetReads = false } = {}) {
   assert.equal(counters.writes, 0, "Health requests must perform no writes");
   assert.equal(counters.logs, 0, "Health requests must produce no log output");
   assert.equal(counters.providerCalls, 0, "Health requests must not call mail or network providers");
-  assert.equal(counters.leadDataReads, 0, "Health requests must not read customer row values");
+  assert.equal(counters.dataRowValueReads, 0, "Health requests must not read data-row cell values");
   if (!allowSheetReads) {
     assert.equal(counters.sheetOpens, 0, "Request must be authenticated before Sheet access");
   }
@@ -513,7 +585,19 @@ assert.equal(ready.value.worker_json_state, "NOT_CONFIGURED");
 assert.equal(ready.value.owner_notification_state, "DISABLED");
 assert.equal(ready.value.square_journey_state, "DISABLED");
 assert.equal(counters.sheetOpens, 1);
+assert.equal(counters.sheetLists, 1, "Enabled inspection must enumerate Sheet tabs exactly once");
+assert.equal(counters.sheetByNameReads, 0, "Enabled inspection must reuse its one Sheet enumeration");
 assert.equal(counters.numberFormatReads, 2, "Health must batch ledger-format reads per tab");
+assert.deepEqual(
+  counters.numberFormatRanges,
+  expectedLedgerNumberFormatRanges(),
+  "Health must preserve the full allocated-row ledger-format contract"
+);
+assert.deepEqual(
+  counters.propertyReads,
+  expectedEnabledPropertyReads(),
+  "Disabled optional lanes must not read owner address or Square identifier properties"
+);
 assertNoSideEffects({ allowSheetReads: true });
 
 // The nonce binds the response but is not a write-backed replay ledger. The
@@ -527,7 +611,30 @@ assertSignedResponse(repeatedFirst, "COMPLETE");
 assertSignedResponse(repeatedSecond, "COMPLETE");
 assert.equal(repeatedFirst.value.request_nonce, repeatedSecond.value.request_nonce);
 assert.equal(counters.sheetOpens, 2);
+assert.equal(counters.sheetLists, 2, "Each repeated inspection must enumerate Sheet tabs once");
+assert.equal(counters.sheetByNameReads, 0, "Repeated inspections must not fall back to getSheetByName");
 assert.equal(counters.numberFormatReads, 4, "Each repeated inspection must use two batched reads");
+assert.deepEqual(counters.numberFormatRanges, expectedLedgerNumberFormatRanges(2));
+assert.deepEqual(
+  counters.propertyReads,
+  [...expectedEnabledPropertyReads(), ...expectedEnabledPropertyReads()],
+  "A repeated request must repeat only the exact bounded property-read plan"
+);
+assertNoSideEffects({ allowSheetReads: true });
+
+// Health retains the owner diagnostic's full allocated-row formatting
+// semantics. Drift in a future unused identifier cell is still NOT_READY;
+// performance work may reduce service calls but must not narrow this contract.
+activeSpreadsheet = buildSpreadsheet({ ledgerFuturePlainTextDrift: true });
+resetCounters();
+const unusedFutureFormatDrift = post(makeEvent());
+assertSignedResponse(unusedFutureFormatDrift, "COMPLETE");
+assert.equal(unusedFutureFormatDrift.value.lead_sheet_state, "READY");
+assert.equal(unusedFutureFormatDrift.value.journey_ledger_state, "NOT_READY");
+assert.equal(counters.sheetLists, 1);
+assert.equal(counters.sheetByNameReads, 0);
+assert.deepEqual(counters.numberFormatRanges, expectedLedgerNumberFormatRanges());
+assert.deepEqual(counters.propertyReads, expectedEnabledPropertyReads());
 assertNoSideEffects({ allowSheetReads: true });
 
 // Expected configuration drift is a completed inspection with component-level
@@ -551,6 +658,13 @@ assertSignedResponse(allConfigured, "COMPLETE");
 assert.equal(allConfigured.value.worker_json_state, "CONFIGURED");
 assert.equal(allConfigured.value.owner_notification_state, "READY");
 assert.equal(allConfigured.value.square_journey_state, "READY");
+assert.deepEqual(
+  counters.propertyReads,
+  expectedEnabledPropertyReads({ ownerEnabled: true, squareEnabled: true }),
+  "Enabled optional lanes must read each required property exactly once"
+);
+assert.equal(counters.sheetLists, 1);
+assert.equal(counters.sheetByNameReads, 0);
 assertNoSideEffects({ allowSheetReads: true });
 
 // Reusing the form Worker secret for the write-capable Square connector is a

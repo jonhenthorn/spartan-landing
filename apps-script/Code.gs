@@ -484,7 +484,12 @@ function opsHealthJsonPostResponse_(e) {
   }
 
   try {
-    const inspection = inspectOpsHealthState_(properties, secret);
+    const inspection = inspectOpsHealthState_(
+      properties,
+      secret,
+      workerSecret,
+      squareSecret
+    );
     return opsHealthSignedStateResponse_({
       ...responseBase,
       inspectionState: 'COMPLETE',
@@ -608,29 +613,34 @@ function opsHealthSignedStateResponse_(options) {
   return jsonResponse_(response);
 }
 
-function inspectOpsHealthState_(properties, opsHealthSecret) {
+function inspectOpsHealthState_(properties, opsHealthSecret, workerSecret, squareSecret) {
   const spreadsheetId = cleanText_(properties.getProperty('SPREADSHEET_ID'), 200);
   const configuredSheetName = cleanText_(properties.getProperty('SHEET_NAME'), 100);
   let spreadsheet = null;
+  let spreadsheetSheets = [];
   let leadSheetReady = false;
 
   if (spreadsheetId && configuredSheetName) {
     spreadsheet = SpreadsheetApp.openById(spreadsheetId);
-    const leadSheet = spreadsheet.getSheetByName(configuredSheetName);
+    spreadsheetSheets = spreadsheet.getSheets();
+    const leadSheet = spreadsheetSheets.find(
+      sheet => String(sheet.getName()) === configuredSheetName
+    ) || null;
     if (leadSheet) leadSheetReady = isOpsHealthLeadSheetReady_(leadSheet);
   }
 
   const journeyLedgerReady = spreadsheet
-    ? isOpsHealthJourneyLedgerReady_(spreadsheet)
+    ? isOpsHealthJourneyLedgerReady_(spreadsheet, spreadsheetSheets)
     : false;
-  const workerSecret = String(properties.getProperty('WORKER_SHARED_SECRET') || '');
   const ownerNotificationEnabled = String(
     properties.getProperty('OWNER_NOTIFICATION_ENABLED') || ''
   ).trim().toLowerCase() === 'true';
-  const ownerEmail = normalizeStoredEmail_(properties.getProperty('OWNER_NOTIFICATION_EMAIL'));
+  const ownerEmail = ownerNotificationEnabled
+    ? normalizeStoredEmail_(properties.getProperty('OWNER_NOTIFICATION_EMAIL'))
+    : '';
   const squareEnabled = String(properties.getProperty('SQUARE_JOURNEY_ENABLED') || '') === 'true';
-  const squareSecret = String(properties.getProperty('SQUARE_CONNECTOR_SHARED_SECRET') || '');
-  const squarePropertiesReady = squareSecret.length >= 32
+  const squarePropertiesReady = squareEnabled
+    && squareSecret.length >= 32
     && squareSecret !== opsHealthSecret
     && (!workerSecret || squareSecret !== workerSecret)
     && Boolean(cleanText_(properties.getProperty('SQUARE_LOCATION_ID'), 100))
@@ -665,9 +675,9 @@ function isOpsHealthLeadSheetReady_(sheet) {
   );
 }
 
-function isOpsHealthJourneyLedgerReady_(spreadsheet) {
+function isOpsHealthJourneyLedgerReady_(spreadsheet, spreadsheetSheets) {
   const inspections = JOURNEY_LEDGER_SHEET_SPECS.map(
-    spec => inspectJourneyLedgerSheet_(spreadsheet, spec)
+    spec => inspectJourneyLedgerSheet_(spreadsheet, spec, spreadsheetSheets)
   );
   return inspections.every(inspection => (
     inspection.sheet
@@ -1292,15 +1302,18 @@ function getJourneyLedgerSetupConfig_() {
   return { spreadsheet, configuredSheetName };
 }
 
-function getJourneyLedgerNameMatches_(spreadsheet, expectedName) {
+function getJourneyLedgerNameMatches_(spreadsheet, expectedName, spreadsheetSheets) {
   const normalizedExpectedName = expectedName.trim().toLowerCase();
-  return spreadsheet.getSheets().filter(
+  const availableSheets = Array.isArray(spreadsheetSheets)
+    ? spreadsheetSheets
+    : spreadsheet.getSheets();
+  return availableSheets.filter(
     sheet => String(sheet.getName()).trim().toLowerCase() === normalizedExpectedName
   );
 }
 
-function inspectJourneyLedgerSheet_(spreadsheet, spec) {
-  const nameMatches = getJourneyLedgerNameMatches_(spreadsheet, spec.name);
+function inspectJourneyLedgerSheet_(spreadsheet, spec, spreadsheetSheets) {
+  const nameMatches = getJourneyLedgerNameMatches_(spreadsheet, spec.name, spreadsheetSheets);
   if (nameMatches.length > 1 || (nameMatches.length === 1 && nameMatches[0].getName() !== spec.name)) {
     return {
       spec,
