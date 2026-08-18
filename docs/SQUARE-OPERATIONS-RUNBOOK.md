@@ -2,24 +2,26 @@
 
 Last reviewed: August 17, 2026
 
-Status: **the bounded D1-only monitor is implemented and locally validated; no operations service/resource, alert sender, recurring backup or restore automation exists.** Project 2 production activation remains blocked.
+Status: **the bounded D1-only monitor is implemented and remotely proven in the isolated sandbox; the permanent sandbox service is deployed scheduled-only with every capability flag false. No alert sender, recurring backup or restore automation exists.** Project 2 production activation remains blocked.
 
 ## Purpose and authority
 
-The future `spartan-square-ops` Worker is a separate scheduled control plane for the first-visit Square journey. Its job is to make technical failures visible and recoverable without exposing a public admin surface or mixing operational evidence with customer/business ledgers.
+The `spartan-square-ops` Worker is a separate scheduled control plane for the first-visit Square journey. Its job is to make technical failures visible and recoverable without exposing a public admin surface or mixing operational evidence with customer/business ledgers.
 
 The Square connector ledger remains authoritative for claims, provider links, purchases, redemptions, retries and refund reviews. The operations database may store only bounded, non-PII observations and evidence. It must never correct or delete connector records automatically. The confirmed website coupon and staff phone-lookup process remain the customer fallback.
 
 ## Current safety boundary
 
-- Both Wrangler configurations contain placeholder resources and every `OPS_*_ENABLED` flag is `false`.
+- Production retains placeholder resources. Sandbox has separate runtime/preview operations D1 databases and a concrete aggregate source binding; every `OPS_*_ENABLED` flag is `false`.
 - The Worker has only a scheduled handler and no route, `fetch` handler or `workers.dev` exposure.
 - With missing or false flags, it returns without touching any binding, scheduling background work or making a network request.
 - Monitoring runs only when its flag is true and the exact five-minute cron fires. The alert, backup and restore flags remain fail-closed because those lanes are not implemented.
-- The migration is local repository design only. It has not been applied to Cloudflare.
+- Migration `0001` is applied to both sandbox operations databases. The sandbox intentionally omits R2 because that account feature and the backup lane are not approved; production retains the future placeholder.
+- Permanent sandbox Worker version `337e95fc-61f3-4fa2-aa1a-91b5893887c0` is bound to the real sandbox connector source with every capability false. A scheduled interval produced zero writes in this state.
+- A separate disposable proof Worker and disposable schema-complete/empty source databases proved healthy, warning, critical, source-unavailable, malformed-timestamp and recovery behavior. Concurrent older-warning/newer-healthy D1 batches left only a resolved history row and no active incident. Those disposable resources and direct guard rows were deleted afterward.
 - No connector configuration, sandbox runtime flag, Queue, webhook, Apps Script property or production account is changed by this scaffold.
 
-Do not deploy this service merely to “reserve” it. Provisioning and an inert deployment require a separate reviewed change and explicit approval.
+Do not enable monitoring merely because the inert service exists. Each active lane still requires a separate reviewed change, bounded proof and explicit approval.
 
 ## Separation of duties and data
 
@@ -119,16 +121,17 @@ The operations Worker must never be a prerequisite for disabling the customer-fa
 Repository design items may be complete while every live activation item remains incomplete:
 
 - [x] Reviewed aggregate operational-signal schema and local monitor implementation contain no persisted PII/provider/customer identifiers.
-- [ ] Separate sandbox `OPS_DB`, source binding and private backup bucket are provisioned with least privilege.
-- [ ] All migrations pass local validation and isolated remote application.
-- [ ] Five-minute monitoring proves healthy, warning, critical, stale-source, out-of-order and recovery cases in the isolated remote sandbox. Local deterministic coverage passes only the repository gate.
+- [x] Separate sandbox runtime/preview `OPS_DB` databases and aggregate connector source binding are provisioned; the private backup bucket remains intentionally absent.
+- [ ] A private sandbox backup bucket is provisioned only after the owner approves enabling R2 and the backup writer/lifecycle controls are implemented.
+- [x] The operations migration passes local validation and isolated remote application; an export restored with five tables, integrity `ok`, no foreign-key failures and matching zero-row baseline.
+- [x] Five-minute monitoring proves default-off zero writes, healthy, warning, critical, missing/malformed source, severity escalation and recovery in the isolated remote sandbox; concurrent direct remote-D1 batches separately prove the incident-ordering guards.
 - [ ] Owner plus backup-owner delivery, dedupe, failure and recovery notices are proven end to end.
 - [ ] Nightly export, checksum, retention and 26/48-hour freshness alerts are proven.
 - [ ] Quarterly restore, row/unique-key reconciliation, deletion-manifest replay and cleanup are proven.
-- [ ] Rollback returns all flags to false and proves zero operations without losing evidence.
-- [ ] Repository validators and both Wrangler dry-runs pass.
-- [ ] A dated owner decision approves an inert deployment, and a later separate decision approves each activation lane.
+- [x] Rollback returned all flags to false, deleted the disposable proof resources and preserved aggregate monitor/incident evidence with zero active incidents.
+- [x] Repository validators and both Wrangler dry-runs pass for the monitoring slice.
+- [x] The owner approved the inert sandbox deployment on August 17, 2026. A later separate decision is still required for each activation lane and any production resource.
 
 ## Definition of done
 
-The operations plane is done only when it can detect and externally report the required connector failures, maintain verified private backups, prove isolated restoration and clean rollback, all without PII duplication or a public surface. Every alert and backup must have age, delivery/integrity and recovery evidence. Default-off must remain a tested zero-operation state. The local monitor implementation closes a repository-design gate only; it does not approve deployment or production activation.
+The operations plane is done only when it can detect and externally report the required connector failures, maintain verified private backups, prove isolated restoration and clean rollback, all without PII duplication or a public surface. Every alert and backup must have age, delivery/integrity and recovery evidence. Default-off must remain a tested zero-operation state. The remote proof approves only the inert sandbox deployment; it does not approve enabling monitoring, any remaining operations lane or production activation.

@@ -70,10 +70,27 @@ function validateWranglerConfiguration(relativePath, environment) {
       `${relativePath} must keep ${variableName} at its reviewed default`);
   }
   assert.doesNotMatch(config, /^OPS_[A-Z0-9_]*_ENABLED\s*=\s*"true"$/m, "No ops capability may default on");
-  assert.equal((config.match(/database_id\s*=\s*"REPLACE_WITH_[A-Z0-9_]+"/g) || []).length, 2,
-    `${relativePath} must retain two D1 placeholders`);
-  assert.match(config, /bucket_name\s*=\s*"replace-with-[a-z0-9-]+"/,
-    `${relativePath} must retain the R2 placeholder`);
+  if (environment === "production") {
+    assert.equal((config.match(/database_id\s*=\s*"REPLACE_WITH_[A-Z0-9_]+"/g) || []).length, 2,
+      `${relativePath} must retain two D1 placeholders`);
+    assert.match(config, /bucket_name\s*=\s*"replace-with-[a-z0-9-]+"/,
+      `${relativePath} must retain the R2 placeholder`);
+  } else {
+    for (const expectedLine of [
+      'database_name = "spartan-square-ops-sandbox"',
+      'database_id = "2e2fc9f6-0a81-453b-9af6-8d4104965f8e"',
+      'preview_database_id = "d127e091-f197-4f01-a128-bd3434336ea0"',
+      'database_name = "spartan-square-connector-sandbox"',
+      'database_id = "9531221e-cabe-4ed4-b7d4-f715798b8945"',
+      'preview_database_id = "ffd69503-aa8d-4677-ac4f-8875a0860bb2"',
+    ]) {
+      assert.ok(config.includes(expectedLine), `${relativePath} must retain ${expectedLine}`);
+    }
+    assert.doesNotMatch(config, /REPLACE_WITH_|replace-with-/,
+      `${relativePath} must not retain resource placeholders after sandbox provisioning`);
+    assert.doesNotMatch(config, /\[\[r2_buckets\]\]|BACKUP_BUCKET|bucket_name\s*=/,
+      `${relativePath} must omit R2 until the backup lane is implemented and approved`);
+  }
   assert.doesNotMatch(config, /\[\[send_email\]\]|destination_address|allowed_destination_addresses/,
     `${relativePath} must not bind an alert destination yet`);
 }
