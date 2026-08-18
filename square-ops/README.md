@@ -2,22 +2,22 @@
 
 This directory is the inert, isolated foundation for Project 2 monitoring, owner alerts, private backups and restore-test evidence. It is a separate Cloudflare Worker from both the public website form and `spartan-square-connector`.
 
-## Current status: D1 monitor proven; Queue/DLQ source implemented locally and off
+## Current status: D1 monitor proven; Queue/DLQ source deployed inertly and off
 
-The bounded D1 monitoring evaluator is implemented, locally validated and remotely proven in the isolated sandbox. The counts-only alert planner/drainer and migration `0002` are deployed inertly, but no email binding, destination or sender is configured. A least-privilege Queue/DLQ metrics source and migration `0003` are implemented and locally validated but are not yet applied, deployed or enabled remotely. The permanent sandbox service remains **inert and not production-activation-ready**:
+The bounded D1 monitoring evaluator is implemented, locally validated and remotely proven in the isolated sandbox. The counts-only alert planner/drainer and migration `0002` are deployed inertly, but no email binding, destination or sender is configured. The least-privilege Queue/DLQ metrics source and migration `0003` are now applied and deployed inertly with the source flag false and no Queue-read token. The permanent sandbox service remains **inert and not production-activation-ready**:
 
 - The Worker exports only a scheduled handler. It has no `fetch` handler, public route, custom domain or `workers.dev` exposure.
-- Production and sandbox are separate, non-inheriting Wrangler files. Every `OPS_*_ENABLED` flag is checked in as `false`; every flag in the currently deployed schema-2 sandbox also remains `false`, while the new Queue flag has not yet been deployed.
+- Production and sandbox are separate, non-inheriting Wrangler files. Every `OPS_*_ENABLED` flag is checked in and deployed as `false`.
 - When all flags are false, the scheduled handler returns before it touches D1, R2 or any external transport. It performs no network request and schedules no background task.
 - The monitor can run only on the exact five-minute cron when `OPS_MONITORING_ENABLED=true`. It makes four fixed aggregate-only `SELECT` queries against connector D1 and writes only non-PII run/incident evidence to operations D1. Queue metrics additionally require `OPS_QUEUE_MONITORING_ENABLED=true`, the exact schema-3 configuration and a deploy-only `OPS_CLOUDFLARE_QUEUES_READ_TOKEN`.
 - The Queue source uses only two fixed `GET .../metrics` requests through Cloudflare's REST API. It has no Queue producer/consumer binding and no message-list, pull, acknowledge, retry, send or purge path. Its account and queue IDs are allowlisted configuration; the read token is absent from Git and the current Worker.
-- The deployed Worker has schema `2`, but it lacks the sender and both role bindings and `OPS_ALERTS_ENABLED=false`, so it cannot send. Backup and restore flags still fail closed with `SQUARE_OPS_SCAFFOLD_NOT_ACTIVATION_READY`.
-- Sandbox runtime and preview operations D1 databases are provisioned and migrations `0001` and `0002` are applied. Migration `0003` remains local and pending a separate inert preview/runtime rollout. Production D1 values remain placeholders.
+- The deployed Worker has schema `3`, but it lacks the Queue-read token, sender and both role bindings; Queue monitoring and alerts are both false, so it cannot request metrics or send. Backup and restore flags still fail closed with `SQUARE_OPS_SCAFFOLD_NOT_ACTIVATION_READY`.
+- Sandbox runtime and preview operations D1 databases are provisioned and migrations `0001`, `0002` and `0003` are applied. Production D1 values remain placeholders.
 - The sandbox intentionally has no R2 binding because the account has not enabled R2 and the backup lane is not implemented. Production retains a visible placeholder only as future design.
 - There is no checked-in or live email binding, recipient address, D1 export workflow, R2 upload, restore executor or Apps Script probe. Future recipient addresses belong only in the deploy-time `destination_address` configuration for `OPS_OWNER_EMAIL` and `OPS_BACKUP_OWNER_EMAIL`; the application omits recipients from its message objects.
 - Nothing here changes the current `square-worker` runtime flags, provider subscriptions, website behavior, Square account or Apps Script deployment.
 - Remote proof covered default-off zero writes, healthy, warning, critical, missing-schema and malformed-timestamp source failure, recovery, severity escalation and concurrent older/newer guard behavior. The disposable proof Worker and source databases were deleted afterward.
-- Final sandbox Worker version `a49059b4-6226-4cc9-be6e-ba65d94ab509` has only the scheduled handler, is bound to runtime operations D1 `2e2fc9f6-0a81-453b-9af6-8d4104965f8e` and real sandbox connector D1 `9531221e-cabe-4ed4-b7d4-f715798b8945`, has no route or `workers.dev` hostname and retains every capability flag `false`.
+- Final sandbox Worker version `29ab2f6c-265f-4542-81ec-a4dbf41f2a0b` has only the scheduled handler, is bound to runtime operations D1 `2e2fc9f6-0a81-453b-9af6-8d4104965f8e` and real sandbox connector D1 `9531221e-cabe-4ed4-b7d4-f715798b8945`, has no route, `workers.dev` hostname, secret, Queue, email or R2 binding, and retains every capability flag `false`.
 
 ## Sandbox bindings
 
@@ -35,7 +35,7 @@ Cloudflare D1 bindings do not technically enforce read-only access. The connecto
 
 ## State schema
 
-Migrations `0001_ops_state.sql` and `0002_alert_delivery_engine.sql` define only non-PII operational metadata and are applied to both sandbox databases. Candidate migration `0003_queue_monitoring_alerts.sql` widens only the fixed alert/reason allowlist for Queue-source incidents and rebuilds the same 27-column delivery table with row-count, relationship and index preservation guards; it is not remotely applied yet. No production database exists:
+Migrations `0001_ops_state.sql`, `0002_alert_delivery_engine.sql` and `0003_queue_monitoring_alerts.sql` define only non-PII operational metadata and are applied to both sandbox databases. Migration `0003` widens only the fixed alert/reason allowlist for Queue-source incidents and rebuilds the same 27-column delivery table with row-count, relationship and index preservation guards. No production database exists:
 
 - `monitor_runs` — scheduled run status and aggregate counts.
 - `alert_incidents` — one active episode per fixed condition, observation count, latest affected-row count, severity and recovery state.
@@ -66,7 +66,8 @@ The disabled alert engine plans one `OPEN` per role, one immediate `ESCALATION` 
 3. Used disposable, schema-complete and empty connector sources to prove healthy, warning, critical, unavailable, malformed-source and recovery behavior without mutating the real connector ledger.
 4. Proved the monotonic incident guards against concurrent older-warning/newer-healthy remote D1 batches; the newer observation won and no active incident remained.
 5. Returned the permanent service to its real sandbox source with all flags false, retained only aggregate operations evidence and deleted the disposable Worker and databases.
-6. Applied migration `0002` to preview then runtime, verified preserved counts/zero orphans and exported runtime integrity, and deployed the schema-2 planner/drainer with every flag false and no sender, destination binding or send. The next five-minute schedule wrote zero rows.
+6. Applied migration `0002` to preview then runtime, verified preserved counts/zero orphans and exported runtime integrity, and deployed the schema-2 planner/drainer with every flag false and no sender, destination binding or send. Its next five-minute schedule wrote zero rows before the schema-3 rollout.
+7. Applied migration `0003` to preview then runtime, preserved the empty preview and runtime's eight monitor runs/two resolved incidents/zero active or delivery rows, verified 27 columns, both indexes, exact new pairs, zero orphans and no foreign-key failures, and compared pre/post runtime exports with integrity `ok` and no row differences. Deployed schema-3 Worker version `29ab2f6c-265f-4542-81ec-a4dbf41f2a0b` with every flag false and no secret/Queue/email/R2 binding; the next five-minute trigger changed no count or timestamp.
 
 ## Remaining implementation gates
 
@@ -75,7 +76,7 @@ The next reviewed slices must land separately:
 1. Onboard a dedicated operations sender, add deploy-only role-restricted `OPS_OWNER_EMAIL` and `OPS_BACKUP_OWNER_EMAIL` bindings, and prove real owner/backup delivery, failure, 60-minute reminder and recovery while keeping destinations out of Git, D1 and message objects.
 2. Implement private export/upload verification, lifecycle controls and a failure-safe nightly schedule after the owner decides whether to enable R2. A run is not successful until size and checksum evidence exists.
 3. Implement an isolated quarterly restore test, compare rows/unique keys, pass integrity/foreign-key checks, apply the deletion manifest, and delete the restore copy within seven days.
-4. Apply and deploy migration `0003` inertly; then separately create the account-scoped Queues Read token and prove empty, stale, DLQ, partial-failure and recovery behavior before returning `OPS_QUEUE_MONITORING_ENABLED=false` and removing/revoking the test token if it will not remain managed.
+4. Separately create the account-scoped Queues Read token and prove empty, stale, DLQ, partial-failure and recovery behavior before returning `OPS_QUEUE_MONITORING_ENABLED=false` and removing/revoking the test token if it will not remain managed.
 5. Add the still-missing credential/provider, Apps Script and ledger/group monitoring sources without weakening the aggregate privacy boundary.
 6. Complete sandbox acceptance for those remaining lanes, return every flag to false, then require a separate dated production activation decision.
 
