@@ -20,7 +20,7 @@ This repository contains the static website published at [spartandrink.com](http
 - `docs/SQUARE-JOURNEY-PILOT.md` — the manual-first Project 2 plan for linking website claims to Square redemptions and repeat visits before referral/reward automation.
 - `square-worker/` — the isolated, default-off website-to-Square connector candidate; it is not deployed or authorized for production.
 - `docs/SQUARE-CONNECTOR-ROLLOUT.md` — the connector's security, privacy, sandbox, canary and rollback gates.
-- `square-ops/` — the scheduled-only, default-off operations plane; its aggregate D1 monitor is remotely proven and deployed inertly in the isolated sandbox, while alerts/backups/restores remain fail-closed and the service has no public route.
+- `square-ops/` — the scheduled-only, default-off operations plane; its aggregate D1 monitor is remotely proven and deployed inertly in the isolated sandbox, while the unbound alert engine is locally validated and backups/restores remain fail-closed. The service has no public route.
 - `docs/SQUARE-OPERATIONS-RUNBOOK.md` — the operations plane's non-PII data boundary, alert/backup design, activation gates and rollback order.
 - `docs/MARKETING-MEASUREMENT-DICTIONARY.md` — canonical customer milestones, source-of-truth boundaries, KPI formulas, cohorts, alerts and staged data architecture for the marketing portfolio.
 - `docs/EXTERNAL-CONFIGURATION.md` — dated, non-secret evidence of the current Cloudflare, Google and social-link configuration.
@@ -131,7 +131,7 @@ For a safe rollback, hide/remove the frontend question first. The unused Worker 
 
 No production website-to-Square connector is live. A default-off release candidate keeps the coupon available first, then may offer a separate optional action to save only the claimant's name, mobile number and an opaque reference in Square. Skipping that action keeps the manual coupon/phone-search path and cannot affect Brevo email or SMS permission.
 
-The candidate uses a separate Cloudflare Worker, verified webhooks, D1 idempotency state, a Queue and dead-letter queue, default-off controls and a one-submission canary. The isolated D1 monitor is remotely proven, but production credentials, broader monitoring sources, external alerts, recurring backups, retention and the production canary remain mandatory gates in [`docs/SQUARE-CONNECTOR-ROLLOUT.md`](docs/SQUARE-CONNECTOR-ROLLOUT.md). Do not add Square credentials or webhook processing to the current form proxy.
+The candidate uses a separate Cloudflare Worker, verified webhooks, D1 idempotency state, a Queue and dead-letter queue, default-off controls and a one-submission canary. The isolated D1 monitor is remotely proven and the unbound counts-only alert engine is locally validated, but migration `0002`, deploy-only email destinations, live external delivery, production credentials, broader monitoring sources, recurring backups, retention and the production canary remain mandatory gates in [`docs/SQUARE-CONNECTOR-ROLLOUT.md`](docs/SQUARE-CONNECTOR-ROLLOUT.md). Do not add Square credentials or webhook processing to the current form proxy.
 
 ## Approved staged deployment checklist
 

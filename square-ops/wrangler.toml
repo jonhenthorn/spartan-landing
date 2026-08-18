@@ -7,7 +7,7 @@ workers_dev = false
 
 [vars]
 OPS_ENVIRONMENT = "production"
-OPS_SCHEMA_VERSION = "1"
+OPS_SCHEMA_VERSION = "2"
 OPS_MONITORING_ENABLED = "false"
 OPS_ALERTS_ENABLED = "false"
 OPS_BACKUPS_ENABLED = "false"

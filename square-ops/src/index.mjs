@@ -76,6 +76,41 @@ const DEFAULT_RECONCILIATION_MAX_AGE_SECONDS = 1800;
 const DEFAULT_REJECTION_LOOKBACK_HOURS = 24;
 const DEFAULT_MONITOR_RETENTION_DAYS = 30;
 const DEFAULT_ALERT_DEDUPE_SECONDS = 3600;
+const ALERT_SCHEMA_VERSION = "2";
+const ALERT_MESSAGE_VERSION = "OPS_ALERT_V1";
+const ALERT_MAX_ATTEMPTS = 3;
+const ALERT_LEASE_SECONDS = 240;
+const ALERT_BATCH_LIMIT = 20;
+const ALERT_ACTIVE_KINDS = Object.freeze(["OPEN", "ESCALATION", "REMINDER"]);
+const ALERT_DELIVERY_KINDS = Object.freeze([...ALERT_ACTIVE_KINDS, "RECOVERY", "TEST"]);
+const ALERT_ROLE_BINDINGS = Object.freeze([
+  Object.freeze({ roleCode: "OWNER", channelCode: "OWNER_EMAIL", bindingName: "OPS_OWNER_EMAIL" }),
+  Object.freeze({ roleCode: "BACKUP_OWNER", channelCode: "BACKUP_OWNER_EMAIL", bindingName: "OPS_BACKUP_OWNER_EMAIL" }),
+]);
+const TRANSIENT_EMAIL_ERROR_CODES = Object.freeze(new Set([
+  "E_RATE_LIMIT_EXCEEDED",
+  "E_DAILY_LIMIT_EXCEEDED",
+  "E_INTERNAL_SERVER_ERROR",
+]));
+const PERMANENT_EMAIL_ERROR_CODES = Object.freeze(new Set([
+  "E_VALIDATION_ERROR",
+  "E_FIELD_MISSING",
+  "E_TOO_MANY_RECIPIENTS",
+  "E_TOO_MANY_ATTACHMENTS",
+  "E_SENDER_NOT_VERIFIED",
+  "E_RECIPIENT_NOT_ALLOWED",
+  "E_RECIPIENT_SUPPRESSED",
+  "E_SENDER_DOMAIN_NOT_AVAILABLE",
+  "E_CONTENT_TOO_LARGE",
+  "E_DELIVERY_FAILED",
+  "E_HEADER_NOT_ALLOWED",
+  "E_HEADER_USE_API_FIELD",
+  "E_HEADER_VALUE_INVALID",
+  "E_HEADER_VALUE_TOO_LONG",
+  "E_HEADER_NAME_INVALID",
+  "E_HEADERS_TOO_LARGE",
+  "E_HEADERS_TOO_MANY",
+]));
 
 const FIXED_ALERT_KEYS = Object.freeze([
   "SOURCE_UNAVAILABLE",
@@ -87,18 +122,35 @@ const FIXED_ALERT_KEYS = Object.freeze([
   "RECONCILIATION_OVERFLOW",
   "RECONCILIATION_STALE",
 ]);
+const ALERT_REASON_BY_KEY = Object.freeze({
+  SOURCE_UNAVAILABLE: "CONNECTOR_SIGNAL_SOURCE_UNAVAILABLE",
+  WEBHOOK_STALE: "WEBHOOK_DELIVERY_STALE",
+  OUTBOX_STALE: "OUTBOX_DELIVERY_STALE",
+  OUTBOX_DEAD: "OUTBOX_DELIVERY_DEAD",
+  WEBHOOK_REJECTED_CRITICAL: "DISCOUNT_OR_CUSTOMER_POLICY_REJECTED",
+  WEBHOOK_REJECTED_WARNING: "WEBHOOK_POLICY_REJECTED",
+  RECONCILIATION_OVERFLOW: "RECONCILIATION_PAGE_LIMIT",
+  RECONCILIATION_STALE: "RECONCILIATION_HEARTBEAT_STALE",
+  ALERT_PATH_TEST: "MONTHLY_ALERT_PATH_TEST",
+});
 
 export default {
   async scheduled(controller, env, _ctx) {
     const enabledFlags = OPS_FLAG_NAMES.filter((flagName) => flag(env?.[flagName]));
     if (enabledFlags.length === 0) return;
 
-    const unsupported = enabledFlags.filter((flagName) => flagName !== "OPS_MONITORING_ENABLED");
+    const unsupported = enabledFlags.filter((flagName) =>
+      !new Set(["OPS_MONITORING_ENABLED", "OPS_ALERTS_ENABLED"]).has(flagName));
     if (unsupported.length > 0) throw new Error("SQUARE_OPS_SCAFFOLD_NOT_ACTIVATION_READY");
 
     if (controller?.cron !== MONITOR_CRON) return;
+    const monitoringEnabled = flag(env?.OPS_MONITORING_ENABLED);
+    const alertsEnabled = flag(env?.OPS_ALERTS_ENABLED);
+    if (alertsEnabled && !monitoringEnabled) throw new Error("OPS_ALERTS_REQUIRE_MONITORING");
+    const alertConfig = alertsEnabled ? await validateAlertConfiguration(env) : null;
     const scheduledAt = finiteDate(controller?.scheduledTime) || new Date();
-    await runMonitor(env, scheduledAt, new Date());
+    if (monitoringEnabled) await runMonitor(env, scheduledAt, new Date());
+    if (alertsEnabled) await runAlertEngine(env, new Date(), alertConfig);
   },
 };
 
@@ -196,6 +248,542 @@ async function runMonitor(env, scheduledAt, observedAt = new Date()) {
   return { runState, sourceState, signals, observedSignalCount, warningCount, criticalCount };
 }
 
+async function runAlertEngine(env, observedAt = new Date(), providedConfig = null) {
+  const config = providedConfig || await validateAlertConfiguration(env);
+  const now = finiteDate(observedAt) || new Date();
+  const nowIso = now.toISOString();
+  const alertDedupeSeconds = clampInt(env.OPS_ALERT_DEDUPE_SECONDS,
+    DEFAULT_ALERT_DEDUPE_SECONDS, 60, 86400);
+  const reminderCutoff = new Date(now.getTime() - alertDedupeSeconds * 1000).toISOString();
+  const staleResult = await recoverExpiredAlertAttempts(env.OPS_DB, nowIso, config.environment);
+  await cancelResolvedAlertDeliveries(env.OPS_DB, nowIso, config.environment);
+  await cancelSupersededRecoveries(env.OPS_DB, nowIso, config.environment);
+  await planAlertDeliveries(env.OPS_DB, nowIso, alertDedupeSeconds, config.senderFingerprint,
+    config.environment);
+  await cancelSupersededWarningDeliveries(env.OPS_DB, nowIso, config.environment);
+
+  const candidates = await opsAll(env.OPS_DB, "ops_alert_candidates", `
+    SELECT delivery.alert_delivery_id, delivery.delivery_kind, delivery.channel_code,
+           delivery.target_role_code, delivery.environment_code, delivery.alert_key,
+           delivery.severity_code, delivery.signal_count, delivery.reason_code,
+           delivery.sender_fingerprint, delivery.message_version,
+           delivery.attempt_count, delivery.last_error_code,
+           delivery.queued_at, delivery.first_observed_at,
+           delivery.latest_observed_at, delivery.recovery_observed_at
+      FROM alert_deliveries AS delivery
+     WHERE delivery.delivery_state IN ('PENDING', 'RETRY')
+       AND delivery.available_at <= ?1
+       AND delivery.environment_code = ?2
+     ORDER BY CASE delivery.delivery_kind
+                WHEN 'ESCALATION' THEN 1
+                WHEN 'OPEN' THEN 2
+                WHEN 'REMINDER' THEN 3
+                WHEN 'RECOVERY' THEN 4
+                ELSE 5
+              END,
+              delivery.queued_at,
+              CASE delivery.target_role_code WHEN 'OWNER' THEN 1 ELSE 2 END
+     LIMIT ?3
+  `, [nowIso, config.environment, ALERT_BATCH_LIMIT]);
+
+  let claimedCount = 0;
+  let sentCount = 0;
+  let retryCount = 0;
+  let deadCount = 0;
+  let persistedFailure = changedCount(staleResult) > 0;
+
+  for (const candidate of candidates) {
+    const leaseToken = randomId("alertlease");
+    const leaseExpiresAt = new Date(now.getTime() + ALERT_LEASE_SECONDS * 1000).toISOString();
+    const claim = await opsRun(env.OPS_DB, "ops_alert_claim", `
+      UPDATE alert_deliveries
+         SET delivery_state = 'ATTEMPTING', attempt_count = attempt_count + 1,
+             last_error_code = NULL, lease_token = ?1, lease_expires_at = ?2,
+             attempted_at = ?3, updated_at = ?3
+       WHERE alert_delivery_id = ?4
+         AND delivery_state IN ('PENDING', 'RETRY')
+         AND available_at <= ?3
+         AND attempt_count < ?5
+         AND attempt_count = ?6
+         AND environment_code = ?8
+         AND (
+           delivery_kind = 'TEST' OR
+           (delivery_kind IN ('OPEN', 'ESCALATION', 'REMINDER') AND EXISTS (
+             SELECT 1 FROM alert_incidents AS incident
+              WHERE incident.alert_incident_id = alert_deliveries.alert_incident_id
+                AND (
+                  incident.incident_state <> 'RESOLVED' OR (
+                    incident.incident_state = 'RESOLVED'
+                    AND alert_deliveries.last_error_code = 'ALERT_DELIVERY_LEASE_EXPIRED'
+                    AND NOT EXISTS (
+                      SELECT 1 FROM alert_incidents AS recurrence
+                       WHERE recurrence.alert_incident_id <> incident.alert_incident_id
+                         AND recurrence.environment_code = alert_deliveries.environment_code
+                         AND recurrence.alert_key = alert_deliveries.alert_key
+                         AND recurrence.incident_state <> 'RESOLVED'
+                    )
+                  )
+                )
+           )) OR
+           (delivery_kind = 'RECOVERY' AND EXISTS (
+             SELECT 1 FROM alert_incidents AS incident
+              WHERE incident.alert_incident_id = alert_deliveries.alert_incident_id
+                AND incident.incident_state = 'RESOLVED'
+                AND NOT EXISTS (
+                  SELECT 1 FROM alert_incidents AS recurrence
+                   WHERE recurrence.alert_incident_id <> incident.alert_incident_id
+                     AND recurrence.environment_code = alert_deliveries.environment_code
+                     AND recurrence.alert_key = alert_deliveries.alert_key
+                     AND recurrence.incident_state <> 'RESOLVED'
+                )
+           ))
+         )
+         AND (
+           delivery_kind <> 'REMINDER' OR (
+             SELECT MAX(previous.sent_at) FROM alert_deliveries AS previous
+              WHERE previous.alert_incident_id = alert_deliveries.alert_incident_id
+                AND previous.channel_code = alert_deliveries.channel_code
+                AND previous.target_role_code = alert_deliveries.target_role_code
+                AND previous.delivery_kind IN ('OPEN', 'ESCALATION')
+                AND previous.delivery_state = 'SENT'
+           ) <= ?7
+         )
+    `, [leaseToken, leaseExpiresAt, nowIso, candidate.alert_delivery_id, ALERT_MAX_ATTEMPTS,
+      boundedAlertAttempt(candidate.attempt_count), reminderCutoff, config.environment]);
+    if (changedCount(claim) !== 1) continue;
+    claimedCount += 1;
+
+    try {
+      if (candidate.sender_fingerprint !== config.senderFingerprint) {
+        const senderChanged = new Error("OPS_ALERT_SENDER_CHANGED");
+        senderChanged.code = "OPS_ALERT_SENDER_CHANGED";
+        throw senderChanged;
+      }
+      if (candidate.message_version !== ALERT_MESSAGE_VERSION) {
+        const templateChanged = new Error("OPS_ALERT_MESSAGE_VERSION_CHANGED");
+        templateChanged.code = "OPS_ALERT_MESSAGE_VERSION_CHANGED";
+        throw templateChanged;
+      }
+      const message = buildAlertMessage(candidate, config.fromEmail);
+      const binding = config.bindings.get(candidate.target_role_code);
+      await binding.send(message);
+      const finalized = await opsRun(env.OPS_DB, "ops_alert_sent", `
+        UPDATE alert_deliveries
+           SET delivery_state = 'SENT', last_error_code = NULL,
+               lease_token = NULL, lease_expires_at = NULL, sent_at = ?1, updated_at = ?1
+         WHERE alert_delivery_id = ?2
+           AND delivery_state = 'ATTEMPTING'
+           AND lease_token = ?3
+      `, [nowIso, candidate.alert_delivery_id, leaseToken]);
+      if (changedCount(finalized) !== 1) {
+        persistedFailure = true;
+        continue;
+      }
+      sentCount += 1;
+    } catch (error) {
+      const attemptNumber = boundedAlertAttempt(candidate.attempt_count) + 1;
+      const classification = classifyEmailError(error);
+      const retryable = classification.retryable && attemptNumber < ALERT_MAX_ATTEMPTS;
+      const nextState = retryable ? "RETRY" : "DEAD";
+      const errorCode = candidate.last_error_code === "ALERT_DELIVERY_LEASE_EXPIRED"
+        ? "ALERT_DELIVERY_LEASE_EXPIRED"
+        : classification.errorCode;
+      const nextAvailableAt = retryable
+        ? new Date(now.getTime() + alertRetryDelaySeconds(attemptNumber) * 1000).toISOString()
+        : nowIso;
+      const failed = await opsRun(env.OPS_DB, "ops_alert_failed", `
+        UPDATE alert_deliveries
+           SET delivery_state = ?1, last_error_code = ?2, available_at = ?3,
+               lease_token = NULL, lease_expires_at = NULL, updated_at = ?4
+         WHERE alert_delivery_id = ?5
+           AND delivery_state = 'ATTEMPTING'
+           AND lease_token = ?6
+      `, [nextState, errorCode, nextAvailableAt, nowIso,
+        candidate.alert_delivery_id, leaseToken]);
+      persistedFailure = true;
+      if (changedCount(failed) === 1 && retryable) retryCount += 1;
+      if (changedCount(failed) === 1 && !retryable) deadCount += 1;
+    }
+  }
+
+  await markRecoveryNotified(env.OPS_DB, nowIso, config.environment);
+  const result = Object.freeze({
+    candidateCount: candidates.length,
+    claimedCount,
+    sentCount,
+    retryCount,
+    deadCount,
+    staleLeaseCount: changedCount(staleResult),
+  });
+  if (persistedFailure) throw new Error("OPS_ALERT_DELIVERY_INCOMPLETE");
+  return result;
+}
+
+async function validateAlertConfiguration(env) {
+  if (!env?.OPS_DB) throw new Error("OPS_DB_NOT_CONFIGURED");
+  const environment = String(env?.OPS_ENVIRONMENT || "").trim().toLowerCase();
+  if (!new Set(["production", "sandbox"]).has(environment)) throw new Error("OPS_ENVIRONMENT_INVALID");
+  if (String(env?.OPS_SCHEMA_VERSION || "").trim() !== ALERT_SCHEMA_VERSION) {
+    throw new Error("OPS_ALERT_SCHEMA_VERSION_INVALID");
+  }
+  const fromEmail = String(env?.OPS_ALERT_FROM_EMAIL || "").trim().toLowerCase();
+  if (!isBoundedEmailAddress(fromEmail)) throw new Error("OPS_ALERT_FROM_EMAIL_INVALID");
+  const bindings = new Map();
+  for (const role of ALERT_ROLE_BINDINGS) {
+    const binding = env?.[role.bindingName];
+    if (!binding || typeof binding.send !== "function") throw new Error("OPS_ALERT_BINDING_NOT_CONFIGURED");
+    bindings.set(role.roleCode, binding);
+  }
+  if (bindings.get("OWNER") === bindings.get("BACKUP_OWNER")) {
+    throw new Error("OPS_ALERT_BINDINGS_MUST_BE_DISTINCT");
+  }
+  const senderFingerprint = await sha256Hex(fromEmail);
+  return Object.freeze({ environment, fromEmail, senderFingerprint, bindings });
+}
+
+async function recoverExpiredAlertAttempts(db, nowIso, environment) {
+  return opsRun(db, "ops_alert_expired_lease", `
+    UPDATE alert_deliveries
+       SET delivery_state = CASE WHEN attempt_count >= ?1 THEN 'DEAD' ELSE 'RETRY' END,
+           last_error_code = 'ALERT_DELIVERY_LEASE_EXPIRED',
+           available_at = ?2, lease_token = NULL, lease_expires_at = NULL, updated_at = ?2
+     WHERE delivery_state = 'ATTEMPTING'
+       AND lease_expires_at <= ?2
+       AND environment_code = ?3
+  `, [ALERT_MAX_ATTEMPTS, nowIso, environment]);
+}
+
+async function cancelResolvedAlertDeliveries(db, nowIso, environment) {
+  return opsRun(db, "ops_alert_cancel_resolved", `
+    UPDATE alert_deliveries
+       SET delivery_state = 'CANCELLED', last_error_code = NULL,
+           lease_token = NULL, lease_expires_at = NULL,
+           cancelled_at = ?1, updated_at = ?1
+     WHERE delivery_kind IN ('OPEN', 'ESCALATION', 'REMINDER')
+       AND delivery_state IN ('PENDING', 'RETRY')
+       AND environment_code = ?2
+       AND EXISTS (
+         SELECT 1 FROM alert_incidents AS incident
+          WHERE incident.alert_incident_id = alert_deliveries.alert_incident_id
+            AND incident.incident_state = 'RESOLVED'
+       )
+       AND (
+         COALESCE(last_error_code, '') <> 'ALERT_DELIVERY_LEASE_EXPIRED' OR EXISTS (
+           SELECT 1 FROM alert_incidents AS recurrence
+            WHERE recurrence.alert_incident_id <> alert_deliveries.alert_incident_id
+              AND recurrence.environment_code = alert_deliveries.environment_code
+              AND recurrence.alert_key = alert_deliveries.alert_key
+              AND recurrence.incident_state <> 'RESOLVED'
+         )
+       )
+  `, [nowIso, environment]);
+}
+
+async function cancelSupersededRecoveries(db, nowIso, environment) {
+  return opsRun(db, "ops_alert_cancel_superseded_recovery", `
+    UPDATE alert_deliveries
+       SET delivery_state = 'CANCELLED', last_error_code = NULL,
+           lease_token = NULL, lease_expires_at = NULL,
+           cancelled_at = ?1, updated_at = ?1
+     WHERE delivery_kind = 'RECOVERY'
+       AND delivery_state IN ('PENDING', 'RETRY')
+       AND environment_code = ?2
+       AND EXISTS (
+         SELECT 1 FROM alert_incidents AS recurrence
+          WHERE recurrence.alert_incident_id <> alert_deliveries.alert_incident_id
+            AND recurrence.environment_code = alert_deliveries.environment_code
+            AND recurrence.alert_key = alert_deliveries.alert_key
+            AND recurrence.incident_state <> 'RESOLVED'
+       )
+  `, [nowIso, environment]);
+}
+
+async function cancelSupersededWarningDeliveries(db, nowIso, environment) {
+  return opsRun(db, "ops_alert_cancel_superseded_warning", `
+    UPDATE alert_deliveries
+       SET delivery_state = 'CANCELLED', last_error_code = NULL,
+           lease_token = NULL, lease_expires_at = NULL,
+           cancelled_at = ?1, updated_at = ?1
+     WHERE delivery_kind IN ('OPEN', 'REMINDER')
+       AND severity_code = 'WARNING'
+       AND delivery_state IN ('PENDING', 'RETRY')
+       AND environment_code = ?2
+       AND EXISTS (
+         SELECT 1 FROM alert_deliveries AS escalation
+          WHERE escalation.alert_incident_id = alert_deliveries.alert_incident_id
+            AND escalation.channel_code = alert_deliveries.channel_code
+            AND escalation.target_role_code = alert_deliveries.target_role_code
+            AND escalation.delivery_kind = 'ESCALATION'
+            AND escalation.severity_code = 'CRITICAL'
+            AND escalation.delivery_state <> 'CANCELLED'
+       )
+  `, [nowIso, environment]);
+}
+
+async function planAlertDeliveries(db, nowIso, dedupeSeconds = DEFAULT_ALERT_DEDUPE_SECONDS,
+  senderFingerprint = "0000000000000000000000000000000000000000000000000000000000000000",
+  environment = "sandbox") {
+  if (!/^[0-9a-f]{64}$/.test(senderFingerprint)) throw new Error("OPS_ALERT_SENDER_FINGERPRINT_INVALID");
+  if (!new Set(["production", "sandbox"]).has(environment)) throw new Error("OPS_ENVIRONMENT_INVALID");
+  const reminderCutoff = new Date(Date.parse(nowIso) - clampInt(dedupeSeconds,
+    DEFAULT_ALERT_DEDUPE_SECONDS, 60, 86400) * 1000).toISOString();
+  for (const role of ALERT_ROLE_BINDINGS) {
+    const common = [randomId("delivery"), role.channelCode, role.roleCode, nowIso, senderFingerprint, environment];
+    await opsRun(db, "ops_alert_plan_open", `
+      INSERT OR IGNORE INTO alert_deliveries (
+        alert_delivery_id, alert_incident_id, delivery_kind, channel_code, target_role_code,
+        environment_code, alert_key, severity_code, signal_count, reason_code, sender_fingerprint,
+        message_version,
+        delivery_state, attempt_count, queued_at, available_at,
+        first_observed_at, latest_observed_at, recovery_observed_at, created_at, updated_at
+      )
+      SELECT ?1 || '-' || lower(hex(randomblob(8))), incident.alert_incident_id, 'OPEN', ?2, ?3,
+             incident.environment_code, incident.alert_key, incident.severity_code,
+             incident.latest_signal_count, incident.reason_code, ?5, 'OPS_ALERT_V1',
+             'PENDING', 0, ?4, ?4, incident.first_seen_at, incident.last_seen_at, NULL, ?4, ?4
+        FROM alert_incidents AS incident
+       WHERE incident.incident_state <> 'RESOLVED'
+         AND incident.environment_code = ?6
+    `, common);
+    await opsRun(db, "ops_alert_plan_escalation", `
+      INSERT OR IGNORE INTO alert_deliveries (
+        alert_delivery_id, alert_incident_id, delivery_kind, channel_code, target_role_code,
+        environment_code, alert_key, severity_code, signal_count, reason_code, sender_fingerprint,
+        message_version,
+        delivery_state, attempt_count, queued_at, available_at,
+        first_observed_at, latest_observed_at, recovery_observed_at, created_at, updated_at
+      )
+      SELECT ?1 || '-' || lower(hex(randomblob(8))), incident.alert_incident_id, 'ESCALATION', ?2, ?3,
+             incident.environment_code, incident.alert_key, incident.severity_code,
+             incident.latest_signal_count, incident.reason_code, ?5, 'OPS_ALERT_V1',
+             'PENDING', 0, ?4, ?4, incident.first_seen_at, incident.last_seen_at, NULL, ?4, ?4
+        FROM alert_incidents AS incident
+       WHERE incident.incident_state <> 'RESOLVED'
+         AND incident.environment_code = ?6
+         AND incident.severity_code = 'CRITICAL'
+         AND EXISTS (
+           SELECT 1 FROM alert_deliveries AS previous
+            WHERE previous.alert_incident_id = incident.alert_incident_id
+              AND previous.channel_code = ?2
+              AND previous.target_role_code = ?3
+              AND previous.delivery_kind IN ('OPEN', 'REMINDER')
+              AND previous.severity_code = 'WARNING'
+         )
+    `, common);
+    await opsRun(db, "ops_alert_plan_reminder", `
+      INSERT OR IGNORE INTO alert_deliveries (
+        alert_delivery_id, alert_incident_id, delivery_kind, channel_code, target_role_code,
+        environment_code, alert_key, severity_code, signal_count, reason_code, sender_fingerprint,
+        message_version,
+        delivery_state, attempt_count, queued_at, available_at,
+        first_observed_at, latest_observed_at, recovery_observed_at, created_at, updated_at
+      )
+      SELECT ?1 || '-' || lower(hex(randomblob(8))), incident.alert_incident_id, 'REMINDER', ?2, ?3,
+             incident.environment_code, incident.alert_key, incident.severity_code,
+             incident.latest_signal_count, incident.reason_code, ?5, 'OPS_ALERT_V1',
+             'PENDING', 0, ?4, ?4, incident.first_seen_at, incident.last_seen_at, NULL, ?4, ?4
+       FROM alert_incidents AS incident
+       WHERE incident.incident_state <> 'RESOLVED'
+         AND incident.environment_code = ?6
+         AND NOT EXISTS (
+           SELECT 1 FROM alert_deliveries AS escalation
+            WHERE escalation.alert_incident_id = incident.alert_incident_id
+              AND escalation.channel_code = ?2
+              AND escalation.target_role_code = ?3
+              AND escalation.delivery_kind = 'ESCALATION'
+              AND escalation.delivery_state IN ('PENDING', 'ATTEMPTING', 'RETRY')
+         )
+         AND (
+           SELECT MAX(previous.sent_at) FROM alert_deliveries AS previous
+            WHERE previous.alert_incident_id = incident.alert_incident_id
+              AND previous.channel_code = ?2
+              AND previous.target_role_code = ?3
+              AND previous.delivery_kind IN ('OPEN', 'ESCALATION')
+              AND previous.delivery_state = 'SENT'
+         ) <= ?7
+    `, [...common, reminderCutoff]);
+    await opsRun(db, "ops_alert_plan_recovery", `
+      INSERT OR IGNORE INTO alert_deliveries (
+        alert_delivery_id, alert_incident_id, delivery_kind, channel_code, target_role_code,
+        environment_code, alert_key, severity_code, signal_count, reason_code, sender_fingerprint,
+        message_version,
+        delivery_state, attempt_count, queued_at, available_at,
+        first_observed_at, latest_observed_at, recovery_observed_at, created_at, updated_at
+      )
+      SELECT ?1 || '-' || lower(hex(randomblob(8))), incident.alert_incident_id, 'RECOVERY', ?2, ?3,
+             incident.environment_code, incident.alert_key, incident.severity_code,
+             incident.latest_signal_count, incident.reason_code, ?5, 'OPS_ALERT_V1',
+             'PENDING', 0, ?4, ?4, incident.first_seen_at, incident.last_seen_at,
+             COALESCE(incident.resolved_at, ?4), ?4, ?4
+        FROM alert_incidents AS incident
+       WHERE incident.incident_state = 'RESOLVED'
+         AND incident.environment_code = ?6
+         AND NOT EXISTS (
+           SELECT 1 FROM alert_incidents AS recurrence
+            WHERE recurrence.alert_incident_id <> incident.alert_incident_id
+              AND recurrence.environment_code = incident.environment_code
+              AND recurrence.alert_key = incident.alert_key
+              AND recurrence.incident_state <> 'RESOLVED'
+         )
+         AND EXISTS (
+           SELECT 1 FROM alert_deliveries AS previous
+            WHERE previous.alert_incident_id = incident.alert_incident_id
+              AND previous.channel_code = ?2
+              AND previous.target_role_code = ?3
+              AND previous.delivery_kind IN ('OPEN', 'ESCALATION', 'REMINDER')
+              AND previous.delivery_state = 'SENT'
+         )
+    `, common);
+  }
+}
+
+async function markRecoveryNotified(db, nowIso, environment) {
+  return opsRun(db, "ops_alert_mark_recovery", `
+    UPDATE alert_incidents AS incident
+       SET recovery_notified_at = ?1, updated_at = ?1
+     WHERE incident.incident_state = 'RESOLVED'
+       AND incident.environment_code = ?2
+       AND incident.recovery_notified_at IS NULL
+       AND EXISTS (
+         SELECT 1 FROM alert_deliveries AS active_notice
+          WHERE active_notice.alert_incident_id = incident.alert_incident_id
+            AND active_notice.delivery_kind IN ('OPEN', 'ESCALATION', 'REMINDER')
+            AND active_notice.delivery_state = 'SENT'
+       )
+       AND NOT EXISTS (
+         SELECT 1
+           FROM alert_deliveries AS required_notice
+          WHERE required_notice.alert_incident_id = incident.alert_incident_id
+            AND required_notice.delivery_kind IN ('OPEN', 'ESCALATION', 'REMINDER')
+            AND (
+              required_notice.delivery_state IN ('SENT', 'ATTEMPTING') OR
+              (required_notice.delivery_state IN ('RETRY', 'DEAD') AND
+               required_notice.last_error_code = 'ALERT_DELIVERY_LEASE_EXPIRED')
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM alert_deliveries AS recovery
+               WHERE recovery.alert_incident_id = incident.alert_incident_id
+                 AND recovery.delivery_kind = 'RECOVERY'
+                 AND recovery.delivery_state = 'SENT'
+                 AND recovery.channel_code = required_notice.channel_code
+                 AND recovery.target_role_code = required_notice.target_role_code
+            )
+       )
+  `, [nowIso, environment]);
+}
+
+function buildAlertMessage(delivery, fromEmail) {
+  const environment = String(delivery?.environment_code || "").trim().toLowerCase();
+  const deliveryKind = String(delivery?.delivery_kind || "").trim().toUpperCase();
+  const severity = String(delivery?.severity_code || "").trim().toUpperCase();
+  const alertKey = fixedCode(delivery?.alert_key, "OPS_ALERT_KEY_INVALID");
+  const reasonCode = fixedCode(delivery?.reason_code, "OPS_ALERT_REASON_INVALID");
+  const signalCount = boundedCount(delivery?.signal_count);
+  const queuedAt = requiredDate(delivery?.queued_at).toISOString();
+  const firstObservedAt = requiredDate(delivery?.first_observed_at).toISOString();
+  const latestObservedAt = requiredDate(delivery?.latest_observed_at).toISOString();
+  const recoveryObservedAt = deliveryKind === "RECOVERY"
+    ? requiredDate(delivery?.recovery_observed_at).toISOString()
+    : null;
+  if (delivery?.message_version !== ALERT_MESSAGE_VERSION) throw new Error("OPS_ALERT_MESSAGE_VERSION_CHANGED");
+  if (!new Set(["sandbox", "production"]).has(environment)) throw new Error("OPS_ENVIRONMENT_INVALID");
+  if (!ALERT_DELIVERY_KINDS.includes(deliveryKind)) throw new Error("OPS_ALERT_DELIVERY_KIND_INVALID");
+  if (ALERT_REASON_BY_KEY[alertKey] !== reasonCode) throw new Error("OPS_ALERT_REASON_PAIR_INVALID");
+  if ((deliveryKind === "TEST") !== (alertKey === "ALERT_PATH_TEST")) throw new Error("OPS_ALERT_TEST_PAIR_INVALID");
+  if (!new Set(["WARNING", "CRITICAL"]).has(severity)) throw new Error("OPS_ALERT_SEVERITY_INVALID");
+  if (signalCount < 1) throw new Error("OPS_ALERT_SIGNAL_COUNT_INVALID");
+  return Object.freeze({
+    from: fromEmail,
+    subject: `Spartan Square ${environment} ${severity} ${deliveryKind}`,
+    text: [
+      "Spartan Square operations notice",
+      "",
+      `Environment: ${environment}`,
+      `Notice: ${deliveryKind}`,
+      `Severity: ${severity}`,
+      `Condition: ${alertKey}`,
+      `Reason: ${reasonCode}`,
+      `Affected count: ${signalCount}`,
+      `First observed (UTC): ${firstObservedAt}`,
+      `Latest observed (UTC): ${latestObservedAt}`,
+      ...(recoveryObservedAt ? [`Recovery observed (UTC): ${recoveryObservedAt}`] : []),
+      `Notice queued (UTC): ${queuedAt}`,
+      "",
+      "This message contains bounded operational counts only.",
+    ].join("\n"),
+  });
+}
+
+function classifyEmailError(error) {
+  const providerCode = String(error?.code || "").trim().toUpperCase();
+  if (providerCode === "OPS_ALERT_SENDER_CHANGED") {
+    return Object.freeze({ retryable: false, errorCode: "ALERT_SENDER_CONFIG_CHANGED" });
+  }
+  if (providerCode === "OPS_ALERT_MESSAGE_VERSION_CHANGED") {
+    return Object.freeze({ retryable: false, errorCode: "ALERT_TEMPLATE_VERSION_CHANGED" });
+  }
+  if (/^OPS_(?:ALERT|ENVIRONMENT)_/.test(String(error?.message || ""))) {
+    return Object.freeze({ retryable: false, errorCode: "ALERT_CONTENT_INVALID" });
+  }
+  if (TRANSIENT_EMAIL_ERROR_CODES.has(providerCode)) {
+    const mapped = {
+      E_RATE_LIMIT_EXCEEDED: "ALERT_EMAIL_RATE_LIMIT",
+      E_DAILY_LIMIT_EXCEEDED: "ALERT_EMAIL_DAILY_LIMIT",
+      E_INTERNAL_SERVER_ERROR: "ALERT_EMAIL_INTERNAL_ERROR",
+    }[providerCode];
+    return Object.freeze({ retryable: true, errorCode: mapped });
+  }
+  if (PERMANENT_EMAIL_ERROR_CODES.has(providerCode)) {
+    return Object.freeze({ retryable: false, errorCode: "ALERT_EMAIL_PERMANENT_ERROR" });
+  }
+  return Object.freeze({ retryable: true, errorCode: "ALERT_EMAIL_TRANSIENT_ERROR" });
+}
+
+function alertRetryDelaySeconds(attemptNumber) {
+  return [60, 300][Math.max(0, Math.min(1, attemptNumber - 1))];
+}
+
+function boundedAlertAttempt(value) {
+  const attempt = Number(value || 0);
+  if (!Number.isSafeInteger(attempt) || attempt < 0 || attempt >= ALERT_MAX_ATTEMPTS) {
+    throw new Error("OPS_ALERT_ATTEMPT_INVALID");
+  }
+  return attempt;
+}
+
+function fixedCode(value, errorCode) {
+  const code = String(value || "").trim();
+  if (!/^[A-Z0-9_]{3,80}$/.test(code)) throw new Error(errorCode);
+  return code;
+}
+
+function isBoundedEmailAddress(value) {
+  return typeof value === "string" && value.length <= 254 && !/[\r\n]/.test(value) &&
+    /^[^@\s]{1,64}@[A-Za-z0-9.-]{1,189}$/.test(value);
+}
+
+async function sha256Hex(value) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function opsAll(db, op, sql, values) {
+  const result = await db.prepare(`/*op:${op}*/${sql}`).bind(...values).all();
+  if (!result || result.success === false || !Array.isArray(result.results)) throw new Error("OPS_QUERY_FAILED");
+  return result.results;
+}
+
+async function opsRun(db, op, sql, values) {
+  const result = await db.prepare(`/*op:${op}*/${sql}`).bind(...values).run();
+  if (!result || result.success === false) throw new Error("OPS_WRITE_FAILED");
+  return result;
+}
+
+function changedCount(result) {
+  const changes = Number(result?.meta?.changes || 0);
+  return Number.isSafeInteger(changes) && changes >= 0 ? changes : 0;
+}
+
 async function readConnectorSignals(env, now) {
   if (!env?.CONNECTOR_DB) throw new Error("CONNECTOR_DB_NOT_CONFIGURED");
   const warningAge = clampInt(env.OPS_WARNING_AGE_SECONDS, DEFAULT_WARNING_AGE_SECONDS, 60, 86400);
@@ -278,7 +866,7 @@ function summarizeAgeRows(rows, now) {
 
 function makeSignal(alertKey, severity, count, reasonCode, oldestAt = null) {
   if (!FIXED_ALERT_KEYS.includes(alertKey) || !new Set(["WARNING", "CRITICAL"]).has(severity) ||
-      !/^[A-Z0-9_]{3,80}$/.test(reasonCode)) throw new Error("OPS_SIGNAL_INVALID");
+      ALERT_REASON_BY_KEY[alertKey] !== reasonCode) throw new Error("OPS_SIGNAL_INVALID");
   return Object.freeze({ alertKey, severity, count: boundedCount(count), reasonCode, oldestAt });
 }
 
@@ -341,5 +929,9 @@ function flag(value) {
 export const __test = Object.freeze({
   runMonitor,
   readConnectorSignals,
+  runAlertEngine,
+  planAlertDeliveries,
+  buildAlertMessage,
+  classifyEmailError,
   FIXED_ALERT_KEYS,
 });

@@ -8,6 +8,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8");
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "spartan-square-ops-validator-"));
+const TEST_ALERT_FROM = ["square-operations", "alerts.example"].join("@");
+const TEST_ALERT_FROM_MIXED_CASE = ["Square-Operations", "Alerts.Example"].join("@");
+const TEST_ALERT_FROM_CHANGED = ["different-square-operations", "alerts.example"].join("@");
+const TEST_PRIVATE_EMAIL = ["private.person", "example.com"].join("@");
 
 const expectedFlags = [
   "OPS_MONITORING_ENABLED",
@@ -39,7 +43,11 @@ const expectedColumns = {
   ],
   alert_deliveries: [
     "alert_delivery_id", "alert_incident_id", "delivery_kind", "channel_code", "target_role_code",
-    "delivery_state", "attempt_count", "last_error_code", "queued_at", "sent_at", "created_at", "updated_at",
+    "environment_code", "alert_key", "severity_code", "signal_count", "reason_code", "sender_fingerprint",
+    "message_version", "delivery_state",
+    "attempt_count", "last_error_code", "queued_at", "available_at", "first_observed_at",
+    "latest_observed_at", "recovery_observed_at", "lease_token", "lease_expires_at", "attempted_at",
+    "sent_at", "cancelled_at", "created_at", "updated_at",
   ],
   backup_runs: [
     "backup_run_id", "environment_code", "scheduled_for", "backup_state", "source_bookmark", "object_key",
@@ -61,6 +69,7 @@ function validateWranglerConfiguration(relativePath, environment) {
   assert.doesNotMatch(config, /^routes?\s*=/m, `${relativePath} must remain scheduled-only`);
   assert.match(config, /\[triggers\][\s\S]*?crons\s*=/, `${relativePath} needs a scheduled trigger`);
   assert.match(config, new RegExp(`^OPS_ENVIRONMENT\\s*=\\s*"${environment}"$`, "m"));
+  assert.match(config, /^OPS_SCHEMA_VERSION\s*=\s*"2"$/m, `${relativePath} must require operations schema 2`);
 
   for (const flagName of expectedFlags) {
     assert.match(config, new RegExp(`^${flagName}\\s*=\\s*"false"$`, "m"), `${flagName} must default false`);
@@ -97,8 +106,7 @@ function validateWranglerConfiguration(relativePath, environment) {
 
 function validateMigration() {
   const databasePath = path.join(tempRoot, "ops-state.sqlite");
-  const migration = read("square-ops/migrations/0001_ops_state.sql");
-  execFileSync("sqlite3", [databasePath], { input: migration, stdio: ["pipe", "pipe", "pipe"] });
+  applyOpsMigrations(databasePath);
 
   const tableOutput = sqlite(databasePath,
     "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name;");
@@ -288,6 +296,215 @@ function validateMigration() {
   assert.equal(sqlite(databasePath, "PRAGMA foreign_key_check;").trim(), "", "Migration foreign-key check failed");
 }
 
+function validateAlertMigrationUpgrade() {
+  const databasePath = path.join(tempRoot, "ops-alert-upgrade.sqlite");
+  applyOpsMigrationAtomically(databasePath, "square-ops/migrations/0001_ops_state.sql");
+  const legacyIncident = {
+    alert_incident_id: "legacy-incident",
+    environment_code: "sandbox",
+    alert_key: "WEBHOOK_STALE",
+    severity_code: "WARNING",
+    incident_state: "RESOLVED",
+    occurrence_count: 2,
+    latest_signal_count: 4,
+    reason_code: "WEBHOOK_DELIVERY_STALE",
+    first_seen_at: "2026-08-18T10:00:00.000Z",
+    last_seen_at: "2026-08-18T10:05:00.000Z",
+    dedupe_until: "2026-08-18T11:00:00.000Z",
+    resolved_at: "2026-08-18T10:06:00.000Z",
+    created_at: "2026-08-18T10:00:00.000Z",
+    updated_at: "2026-08-18T10:06:00.000Z",
+  };
+  const testIncident = {
+    ...legacyIncident,
+    alert_incident_id: "legacy-test-incident",
+    alert_key: "ALERT_PATH_TEST",
+    reason_code: "MONTHLY_ALERT_PATH_TEST",
+  };
+  const legacyBase = {
+    alert_incident_id: "legacy-incident",
+    delivery_kind: "OPEN",
+    channel_code: "OWNER_EMAIL",
+    target_role_code: "OWNER",
+    delivery_state: "PENDING",
+    attempt_count: 0,
+    queued_at: "2026-08-18T10:01:00.000Z",
+    created_at: "2026-08-18T10:01:00.000Z",
+    updated_at: "2026-08-18T10:02:00.000Z",
+  };
+  const legacyRows = [
+    { ...legacyBase, alert_delivery_id: "legacy-pending-0" },
+    { ...legacyBase, alert_delivery_id: "legacy-pending-1", channel_code: "BACKUP_OWNER_EMAIL",
+      target_role_code: "BACKUP_OWNER", attempt_count: 1, last_error_code: "RAW_LEGACY_ONE" },
+    { ...legacyBase, alert_delivery_id: "legacy-pending-2", delivery_kind: "REMINDER",
+      attempt_count: 2, last_error_code: "RAW_LEGACY_TWO" },
+    { ...legacyBase, alert_delivery_id: "legacy-pending-3", delivery_kind: "REMINDER",
+      channel_code: "BACKUP_OWNER_EMAIL", target_role_code: "BACKUP_OWNER", attempt_count: 3,
+      last_error_code: "RAW_LEGACY_THREE" },
+    { ...legacyBase, alert_delivery_id: "legacy-failed-0", delivery_kind: "RECOVERY",
+      delivery_state: "FAILED", last_error_code: "RAW_LEGACY_FAILED" },
+    { ...legacyBase, alert_delivery_id: "legacy-sent-0", delivery_kind: "RECOVERY",
+      channel_code: "BACKUP_OWNER_EMAIL", target_role_code: "BACKUP_OWNER", delivery_state: "SENT",
+      sent_at: "2026-08-18T10:02:00.000Z" },
+    { ...legacyBase, alert_delivery_id: "legacy-test-pending", alert_incident_id: "legacy-test-incident",
+      delivery_kind: "TEST" },
+    { ...legacyBase, alert_delivery_id: "legacy-test-failed", alert_incident_id: "legacy-test-incident",
+      delivery_kind: "TEST", channel_code: "BACKUP_OWNER_EMAIL", target_role_code: "BACKUP_OWNER",
+      delivery_state: "FAILED", attempt_count: 2, last_error_code: "RAW_LEGACY_TEST" },
+  ];
+  sqlite(databasePath, [
+    insertStatement("alert_incidents", legacyIncident),
+    insertStatement("alert_incidents", testIncident),
+    ...legacyRows.map((row) => insertStatement("alert_deliveries", row)),
+  ].join("\n"));
+  applyOpsMigrationAtomically(databasePath, "square-ops/migrations/0002_alert_delivery_engine.sql");
+  const migrated = execFileSync("sqlite3", ["-json", databasePath,
+    "SELECT * FROM alert_deliveries ORDER BY alert_delivery_id;"], { encoding: "utf8" }).trim();
+  const migratedRows = JSON.parse(migrated);
+  assert.equal(migratedRows.length, legacyRows.length, "Migration 0002 must preserve every v1 delivery row");
+  const expectedStates = new Map([
+    ["legacy-pending-0", ["PENDING", 0, null]],
+    ["legacy-pending-1", ["RETRY", 1, "LEGACY_DELIVERY_FAILED"]],
+    ["legacy-pending-2", ["RETRY", 2, "LEGACY_DELIVERY_FAILED"]],
+    ["legacy-pending-3", ["DEAD", 3, "LEGACY_DELIVERY_FAILED"]],
+    ["legacy-failed-0", ["DEAD", 1, "LEGACY_DELIVERY_FAILED"]],
+    ["legacy-sent-0", ["SENT", 1, null]],
+    ["legacy-test-pending", ["PENDING", 0, null]],
+    ["legacy-test-failed", ["DEAD", 2, "LEGACY_DELIVERY_FAILED"]],
+  ]);
+  for (const row of migratedRows) {
+    assert.deepEqual([row.delivery_state, row.attempt_count, row.last_error_code ?? null],
+      expectedStates.get(row.alert_delivery_id), `${row.alert_delivery_id} legacy state mapping changed`);
+    assert.equal(row.environment_code, "sandbox");
+    assert.equal(row.sender_fingerprint, "0".repeat(64));
+    assert.equal(row.message_version, "OPS_ALERT_V1");
+    assert.equal(row.first_observed_at, "2026-08-18T10:00:00.000Z");
+    assert.equal(row.latest_observed_at, "2026-08-18T10:05:00.000Z");
+    assert.equal(row.recovery_observed_at,
+      row.delivery_kind === "RECOVERY" ? "2026-08-18T10:06:00.000Z" : null);
+  }
+
+  const pending = {
+    alert_delivery_id: "constraint-delivery",
+    alert_incident_id: "legacy-incident",
+    delivery_kind: "ESCALATION",
+    channel_code: "BACKUP_OWNER_EMAIL",
+    target_role_code: "BACKUP_OWNER",
+    environment_code: "sandbox",
+    alert_key: "WEBHOOK_STALE",
+    severity_code: "WARNING",
+    signal_count: 4,
+    reason_code: "WEBHOOK_DELIVERY_STALE",
+    sender_fingerprint: "a".repeat(64),
+    message_version: "OPS_ALERT_V1",
+    delivery_state: "PENDING",
+    attempt_count: 0,
+    queued_at: "2026-08-18T10:03:00.000Z",
+    available_at: "2026-08-18T10:03:00.000Z",
+    first_observed_at: "2026-08-18T10:00:00.000Z",
+    latest_observed_at: "2026-08-18T10:05:00.000Z",
+    created_at: "2026-08-18T10:03:00.000Z",
+    updated_at: "2026-08-18T10:03:00.000Z",
+  };
+  assertCheckRejected(databasePath, "Delivery timestamps must be valid",
+    insertStatement("alert_deliveries", { ...pending, alert_delivery_id: "bad-time", queued_at: "not-a-time" }));
+  assertCheckRejected(databasePath, "Delivery codes must be fixed and bounded",
+    insertStatement("alert_deliveries", { ...pending, alert_delivery_id: "bad-code", reason_code: "raw provider error" }));
+  assertCheckRejected(databasePath, "Delivery condition and reason must be an exact reviewed pair",
+    insertStatement("alert_deliveries", {
+      ...pending,
+      alert_delivery_id: "bad-pair",
+      alert_key: "ORDER_PRIVATE_REFERENCE",
+      reason_code: "WEBHOOK_DELIVERY_STALE",
+    }));
+  assertCheckRejected(databasePath, "Delivery channels and target roles cannot be crossed",
+    insertStatement("alert_deliveries", {
+      ...pending,
+      alert_delivery_id: "bad-role-pair",
+      channel_code: "OWNER_EMAIL",
+      target_role_code: "BACKUP_OWNER",
+    }));
+  assertCheckRejected(databasePath, "Delivery template versions must be fixed and reviewable",
+    insertStatement("alert_deliveries", {
+      ...pending,
+      alert_delivery_id: "bad-template-version",
+      message_version: "OPS_ALERT_V2",
+    }));
+  assertCheckRejected(databasePath, "Delivery error evidence must use a reviewed fixed code",
+    insertStatement("alert_deliveries", {
+      ...pending,
+      alert_delivery_id: "bad-error-code",
+      delivery_state: "RETRY",
+      attempt_count: 1,
+      attempted_at: "2026-08-18T10:03:00.000Z",
+      last_error_code: "ORDER_PRIVATE_REFERENCE",
+    }));
+  assertCheckRejected(databasePath, "Recovery rows require an immutable recovery observation",
+    insertStatement("alert_deliveries", { ...pending, alert_delivery_id: "bad-recovery", delivery_kind: "RECOVERY" }));
+  assertCheckRejected(databasePath, "Delivery attempts are bounded at three",
+    insertStatement("alert_deliveries", {
+      ...pending,
+      alert_delivery_id: "bad-attempts",
+      delivery_state: "DEAD",
+      attempt_count: 4,
+      attempted_at: "2026-08-18T10:03:00.000Z",
+      last_error_code: "ALERT_EMAIL_PERMANENT_ERROR",
+    }));
+  sqlite(databasePath, insertStatement("alert_deliveries", pending));
+  assert.equal(sqlite(databasePath, "PRAGMA integrity_check;").trim(), "ok");
+  assert.equal(sqlite(databasePath, "PRAGMA foreign_key_check;").trim(), "");
+
+  const crossedPath = path.join(tempRoot, "ops-alert-crossed-upgrade.sqlite");
+  applyOpsMigrationAtomically(crossedPath, "square-ops/migrations/0001_ops_state.sql");
+  sqlite(crossedPath, `
+    INSERT INTO alert_incidents (
+      alert_incident_id, environment_code, alert_key, severity_code, incident_state,
+      occurrence_count, latest_signal_count, reason_code, first_seen_at, last_seen_at,
+      dedupe_until, created_at, updated_at
+    ) VALUES (
+      'crossed-incident', 'sandbox', 'WEBHOOK_STALE', 'WARNING', 'OPEN', 1, 1,
+      'WEBHOOK_DELIVERY_STALE', '2026-08-18T10:00:00.000Z', '2026-08-18T10:00:00.000Z',
+      '2026-08-18T11:00:00.000Z', '2026-08-18T10:00:00.000Z', '2026-08-18T10:00:00.000Z'
+    );
+    INSERT INTO alert_deliveries (
+      alert_delivery_id, alert_incident_id, delivery_kind, channel_code, target_role_code,
+      delivery_state, attempt_count, queued_at, created_at, updated_at
+    ) VALUES (
+      'crossed-delivery', 'crossed-incident', 'OPEN', 'OWNER_EMAIL', 'BACKUP_OWNER',
+      'PENDING', 0, '2026-08-18T10:01:00.000Z', '2026-08-18T10:01:00.000Z', '2026-08-18T10:01:00.000Z'
+    );
+  `);
+  const crossedUpgrade = spawnSync("sqlite3", [crossedPath], {
+    input: atomicMigrationInput("square-ops/migrations/0002_alert_delivery_engine.sql"),
+    encoding: "utf8",
+  });
+  assert.notEqual(crossedUpgrade.status, 0, "Migration 0002 must stop before normalizing ambiguous crossed role evidence");
+  assert.match(crossedUpgrade.stderr || "", /CHECK constraint failed/);
+  assert.equal(sqlite(crossedPath, "SELECT COUNT(*) FROM alert_deliveries WHERE alert_delivery_id='crossed-delivery';").trim(),
+    "1", "A rejected crossed-role migration must atomically preserve its original evidence");
+
+  const orphanPath = path.join(tempRoot, "ops-alert-orphan-upgrade.sqlite");
+  applyOpsMigrationAtomically(orphanPath, "square-ops/migrations/0001_ops_state.sql");
+  sqlite(orphanPath, `
+    INSERT INTO alert_deliveries (
+      alert_delivery_id, alert_incident_id, delivery_kind, channel_code, target_role_code,
+      delivery_state, attempt_count, queued_at, created_at, updated_at
+    ) VALUES (
+      'orphan-delivery', 'missing-incident', 'OPEN', 'OWNER_EMAIL', 'OWNER',
+      'PENDING', 0, '2026-08-18T10:01:00.000Z', '2026-08-18T10:01:00.000Z',
+      '2026-08-18T10:01:00.000Z'
+    );
+  `);
+  const orphanUpgrade = spawnSync("sqlite3", [orphanPath], {
+    input: atomicMigrationInput("square-ops/migrations/0002_alert_delivery_engine.sql"),
+    encoding: "utf8",
+  });
+  assert.notEqual(orphanUpgrade.status, 0, "Migration 0002 must reject a legacy orphan instead of dropping it");
+  assert.match(orphanUpgrade.stderr || "", /CHECK constraint failed/);
+  assert.equal(sqlite(orphanPath, "SELECT COUNT(*) FROM alert_deliveries WHERE alert_delivery_id='orphan-delivery';").trim(),
+    "1", "A rejected orphan migration must atomically preserve its original evidence");
+}
+
 class MockStatement {
   constructor(db, op, sql) {
     this.db = db;
@@ -431,6 +648,69 @@ class OverlapOpsDB extends MockOpsDB {
       }
     }
     return super.batch(statements);
+  }
+}
+
+class SqliteD1Statement {
+  constructor(db, op, sql) {
+    this.db = db;
+    this.op = op;
+    this.sql = sql;
+    this.values = [];
+  }
+  bind(...values) { this.values = values; return this; }
+  all() { return this.db.execute(this.op, this.values, "all", this.sql); }
+  run() { return this.db.execute(this.op, this.values, "run", this.sql); }
+}
+
+class SqliteD1 {
+  constructor(databasePath, { failSentFinalizations = 0, mutateCandidates = null, beforeClaimOnce = null } = {}) {
+    this.databasePath = databasePath;
+    this.failSentFinalizations = failSentFinalizations;
+    this.mutateCandidates = mutateCandidates;
+    this.beforeClaimOnce = beforeClaimOnce;
+    this.executed = [];
+  }
+  prepare(sql) {
+    const op = sql.match(/\/\*op:([a-z0-9_]+)\*\//i)?.[1];
+    assert.ok(op, "Every alert operation must carry an operation tag");
+    return new SqliteD1Statement(this, op, sql);
+  }
+  execute(op, values, mode, sql) {
+    this.executed.push({ op, values: [...values], sql });
+    if (op === "ops_alert_claim" && this.beforeClaimOnce) {
+      const callback = this.beforeClaimOnce;
+      this.beforeClaimOnce = null;
+      callback(this.databasePath, values);
+    }
+    if (op === "ops_alert_sent" && this.failSentFinalizations > 0) {
+      this.failSentFinalizations -= 1;
+      return { success: true, meta: { changes: 0 } };
+    }
+    const bound = bindSql(sql, values);
+    if (mode === "all") {
+      const output = execFileSync("sqlite3", ["-json", this.databasePath, bound], { encoding: "utf8" }).trim();
+      const results = output ? JSON.parse(output) : [];
+      if (op === "ops_alert_candidates" && this.mutateCandidates) this.mutateCandidates(results);
+      return { success: true, results };
+    }
+    assert.equal(mode, "run");
+    const output = sqlite(this.databasePath, `${bound}; SELECT changes();`).trim();
+    const changes = Number(nonemptyLines(output).at(-1) || 0);
+    return { success: true, meta: { changes } };
+  }
+}
+
+class MockEmailBinding {
+  constructor(outcomes = []) {
+    this.calls = [];
+    this.outcomes = [...outcomes];
+  }
+  async send(message) {
+    this.calls.push(structuredClone(message));
+    const outcome = this.outcomes.shift();
+    if (outcome instanceof Error) throw outcome;
+    return outcome || { messageId: "provider-message-id-must-be-discarded" };
   }
 }
 
@@ -581,7 +861,8 @@ async function validateWorkerBoundary() {
       : {};
     const environment = new Proxy(baseEnvironment, {
       get(target, property, receiver) {
-        if (["OPS_DB", "CONNECTOR_DB", "BACKUP_BUCKET", "ALERT_EMAIL"].includes(String(property))) bindingReads += 1;
+        if (["OPS_DB", "CONNECTOR_DB", "BACKUP_BUCKET", "OPS_OWNER_EMAIL", "OPS_BACKUP_OWNER_EMAIL",
+          "OPS_ALERT_FROM_EMAIL"].includes(String(property))) bindingReads += 1;
         return Reflect.get(target, property, receiver);
       },
     });
@@ -592,9 +873,10 @@ async function validateWorkerBoundary() {
   }
 
   let wrongCronBindingReads = 0;
-  const wrongCronEnvironment = new Proxy({ OPS_MONITORING_ENABLED: "true" }, {
+  const wrongCronEnvironment = new Proxy({ OPS_MONITORING_ENABLED: "true", OPS_ALERTS_ENABLED: "true" }, {
     get(target, property, receiver) {
-      if (["OPS_DB", "CONNECTOR_DB"].includes(String(property))) wrongCronBindingReads += 1;
+      if (["OPS_DB", "CONNECTOR_DB", "OPS_OWNER_EMAIL", "OPS_BACKUP_OWNER_EMAIL",
+        "OPS_ALERT_FROM_EMAIL"].includes(String(property))) wrongCronBindingReads += 1;
       return Reflect.get(target, property, receiver);
     },
   });
@@ -603,7 +885,7 @@ async function validateWorkerBoundary() {
   await workerModule.default.scheduled({ scheduledTime: Date.now() }, wrongCronEnvironment, {});
   assert.equal(wrongCronBindingReads, 0, "Monitoring must require the exact five-minute cron");
 
-  for (const unsupportedFlag of ["OPS_ALERTS_ENABLED", "OPS_BACKUPS_ENABLED", "OPS_RESTORE_TESTS_ENABLED"]) {
+  for (const unsupportedFlag of ["OPS_BACKUPS_ENABLED", "OPS_RESTORE_TESTS_ENABLED"]) {
     await assert.rejects(
       workerModule.default.scheduled(
         { cron: "*/5 * * * *", scheduledTime: Date.now() },
@@ -615,7 +897,18 @@ async function validateWorkerBoundary() {
     );
   }
 
+  await assert.rejects(
+    workerModule.default.scheduled(
+      { cron: "*/5 * * * *", scheduledTime: Date.now() },
+      { OPS_ALERTS_ENABLED: "true", OPS_MONITORING_ENABLED: "false" },
+      {},
+    ),
+    /OPS_ALERTS_REQUIRE_MONITORING/,
+    "Alert draining must require the monitor on the exact five-minute cron",
+  );
+
   await validateMonitorBehavior(workerModule);
+  await validateAlertBehavior(workerModule);
 }
 
 async function validateMonitorBehavior(workerModule) {
@@ -852,6 +1145,554 @@ async function validateMonitorBehavior(workerModule) {
     "Monitor retention must preserve unexpired run rows");
 }
 
+let alertFixtureSequence = 0;
+
+function createAlertFixture({ ownerOutcomes = [], backupOutcomes = [], failSentFinalizations = 0,
+  mutateCandidates = null, beforeClaimOnce = null } = {}) {
+  alertFixtureSequence += 1;
+  const databasePath = path.join(tempRoot, `alert-fixture-${alertFixtureSequence}.sqlite`);
+  applyOpsMigrations(databasePath);
+  const owner = new MockEmailBinding(ownerOutcomes);
+  const backup = new MockEmailBinding(backupOutcomes);
+  const db = new SqliteD1(databasePath, { failSentFinalizations, mutateCandidates, beforeClaimOnce });
+  const env = {
+    OPS_ENVIRONMENT: "sandbox",
+    OPS_SCHEMA_VERSION: "2",
+    OPS_MONITORING_ENABLED: "true",
+    OPS_ALERTS_ENABLED: "true",
+    OPS_ALERT_DEDUPE_SECONDS: "3600",
+    OPS_ALERT_FROM_EMAIL: TEST_ALERT_FROM,
+    OPS_DB: db,
+    OPS_OWNER_EMAIL: owner,
+    OPS_BACKUP_OWNER_EMAIL: backup,
+  };
+  return { databasePath, db, env, owner, backup };
+}
+
+function insertAlertIncident(databasePath, {
+  id,
+  alertKey = "WEBHOOK_STALE",
+  severity = "WARNING",
+  state = "OPEN",
+  count = 2,
+  firstSeenAt,
+  lastSeenAt = firstSeenAt,
+  resolvedAt = null,
+  environment = "sandbox",
+}) {
+  const dedupeUntil = new Date(Date.parse(firstSeenAt) + 3600 * 1000).toISOString();
+  sqlite(databasePath, insertStatement("alert_incidents", {
+    alert_incident_id: id,
+    environment_code: environment,
+    alert_key: alertKey,
+    severity_code: severity,
+    incident_state: state,
+    occurrence_count: 1,
+    latest_signal_count: count,
+    reason_code: alertKey === "OUTBOX_DEAD" ? "OUTBOX_DELIVERY_DEAD" : "WEBHOOK_DELIVERY_STALE",
+    first_seen_at: firstSeenAt,
+    last_seen_at: lastSeenAt,
+    dedupe_until: dedupeUntil,
+    resolved_at: resolvedAt,
+    created_at: firstSeenAt,
+    updated_at: resolvedAt || lastSeenAt,
+  }));
+}
+
+function alertDeliveryRows(databasePath, where = "1=1") {
+  const output = execFileSync("sqlite3", ["-json", databasePath,
+    `SELECT * FROM alert_deliveries WHERE ${where} ORDER BY queued_at, target_role_code, delivery_kind;`],
+  { encoding: "utf8" }).trim();
+  return output ? JSON.parse(output) : [];
+}
+
+function emailFailure(code, message = `${TEST_PRIVATE_EMAIL} +19185550100 ORDER-PRIVATE`) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+async function validateAlertBehavior(workerModule) {
+  const base = new Date("2026-08-18T12:00:00.000Z");
+  const at = (seconds) => new Date(base.getTime() + seconds * 1000);
+
+  let poisonPrepareCalls = 0;
+  const poisonDb = { prepare() { poisonPrepareCalls += 1; throw new Error("POISON_DB_TOUCHED"); } };
+  await assert.rejects(workerModule.__test.runAlertEngine({
+    OPS_DB: poisonDb,
+    OPS_ENVIRONMENT: "sandbox",
+    OPS_SCHEMA_VERSION: "1",
+  }, base), /OPS_ALERT_SCHEMA_VERSION_INVALID/);
+  assert.equal(poisonPrepareCalls, 0, "Invalid alert configuration must fail before a D1 operation");
+  await assert.rejects(workerModule.__test.runAlertEngine({
+    OPS_DB: poisonDb,
+    OPS_ENVIRONMENT: "sandbox",
+    OPS_SCHEMA_VERSION: "2",
+    OPS_ALERT_FROM_EMAIL: TEST_ALERT_FROM,
+  }, base), /OPS_ALERT_BINDING_NOT_CONFIGURED/);
+  assert.equal(poisonPrepareCalls, 0, "Missing email bindings must fail before a D1 operation");
+  const sharedBinding = new MockEmailBinding();
+  await assert.rejects(workerModule.__test.runAlertEngine({
+    OPS_DB: poisonDb,
+    OPS_ENVIRONMENT: "sandbox",
+    OPS_SCHEMA_VERSION: "2",
+    OPS_ALERT_FROM_EMAIL: TEST_ALERT_FROM,
+    OPS_OWNER_EMAIL: sharedBinding,
+    OPS_BACKUP_OWNER_EMAIL: sharedBinding,
+  }, base), /OPS_ALERT_BINDINGS_MUST_BE_DISTINCT/);
+  assert.equal(poisonPrepareCalls, 0, "Role bindings must be distinct before D1 is touched");
+  await assert.rejects(workerModule.__test.runAlertEngine({
+    OPS_DB: poisonDb,
+    OPS_ENVIRONMENT: "unknown",
+    OPS_SCHEMA_VERSION: "2",
+  }, base), /OPS_ENVIRONMENT_INVALID/);
+  assert.equal(poisonPrepareCalls, 0, "An invalid alert environment must fail before D1 is touched");
+
+  const poisonedContent = createAlertFixture({
+    mutateCandidates(results) {
+      const ownerCandidate = results.find((row) => row.target_role_code === "OWNER");
+      if (ownerCandidate) ownerCandidate.alert_key = "ORDER_PRIVATE_REFERENCE";
+    },
+  });
+  insertAlertIncident(poisonedContent.databasePath, {
+    id: "incident-poisoned-content", firstSeenAt: base.toISOString(),
+  });
+  await assert.rejects(workerModule.__test.runAlertEngine(poisonedContent.env, base),
+    /OPS_ALERT_DELIVERY_INCOMPLETE/);
+  let poisonedRows = alertDeliveryRows(poisonedContent.databasePath);
+  assert.deepEqual([poisonedContent.owner.calls.length, poisonedContent.backup.calls.length], [0, 1],
+    "A malformed owner snapshot must fail closed without blocking the backup role");
+  assert.deepEqual([
+    poisonedRows.find((row) => row.target_role_code === "OWNER").delivery_state,
+    poisonedRows.find((row) => row.target_role_code === "OWNER").last_error_code,
+    poisonedRows.find((row) => row.target_role_code === "BACKUP_OWNER").delivery_state,
+  ], ["DEAD", "ALERT_CONTENT_INVALID", "SENT"]);
+  assert.doesNotMatch(JSON.stringify(poisonedContent.backup.calls), /ORDER_PRIVATE_REFERENCE/);
+  assert.doesNotMatch(JSON.stringify(poisonedRows), /ORDER_PRIVATE_REFERENCE/,
+    "A planted identifier-shaped code must neither send nor persist");
+
+  const templateMismatch = createAlertFixture({
+    mutateCandidates(results) {
+      const ownerCandidate = results.find((row) => row.target_role_code === "OWNER");
+      if (ownerCandidate) ownerCandidate.message_version = "OPS_ALERT_V2";
+    },
+  });
+  insertAlertIncident(templateMismatch.databasePath, {
+    id: "incident-template-mismatch", firstSeenAt: base.toISOString(),
+  });
+  await assert.rejects(workerModule.__test.runAlertEngine(templateMismatch.env, base),
+    /OPS_ALERT_DELIVERY_INCOMPLETE/);
+  const templateRows = alertDeliveryRows(templateMismatch.databasePath);
+  assert.deepEqual([templateMismatch.owner.calls.length, templateMismatch.backup.calls.length], [0, 1]);
+  assert.deepEqual([
+    templateRows.find((row) => row.target_role_code === "OWNER").delivery_state,
+    templateRows.find((row) => row.target_role_code === "OWNER").last_error_code,
+  ], ["DEAD", "ALERT_TEMPLATE_VERSION_CHANGED"],
+  "A runtime/template-version mismatch must fail closed before transport while the other role continues");
+
+  const mixedEnvironment = createAlertFixture();
+  insertAlertIncident(mixedEnvironment.databasePath, {
+    id: "incident-sandbox-only", firstSeenAt: base.toISOString(), environment: "sandbox",
+  });
+  insertAlertIncident(mixedEnvironment.databasePath, {
+    id: "incident-production-untouched", alertKey: "OUTBOX_DEAD", severity: "CRITICAL", count: 1,
+    firstSeenAt: base.toISOString(), environment: "production",
+  });
+  await workerModule.__test.runAlertEngine(mixedEnvironment.env, base);
+  assert.equal(alertDeliveryRows(mixedEnvironment.databasePath, "environment_code='sandbox'").length, 2);
+  assert.equal(alertDeliveryRows(mixedEnvironment.databasePath, "environment_code='production'").length, 0,
+    "A sandbox alert sweep must not plan, mutate or send production evidence from a mixed database");
+  assert.deepEqual([mixedEnvironment.owner.calls.length, mixedEnvironment.backup.calls.length], [1, 1]);
+
+  const lifecycle = createAlertFixture();
+  insertAlertIncident(lifecycle.databasePath, { id: "incident-lifecycle", firstSeenAt: base.toISOString() });
+  let result = await workerModule.__test.runAlertEngine(lifecycle.env, base);
+  assert.deepEqual([result.sentCount, lifecycle.owner.calls.length, lifecycle.backup.calls.length], [2, 1, 1]);
+  let deliveries = alertDeliveryRows(lifecycle.databasePath);
+  assert.equal(deliveries.length, 2);
+  assert.ok(deliveries.every((row) => row.delivery_kind === "OPEN" && row.delivery_state === "SENT"));
+  assert.deepEqual([...new Set(deliveries.map((row) => row.target_role_code))].sort(), ["BACKUP_OWNER", "OWNER"]);
+  assert.ok(deliveries.every((row) => row.environment_code === "sandbox" && row.alert_key === "WEBHOOK_STALE"));
+
+  const firstMessage = lifecycle.owner.calls[0];
+  assert.deepEqual(Object.keys(firstMessage).sort(), ["from", "subject", "text"]);
+  assert.equal(Object.hasOwn(firstMessage, "to"), false, "The role-specific binding, not the message, owns its recipient");
+  assert.equal(Object.hasOwn(firstMessage, "html"), false);
+  assert.equal(Object.hasOwn(firstMessage, "headers"), false);
+  assert.deepEqual(firstMessage, lifecycle.backup.calls[0], "Each role receives the same counts-only content separately");
+  assert.match(firstMessage.text, /^Spartan Square operations notice\n\nEnvironment: sandbox\nNotice: OPEN\nSeverity: WARNING\nCondition: WEBHOOK_STALE\nReason: WEBHOOK_DELIVERY_STALE\nAffected count: 2\nFirst observed \(UTC\): 2026-08-18T12:00:00\.000Z\nLatest observed \(UTC\): 2026-08-18T12:00:00\.000Z\nNotice queued \(UTC\): 2026-08-18T12:00:00\.000Z\n\nThis message contains bounded operational counts only\.$/);
+  assert.doesNotMatch(JSON.stringify(firstMessage), /incident-lifecycle|delivery-|provider-message-id|https?:|analytics/i);
+  assert.doesNotMatch(JSON.stringify(alertDeliveryRows(lifecycle.databasePath)), /provider-message-id/,
+    "Cloudflare messageId must be discarded");
+
+  await workerModule.__test.runAlertEngine(lifecycle.env, at(300));
+  assert.deepEqual([lifecycle.owner.calls.length, lifecycle.backup.calls.length], [1, 1],
+    "Repeated monitor observations inside the window cannot duplicate OPEN");
+  sqlite(lifecycle.databasePath, `
+    UPDATE alert_incidents
+       SET severity_code='CRITICAL', latest_signal_count=5, occurrence_count=2,
+           last_seen_at='${at(600).toISOString()}', updated_at='${at(600).toISOString()}'
+     WHERE alert_incident_id='incident-lifecycle';
+  `);
+  await workerModule.__test.runAlertEngine(lifecycle.env, at(600));
+  deliveries = alertDeliveryRows(lifecycle.databasePath);
+  assert.equal(deliveries.filter((row) => row.delivery_kind === "ESCALATION").length, 2,
+    "A prior sent warning must receive one immediate critical escalation per role");
+  assert.ok(deliveries.filter((row) => row.delivery_kind === "ESCALATION")
+    .every((row) => row.severity_code === "CRITICAL" && row.signal_count === 5));
+  await workerModule.__test.runAlertEngine(lifecycle.env, at(900));
+  assert.equal(alertDeliveryRows(lifecycle.databasePath, "delivery_kind='ESCALATION'").length, 2,
+    "Escalation is one-time per incident and role");
+
+  await workerModule.__test.runAlertEngine(lifecycle.env, at(4199));
+  assert.equal(alertDeliveryRows(lifecycle.databasePath, "delivery_kind='REMINDER'").length, 0,
+    "The most recent active notice must be 60 minutes old; 59:59 is too early");
+  await workerModule.__test.runAlertEngine(lifecycle.env, at(4200));
+  assert.equal(alertDeliveryRows(lifecycle.databasePath, "delivery_kind='REMINDER'").length, 2,
+    "The exact 60-minute boundary creates one reminder per role");
+  await workerModule.__test.runAlertEngine(lifecycle.env, at(7800));
+  assert.equal(alertDeliveryRows(lifecycle.databasePath, "delivery_kind='REMINDER'").length, 2,
+    "Only one reminder is allowed per incident and role");
+
+  sqlite(lifecycle.databasePath, `
+    UPDATE alert_incidents
+       SET incident_state='RESOLVED', resolved_at='${at(8100).toISOString()}', updated_at='${at(8100).toISOString()}'
+     WHERE alert_incident_id='incident-lifecycle';
+  `);
+  await workerModule.__test.runAlertEngine(lifecycle.env, at(8100));
+  const recoveryRows = alertDeliveryRows(lifecycle.databasePath, "delivery_kind='RECOVERY'");
+  assert.equal(recoveryRows.length, 2);
+  assert.ok(recoveryRows.every((row) => row.delivery_state === "SENT" &&
+    row.recovery_observed_at === at(8100).toISOString()));
+  assert.equal(sqlite(lifecycle.databasePath,
+    "SELECT recovery_notified_at FROM alert_incidents WHERE alert_incident_id='incident-lifecycle';").trim(),
+  at(8100).toISOString(), "Recovery is complete only after all required role notices are sent");
+
+  const bornCritical = createAlertFixture();
+  insertAlertIncident(bornCritical.databasePath, {
+    id: "incident-born-critical", alertKey: "OUTBOX_DEAD", severity: "CRITICAL", count: 1,
+    firstSeenAt: base.toISOString(),
+  });
+  await workerModule.__test.runAlertEngine(bornCritical.env, base);
+  await workerModule.__test.runAlertEngine(bornCritical.env, at(300));
+  assert.equal(alertDeliveryRows(bornCritical.databasePath, "delivery_kind='OPEN'").length, 2);
+  assert.equal(alertDeliveryRows(bornCritical.databasePath, "delivery_kind='ESCALATION'").length, 0,
+    "A born-critical incident sends critical OPEN only");
+
+  const missedWarningEscalation = createAlertFixture({
+    ownerOutcomes: [emailFailure("E_RATE_LIMIT_EXCEEDED")],
+  });
+  insertAlertIncident(missedWarningEscalation.databasePath, {
+    id: "incident-missed-warning-escalation", firstSeenAt: base.toISOString(),
+  });
+  await assert.rejects(workerModule.__test.runAlertEngine(missedWarningEscalation.env, base),
+    /OPS_ALERT_DELIVERY_INCOMPLETE/);
+  const warningSnapshots = alertDeliveryRows(missedWarningEscalation.databasePath, "delivery_kind='OPEN'");
+  assert.deepEqual(warningSnapshots.map((row) => [row.target_role_code, row.delivery_state]), [
+    ["BACKUP_OWNER", "SENT"],
+    ["OWNER", "RETRY"],
+  ], "A failed owner warning remains independently retryable while backup succeeds");
+  sqlite(missedWarningEscalation.databasePath, `
+    UPDATE alert_incidents
+       SET severity_code='CRITICAL', latest_signal_count=7, occurrence_count=2,
+           last_seen_at='${at(300).toISOString()}', updated_at='${at(300).toISOString()}'
+     WHERE alert_incident_id='incident-missed-warning-escalation';
+  `);
+  await workerModule.__test.runAlertEngine(missedWarningEscalation.env, at(300));
+  const escalatedRows = alertDeliveryRows(missedWarningEscalation.databasePath);
+  const criticalRows = escalatedRows.filter((row) => row.delivery_kind === "ESCALATION");
+  assert.equal(criticalRows.length, 2,
+    "Every role needs a new critical logical delivery even when its warning was never sent");
+  assert.ok(criticalRows.every((row) => row.delivery_state === "SENT" &&
+    row.severity_code === "CRITICAL" && row.signal_count === 7));
+  const ownerWarningAfter = escalatedRows.find((row) =>
+    row.delivery_kind === "OPEN" && row.target_role_code === "OWNER");
+  const backupWarningAfter = escalatedRows.find((row) =>
+    row.delivery_kind === "OPEN" && row.target_role_code === "BACKUP_OWNER");
+  assert.deepEqual([
+    ownerWarningAfter.delivery_state,
+    ownerWarningAfter.severity_code,
+    ownerWarningAfter.signal_count,
+    ownerWarningAfter.first_observed_at,
+    backupWarningAfter.delivery_state,
+  ], ["CANCELLED", "WARNING", 2, base.toISOString(), "SENT"],
+  "The critical transition cancels only the unsent warning and never rewrites either warning snapshot");
+  assert.deepEqual([
+    missedWarningEscalation.owner.calls.length,
+    missedWarningEscalation.backup.calls.length,
+  ], [2, 2], "Each role gets one critical attempt without a stale warning retry after escalation");
+
+  const reminderRace = createAlertFixture();
+  insertAlertIncident(reminderRace.databasePath, { id: "incident-reminder-race", firstSeenAt: base.toISOString() });
+  await workerModule.__test.runAlertEngine(reminderRace.env, base);
+  sqlite(reminderRace.databasePath, `
+    UPDATE alert_incidents
+       SET severity_code='CRITICAL', latest_signal_count=9, occurrence_count=2,
+           last_seen_at='${at(3600).toISOString()}', updated_at='${at(3600).toISOString()}'
+     WHERE alert_incident_id='incident-reminder-race';
+  `);
+  await workerModule.__test.runAlertEngine(reminderRace.env, at(3600));
+  assert.equal(alertDeliveryRows(reminderRace.databasePath, "delivery_kind='ESCALATION' AND delivery_state='SENT'").length, 2);
+  assert.equal(alertDeliveryRows(reminderRace.databasePath, "delivery_kind='REMINDER'").length, 0,
+    "A due warning reminder must not be snapshotted while a new escalation is pending in the same planner pass");
+  await workerModule.__test.runAlertEngine(reminderRace.env, at(7199));
+  assert.equal(alertDeliveryRows(reminderRace.databasePath, "delivery_kind='REMINDER'").length, 0);
+  await workerModule.__test.runAlertEngine(reminderRace.env, at(7200));
+  const freshReminders = alertDeliveryRows(reminderRace.databasePath, "delivery_kind='REMINDER'");
+  assert.equal(freshReminders.length, 2);
+  assert.ok(freshReminders.every((row) => row.signal_count === 9 &&
+    row.latest_observed_at === at(3600).toISOString()),
+  "The later reminder must snapshot fresh post-escalation count and observation time");
+
+  const partial = createAlertFixture({ ownerOutcomes: [emailFailure("E_RATE_LIMIT_EXCEEDED")] });
+  insertAlertIncident(partial.databasePath, { id: "incident-partial", firstSeenAt: base.toISOString() });
+  await assert.rejects(workerModule.__test.runAlertEngine(partial.env, base), /OPS_ALERT_DELIVERY_INCOMPLETE/);
+  let partialRows = alertDeliveryRows(partial.databasePath);
+  assert.equal(partialRows.find((row) => row.target_role_code === "OWNER").delivery_state, "RETRY");
+  assert.equal(partialRows.find((row) => row.target_role_code === "OWNER").last_error_code, "ALERT_EMAIL_RATE_LIMIT");
+  assert.equal(partialRows.find((row) => row.target_role_code === "BACKUP_OWNER").delivery_state, "SENT");
+  assert.doesNotMatch(JSON.stringify(partialRows), /private\.person|19185550100|ORDER-PRIVATE/,
+    "Raw provider errors and planted identifiers must never persist");
+  sqlite(partial.databasePath, `
+    UPDATE alert_incidents SET incident_state='RESOLVED', resolved_at='${at(30).toISOString()}',
+      updated_at='${at(30).toISOString()}' WHERE alert_incident_id='incident-partial';
+  `);
+  await workerModule.__test.runAlertEngine(partial.env, at(30));
+  partialRows = alertDeliveryRows(partial.databasePath);
+  assert.equal(partialRows.find((row) => row.target_role_code === "OWNER" && row.delivery_kind === "OPEN").delivery_state,
+    "CANCELLED", "An unsent active notice is cancelled after resolution");
+  assert.equal(partialRows.filter((row) => row.delivery_kind === "RECOVERY").length, 1,
+    "Recovery is sent only to the role that received an active notice");
+  assert.equal(partialRows.find((row) => row.delivery_kind === "RECOVERY").target_role_code, "BACKUP_OWNER");
+
+  const permanent = createAlertFixture({ ownerOutcomes: [emailFailure("E_SENDER_NOT_VERIFIED")] });
+  insertAlertIncident(permanent.databasePath, { id: "incident-permanent", firstSeenAt: base.toISOString() });
+  await assert.rejects(workerModule.__test.runAlertEngine(permanent.env, base), /OPS_ALERT_DELIVERY_INCOMPLETE/);
+  const permanentOwner = alertDeliveryRows(permanent.databasePath,
+    "target_role_code='OWNER' AND delivery_kind='OPEN'")[0];
+  assert.deepEqual([permanentOwner.delivery_state, permanentOwner.attempt_count, permanentOwner.last_error_code],
+    ["DEAD", 1, "ALERT_EMAIL_PERMANENT_ERROR"]);
+
+  const senderCase = createAlertFixture({ ownerOutcomes: [emailFailure("E_RATE_LIMIT_EXCEEDED")] });
+  senderCase.env.OPS_ALERT_FROM_EMAIL = TEST_ALERT_FROM_MIXED_CASE;
+  insertAlertIncident(senderCase.databasePath, { id: "incident-sender-case", firstSeenAt: base.toISOString() });
+  await assert.rejects(workerModule.__test.runAlertEngine(senderCase.env, base), /OPS_ALERT_DELIVERY_INCOMPLETE/);
+  const canonicalFirstAttempt = structuredClone(senderCase.owner.calls[0]);
+  assert.equal(canonicalFirstAttempt.from, TEST_ALERT_FROM);
+  senderCase.env.OPS_ALERT_FROM_EMAIL = TEST_ALERT_FROM;
+  await workerModule.__test.runAlertEngine(senderCase.env, at(60));
+  assert.equal(senderCase.owner.calls.length, 2);
+  assert.deepEqual(senderCase.owner.calls[1], canonicalFirstAttempt,
+    "A case-only sender configuration change must normalize to byte-identical retry content");
+
+  const senderChanged = createAlertFixture({ ownerOutcomes: [emailFailure("E_RATE_LIMIT_EXCEEDED")] });
+  insertAlertIncident(senderChanged.databasePath, { id: "incident-sender-changed", firstSeenAt: base.toISOString() });
+  await assert.rejects(workerModule.__test.runAlertEngine(senderChanged.env, base), /OPS_ALERT_DELIVERY_INCOMPLETE/);
+  senderChanged.env.OPS_ALERT_FROM_EMAIL = TEST_ALERT_FROM_CHANGED;
+  await assert.rejects(workerModule.__test.runAlertEngine(senderChanged.env, at(60)),
+    /OPS_ALERT_DELIVERY_INCOMPLETE/);
+  const changedSenderOwner = alertDeliveryRows(senderChanged.databasePath,
+    "target_role_code='OWNER' AND delivery_kind='OPEN'")[0];
+  assert.deepEqual([senderChanged.owner.calls.length, senderChanged.backup.calls.length], [1, 1],
+    "A material sender change must not call transport again or disturb the already-sent backup role");
+  assert.deepEqual([changedSenderOwner.delivery_state, changedSenderOwner.last_error_code],
+    ["DEAD", "ALERT_SENDER_CONFIG_CHANGED"]);
+
+  const transient = createAlertFixture({ ownerOutcomes: [
+    emailFailure("E_RATE_LIMIT_EXCEEDED"),
+    emailFailure("E_INTERNAL_SERVER_ERROR"),
+    emailFailure("E_DAILY_LIMIT_EXCEEDED"),
+  ] });
+  insertAlertIncident(transient.databasePath, { id: "incident-transient", firstSeenAt: base.toISOString() });
+  await assert.rejects(workerModule.__test.runAlertEngine(transient.env, base), /OPS_ALERT_DELIVERY_INCOMPLETE/);
+  await assert.rejects(workerModule.__test.runAlertEngine(transient.env, at(60)), /OPS_ALERT_DELIVERY_INCOMPLETE/);
+  await assert.rejects(workerModule.__test.runAlertEngine(transient.env, at(360)), /OPS_ALERT_DELIVERY_INCOMPLETE/);
+  const exhaustedOwner = alertDeliveryRows(transient.databasePath,
+    "target_role_code='OWNER' AND delivery_kind='OPEN'")[0];
+  assert.deepEqual([exhaustedOwner.delivery_state, exhaustedOwner.attempt_count], ["DEAD", 3],
+    "A transient provider failure becomes DEAD at the bounded third attempt");
+  await workerModule.__test.runAlertEngine(transient.env, at(720));
+  assert.equal(transient.owner.calls.length, 3, "DEAD deliveries are terminal and never claimed again");
+
+  const concurrent = createAlertFixture();
+  insertAlertIncident(concurrent.databasePath, { id: "incident-concurrent", firstSeenAt: base.toISOString() });
+  await Promise.all([
+    workerModule.__test.runAlertEngine(concurrent.env, base),
+    workerModule.__test.runAlertEngine(concurrent.env, base),
+  ]);
+  assert.deepEqual([concurrent.owner.calls.length, concurrent.backup.calls.length], [1, 1],
+    "D1 claim CAS must isolate overlapping role-specific drains");
+  assert.ok(alertDeliveryRows(concurrent.databasePath).every((row) => row.attempt_count === 1));
+
+  const retryGeneration = createAlertFixture({ ownerOutcomes: [
+    emailFailure("E_RATE_LIMIT_EXCEEDED"),
+    emailFailure("E_INTERNAL_SERVER_ERROR"),
+  ] });
+  insertAlertIncident(retryGeneration.databasePath, {
+    id: "incident-retry-generation", firstSeenAt: base.toISOString(),
+  });
+  await assert.rejects(workerModule.__test.runAlertEngine(retryGeneration.env, base),
+    /OPS_ALERT_DELIVERY_INCOMPLETE/);
+  retryGeneration.db.beforeClaimOnce = (databasePath, values) => {
+    sqlite(databasePath, `
+      UPDATE alert_deliveries
+         SET attempt_count=2, last_error_code='ALERT_EMAIL_INTERNAL_ERROR',
+             attempted_at='${at(30).toISOString()}', updated_at='${at(30).toISOString()}'
+       WHERE alert_delivery_id=${sqlLiteral(values[3])}
+         AND delivery_state='RETRY' AND attempt_count=1;
+    `);
+  };
+  const staleGenerationResult = await workerModule.__test.runAlertEngine(retryGeneration.env, at(60));
+  assert.equal(staleGenerationResult.claimedCount, 0,
+    "A candidate selected from an older retry generation must lose the compare-and-set claim");
+  assert.equal(retryGeneration.owner.calls.length, 1,
+    "A stale retry-generation worker must not call the provider");
+  await assert.rejects(workerModule.__test.runAlertEngine(retryGeneration.env, at(60)),
+    /OPS_ALERT_DELIVERY_INCOMPLETE/);
+  const generationOwner = alertDeliveryRows(retryGeneration.databasePath,
+    "target_role_code='OWNER' AND delivery_kind='OPEN'")[0];
+  assert.deepEqual([generationOwner.delivery_state, generationOwner.attempt_count], ["DEAD", 3],
+    "The current retry generation owns the bounded third and terminal attempt");
+
+  const ambiguous = createAlertFixture({ failSentFinalizations: 1 });
+  insertAlertIncident(ambiguous.databasePath, { id: "incident-ambiguous", firstSeenAt: base.toISOString() });
+  await assert.rejects(workerModule.__test.runAlertEngine(ambiguous.env, base), /OPS_ALERT_DELIVERY_INCOMPLETE/);
+  const attempting = alertDeliveryRows(ambiguous.databasePath,
+    "target_role_code='OWNER' AND delivery_kind='OPEN'")[0];
+  assert.equal(attempting.delivery_state, "ATTEMPTING",
+    "A post-send finalization failure remains leased because provider acceptance is ambiguous");
+  const immutableFirstMessage = structuredClone(ambiguous.owner.calls[0]);
+  await workerModule.__test.runAlertEngine(ambiguous.env, at(239));
+  assert.equal(ambiguous.owner.calls.length, 1, "An unexpired ambiguous attempt is not duplicated");
+  await assert.rejects(workerModule.__test.runAlertEngine(ambiguous.env, at(240)), /OPS_ALERT_DELIVERY_INCOMPLETE/);
+  const retried = alertDeliveryRows(ambiguous.databasePath,
+    "target_role_code='OWNER' AND delivery_kind='OPEN'")[0];
+  assert.deepEqual([retried.delivery_state, retried.attempt_count], ["SENT", 2]);
+  assert.equal(ambiguous.owner.calls.length, 2,
+    "An expired ambiguous lease deliberately retries at least once, so a physical duplicate is possible");
+  assert.deepEqual(ambiguous.owner.calls[1], immutableFirstMessage,
+    "A stale-lease retry of the same logical delivery must be byte-identical");
+  assert.equal(alertDeliveryRows(ambiguous.databasePath,
+    "target_role_code='OWNER' AND delivery_kind='OPEN'").length, 1,
+  "The possible physical duplicate retains one logical delivery row");
+
+  const ambiguousThenResolved = createAlertFixture({ failSentFinalizations: 1 });
+  insertAlertIncident(ambiguousThenResolved.databasePath, {
+    id: "incident-ambiguous-then-resolved", firstSeenAt: base.toISOString(),
+  });
+  await assert.rejects(workerModule.__test.runAlertEngine(ambiguousThenResolved.env, base),
+    /OPS_ALERT_DELIVERY_INCOMPLETE/);
+  sqlite(ambiguousThenResolved.databasePath, `
+    UPDATE alert_incidents
+       SET incident_state='RESOLVED', resolved_at='${at(120).toISOString()}',
+           updated_at='${at(120).toISOString()}'
+     WHERE alert_incident_id='incident-ambiguous-then-resolved';
+  `);
+  await workerModule.__test.runAlertEngine(ambiguousThenResolved.env, at(120));
+  assert.equal(ambiguousThenResolved.owner.calls.length, 1,
+    "Resolution cannot duplicate an ambiguous notice before its lease expires");
+  assert.equal(alertDeliveryRows(ambiguousThenResolved.databasePath,
+    "target_role_code='OWNER' AND delivery_kind='OPEN'")[0].delivery_state, "ATTEMPTING");
+  await assert.rejects(workerModule.__test.runAlertEngine(ambiguousThenResolved.env, at(240)),
+    /OPS_ALERT_DELIVERY_INCOMPLETE/);
+  const resolvedAmbiguousOpen = alertDeliveryRows(ambiguousThenResolved.databasePath,
+    "target_role_code='OWNER' AND delivery_kind='OPEN'")[0];
+  assert.deepEqual([resolvedAmbiguousOpen.delivery_state, resolvedAmbiguousOpen.attempt_count], ["SENT", 2],
+    "An expired ambiguous active notice is retried to a confirmed state even after resolution");
+  assert.equal(ambiguousThenResolved.owner.calls.length, 2,
+    "The post-resolution retry preserves the documented at-least-once duplicate policy");
+  await workerModule.__test.runAlertEngine(ambiguousThenResolved.env, at(300));
+  const resolvedAmbiguousRecoveries = alertDeliveryRows(ambiguousThenResolved.databasePath,
+    "delivery_kind='RECOVERY'");
+  assert.equal(resolvedAmbiguousRecoveries.length, 2);
+  assert.ok(resolvedAmbiguousRecoveries.every((row) => row.delivery_state === "SENT"),
+    "Every role with a confirmed active notice eventually receives recovery");
+  assert.equal(sqlite(ambiguousThenResolved.databasePath,
+    "SELECT recovery_notified_at FROM alert_incidents WHERE alert_incident_id='incident-ambiguous-then-resolved';")
+    .trim(), at(300).toISOString());
+
+  const stateRace = createAlertFixture();
+  insertAlertIncident(stateRace.databasePath, { id: "incident-state-race", firstSeenAt: base.toISOString() });
+  await workerModule.__test.planAlertDeliveries(stateRace.db, base.toISOString(), 3600);
+  sqlite(stateRace.databasePath, `
+    UPDATE alert_incidents SET incident_state='RESOLVED', resolved_at='${at(1).toISOString()}',
+      updated_at='${at(1).toISOString()}' WHERE alert_incident_id='incident-state-race';
+  `);
+  await workerModule.__test.runAlertEngine(stateRace.env, at(1));
+  assert.deepEqual([stateRace.owner.calls.length, stateRace.backup.calls.length], [0, 0],
+    "Claim-time incident-state guards prevent a normally resolved OPEN from sending");
+  assert.ok(alertDeliveryRows(stateRace.databasePath).every((row) => row.delivery_state === "CANCELLED"));
+
+  const recoveryRecurrence = createAlertFixture({ ownerOutcomes: [
+    null,
+    emailFailure("E_RATE_LIMIT_EXCEEDED"),
+  ] });
+  insertAlertIncident(recoveryRecurrence.databasePath, {
+    id: "incident-recovery-retry", firstSeenAt: base.toISOString(),
+  });
+  await workerModule.__test.runAlertEngine(recoveryRecurrence.env, base);
+  sqlite(recoveryRecurrence.databasePath, `
+    UPDATE alert_incidents SET incident_state='RESOLVED', resolved_at='${at(30).toISOString()}',
+      updated_at='${at(30).toISOString()}' WHERE alert_incident_id='incident-recovery-retry';
+  `);
+  await assert.rejects(workerModule.__test.runAlertEngine(recoveryRecurrence.env, at(30)),
+    /OPS_ALERT_DELIVERY_INCOMPLETE/);
+  assert.equal(sqlite(recoveryRecurrence.databasePath,
+    "SELECT recovery_notified_at FROM alert_incidents WHERE alert_incident_id='incident-recovery-retry';").trim(),
+  "", "A partial role recovery must not mark the episode recovered");
+  insertAlertIncident(recoveryRecurrence.databasePath, {
+    id: "incident-after-failed-recovery", firstSeenAt: at(45).toISOString(),
+  });
+  const ownerCallsBeforeRecurrence = recoveryRecurrence.owner.calls.length;
+  await workerModule.__test.runAlertEngine(recoveryRecurrence.env, at(45));
+  const supersededRecovery = alertDeliveryRows(recoveryRecurrence.databasePath,
+    "alert_incident_id='incident-recovery-retry' AND delivery_kind='RECOVERY' AND target_role_code='OWNER'")[0];
+  assert.equal(supersededRecovery.delivery_state, "CANCELLED",
+    "A retryable old recovery must be cancelled when the same condition recurs");
+  assert.equal(recoveryRecurrence.owner.calls.length, ownerCallsBeforeRecurrence + 1,
+    "The recurrence sends only its new OPEN; it does not retry the stale RECOVERY");
+  assert.match(recoveryRecurrence.owner.calls.at(-1).text, /Notice: OPEN/);
+
+  const ambiguousRecovery = createAlertFixture();
+  insertAlertIncident(ambiguousRecovery.databasePath, {
+    id: "incident-ambiguous-recovery", firstSeenAt: base.toISOString(),
+  });
+  await workerModule.__test.runAlertEngine(ambiguousRecovery.env, base);
+  sqlite(ambiguousRecovery.databasePath, `
+    UPDATE alert_incidents SET incident_state='RESOLVED', resolved_at='${at(30).toISOString()}',
+      updated_at='${at(30).toISOString()}' WHERE alert_incident_id='incident-ambiguous-recovery';
+  `);
+  ambiguousRecovery.db.failSentFinalizations = 1;
+  await assert.rejects(workerModule.__test.runAlertEngine(ambiguousRecovery.env, at(30)),
+    /OPS_ALERT_DELIVERY_INCOMPLETE/);
+  const acceptedRecoveryCalls = ambiguousRecovery.owner.calls.length;
+  assert.equal(alertDeliveryRows(ambiguousRecovery.databasePath,
+    "alert_incident_id='incident-ambiguous-recovery' AND delivery_kind='RECOVERY' AND target_role_code='OWNER'")[0]
+    .delivery_state, "ATTEMPTING");
+  insertAlertIncident(ambiguousRecovery.databasePath, {
+    id: "incident-after-ambiguous-recovery", firstSeenAt: at(40).toISOString(),
+  });
+  await workerModule.__test.runAlertEngine(ambiguousRecovery.env, at(40));
+  assert.equal(ambiguousRecovery.owner.calls.length, acceptedRecoveryCalls + 1,
+    "Before lease expiry, a recurrence may send its OPEN but cannot reclaim an ambiguous old recovery");
+  await assert.rejects(workerModule.__test.runAlertEngine(ambiguousRecovery.env, at(270)),
+    /OPS_ALERT_DELIVERY_INCOMPLETE/);
+  const cancelledAmbiguousRecovery = alertDeliveryRows(ambiguousRecovery.databasePath,
+    "alert_incident_id='incident-ambiguous-recovery' AND delivery_kind='RECOVERY' AND target_role_code='OWNER'")[0];
+  assert.equal(cancelledAmbiguousRecovery.delivery_state, "CANCELLED",
+    "After lease expiry, an ambiguous recovery becomes retry evidence and is cancelled before a recurrence can resend it");
+  assert.equal(ambiguousRecovery.owner.calls.length, acceptedRecoveryCalls + 1,
+    "Superseded ambiguous recovery evidence must not produce another physical send");
+
+  insertAlertIncident(lifecycle.databasePath, {
+    id: "incident-recurrence", severity: "WARNING", count: 1, firstSeenAt: at(8400).toISOString(),
+  });
+  await workerModule.__test.runAlertEngine(lifecycle.env, at(8400));
+  assert.equal(alertDeliveryRows(lifecycle.databasePath,
+    "alert_incident_id='incident-recurrence' AND delivery_kind='OPEN' AND delivery_state='SENT'").length, 2,
+  "A resolved condition may recur as a new independently deduplicated episode");
+}
+
 function validateDryRuns() {
   for (const config of ["square-ops/wrangler.toml", "square-ops/wrangler.sandbox.toml"]) {
     const label = path.basename(config, ".toml");
@@ -868,10 +1709,7 @@ function validateDryRuns() {
 
 function validateCapturedOpsStatements(executed) {
   const databasePath = path.join(tempRoot, "ops-captured-statements.sqlite");
-  execFileSync("sqlite3", [databasePath], {
-    input: read("square-ops/migrations/0001_ops_state.sql"),
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  applyOpsMigrations(databasePath);
   for (const entry of executed) {
     assert.ok(entry.sql, `Missing captured SQL for ${entry.op}`);
     sqlite(databasePath, bindSql(entry.sql, entry.values));
@@ -884,10 +1722,7 @@ function validateCapturedOpsStatements(executed) {
   assert.equal(sqlite(databasePath, "PRAGMA foreign_key_check;").trim(), "");
 
   const atomicPath = path.join(tempRoot, "ops-atomicity.sqlite");
-  execFileSync("sqlite3", [atomicPath], {
-    input: read("square-ops/migrations/0001_ops_state.sql"),
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  applyOpsMigrations(atomicPath);
   const validRun = insertStatement("monitor_runs", {
     monitor_run_id: "atomic-monitor", environment_code: "sandbox", trigger_code: "SCHEDULED",
     scheduled_at: "2026-08-17T20:00:00.000Z", started_at: "2026-08-17T20:00:00.000Z",
@@ -917,6 +1752,26 @@ function validateCapturedOpsStatements(executed) {
 
 function sqlite(databasePath, query) {
   return execFileSync("sqlite3", ["-separator", "|", databasePath, query], { encoding: "utf8" });
+}
+
+function applyOpsMigrations(databasePath) {
+  for (const migrationPath of [
+    "square-ops/migrations/0001_ops_state.sql",
+    "square-ops/migrations/0002_alert_delivery_engine.sql",
+  ]) {
+    applyOpsMigrationAtomically(databasePath, migrationPath);
+  }
+}
+
+function applyOpsMigrationAtomically(databasePath, migrationPath) {
+  execFileSync("sqlite3", [databasePath], {
+    input: atomicMigrationInput(migrationPath),
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+}
+
+function atomicMigrationInput(migrationPath) {
+  return `.bail on\nBEGIN IMMEDIATE;\n${read(migrationPath)}\nCOMMIT;\n`;
 }
 
 function bindSql(sql, values) {
@@ -956,6 +1811,7 @@ try {
   validateWranglerConfiguration("square-ops/wrangler.toml", "production");
   validateWranglerConfiguration("square-ops/wrangler.sandbox.toml", "sandbox");
   validateMigration();
+  validateAlertMigrationUpgrade();
   await validateSourceContract();
   await validateWorkerBoundary();
   validateDryRuns();
