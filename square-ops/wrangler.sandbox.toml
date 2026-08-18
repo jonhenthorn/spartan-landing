@@ -1,0 +1,32 @@
+name = "spartan-square-ops-sandbox"
+main = "src/index.mjs"
+compatibility_date = "2026-08-17"
+workers_dev = false
+
+# Separate, non-inheriting sandbox configuration. It has no public route.
+
+[vars]
+OPS_ENVIRONMENT = "sandbox"
+OPS_SCHEMA_VERSION = "1"
+OPS_MONITORING_ENABLED = "false"
+OPS_ALERTS_ENABLED = "false"
+OPS_BACKUPS_ENABLED = "false"
+OPS_RESTORE_TESTS_ENABLED = "false"
+
+[[d1_databases]]
+binding = "OPS_DB"
+database_name = "spartan-square-ops-sandbox"
+database_id = "REPLACE_WITH_SANDBOX_OPS_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[[d1_databases]]
+binding = "CONNECTOR_DB"
+database_name = "spartan-square-connector-sandbox"
+database_id = "REPLACE_WITH_SANDBOX_CONNECTOR_D1_DATABASE_ID"
+
+[[r2_buckets]]
+binding = "BACKUP_BUCKET"
+bucket_name = "replace-with-sandbox-ops-backup-bucket-name"
+
+[triggers]
+crons = ["*/5 * * * *", "15 3 * * *"]

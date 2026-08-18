@@ -6,3 +6,7 @@ node_modules/
 .env
 .env.*
 !.env.example
+.square-backups/
+*.sqlite
+*.sqlite3
+*.d1-export.sql

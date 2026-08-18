@@ -20,6 +20,8 @@ This repository contains the static website published at [spartandrink.com](http
 - `docs/SQUARE-JOURNEY-PILOT.md` — the manual-first Project 2 plan for linking website claims to Square redemptions and repeat visits before referral/reward automation.
 - `square-worker/` — the isolated, default-off website-to-Square connector candidate; it is not deployed or authorized for production.
 - `docs/SQUARE-CONNECTOR-ROLLOUT.md` — the connector's security, privacy, sandbox, canary and rollback gates.
+- `square-ops/` — the scheduled-only, default-off foundation for connector monitoring, owner alerts, private backups and restore evidence; it has no public route and is not deployed.
+- `docs/SQUARE-OPERATIONS-RUNBOOK.md` — the operations plane's non-PII data boundary, alert/backup design, activation gates and rollback order.
 - `docs/MARKETING-MEASUREMENT-DICTIONARY.md` — canonical customer milestones, source-of-truth boundaries, KPI formulas, cohorts, alerts and staged data architecture for the marketing portfolio.
 - `docs/EXTERNAL-CONFIGURATION.md` — dated, non-secret evidence of the current Cloudflare, Google and social-link configuration.
 - `spartan-landing/index.html` and `index_updated.html` — noindex browser fallbacks retained behind the active Cloudflare redirects.
@@ -92,6 +94,7 @@ When Square connector files change, run the complete dependency-free contract su
 node scripts/validate-square-connector.mjs
 node scripts/validate-square-apps-script.mjs
 node scripts/validate-square-frontend.mjs
+node scripts/validate-square-ops.mjs
 node scripts/validate-form-backend.mjs
 node scripts/validate-site.mjs
 ```
