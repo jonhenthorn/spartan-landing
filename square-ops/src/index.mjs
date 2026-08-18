@@ -1,6 +1,7 @@
 export const OPS_FLAG_NAMES = Object.freeze([
   "OPS_MONITORING_ENABLED",
   "OPS_QUEUE_MONITORING_ENABLED",
+  "OPS_APPS_SCRIPT_MONITORING_ENABLED",
   "OPS_ALERTS_ENABLED",
   "OPS_BACKUPS_ENABLED",
   "OPS_RESTORE_TESTS_ENABLED",
@@ -79,13 +80,79 @@ const DEFAULT_MONITOR_RETENTION_DAYS = 30;
 const DEFAULT_ALERT_DEDUPE_SECONDS = 3600;
 const DEFAULT_QUEUE_WARNING_AGE_SECONDS = 600;
 const DEFAULT_QUEUE_CRITICAL_AGE_SECONDS = 1800;
-const QUEUE_WARNING_MIN_CONFIRMATION_SECONDS = 240;
-const QUEUE_WARNING_MAX_CONFIRMATION_SECONDS = 540;
+const CONFIRMED_WARNING_MIN_CONFIRMATION_SECONDS = 240;
+const CONFIRMED_WARNING_MAX_CONFIRMATION_SECONDS = 540;
 const QUEUE_METRICS_TIMEOUT_MS = 5000;
 const QUEUE_METRICS_MAX_RESPONSE_BYTES = 8192;
 const QUEUE_METRICS_FUTURE_TOLERANCE_MS = 5 * 60 * 1000;
 const CLOUDFLARE_API_ORIGIN = "https://api.cloudflare.com";
-const ALERT_SCHEMA_VERSION = "3";
+const APPS_HEALTH_CONTRACT_VERSION = "spartan-ops-apps-health-v1-2026-08-18";
+const APPS_HEALTH_RESPONSE_MODE = "ops_health_json";
+const APPS_HEALTH_OPERATION = "ops_health";
+const APPS_HEALTH_TIMEOUT_MS = 5000;
+const APPS_HEALTH_MAX_REQUEST_BYTES = 2048;
+const APPS_HEALTH_MAX_RESPONSE_BYTES = 8192;
+const APPS_HEALTH_FRESHNESS_SECONDS = 300;
+const APPS_SCRIPT_ORIGIN = "https://script.google.com";
+const APPS_SCRIPT_RESPONSE_ORIGIN = "https://script.googleusercontent.com";
+const APPS_HEALTH_REQUEST_FIELDS = Object.freeze([
+  "response_mode",
+  "operation",
+  "ops_health_contract_version",
+  "source_environment_code",
+  "request_timestamp",
+  "request_nonce",
+]);
+const APPS_HEALTH_RESPONSE_FIELDS = Object.freeze([
+  "ok",
+  "inspection_state",
+  "operation",
+  "ops_health_contract_version",
+  "source_environment_code",
+  "service",
+  "handler_version",
+  "form_contract_version",
+  "worker_form_contract_version",
+  "discovery_contract_version",
+  "square_connector_contract_version",
+  "journey_ledger_version",
+  "owner_notification_version",
+  "lead_sheet_state",
+  "journey_ledger_state",
+  "worker_json_state",
+  "owner_notification_state",
+  "square_journey_state",
+  "read_only",
+  "writes_performed",
+  "checked_at_utc",
+  "request_timestamp",
+  "request_nonce",
+]);
+const APPS_HEALTH_STATE_FIELDS = Object.freeze([
+  "lead_sheet_state",
+  "journey_ledger_state",
+  "worker_json_state",
+  "owner_notification_state",
+  "square_journey_state",
+]);
+const APPS_HEALTH_FIXED_VALUES = Object.freeze({
+  service: "spartan-website-forms",
+  handler_version: "spartan-forms-v3.2-2026-08-15",
+  form_contract_version: "spartan-form-contract-v3-2026-08-10",
+  worker_form_contract_version: "spartan-worker-form-v1-2026-08-15",
+  discovery_contract_version: "spartan-discovery-contract-v1-2026-08-16",
+  square_connector_contract_version: "spartan-square-connector-v1-2026-08-17",
+  journey_ledger_version: "spartan-journey-ledger-v1-2026-08-16",
+  owner_notification_version: "spartan-owner-notifications-v1-2026-08-16",
+});
+const APPS_HEALTH_ALLOWED_STATES = Object.freeze({
+  lead_sheet_state: Object.freeze(["READY", "NOT_READY", "NOT_CHECKED"]),
+  journey_ledger_state: Object.freeze(["READY", "NOT_READY", "NOT_CHECKED"]),
+  worker_json_state: Object.freeze(["CONFIGURED", "NOT_CONFIGURED", "NOT_CHECKED"]),
+  owner_notification_state: Object.freeze(["READY", "DISABLED", "MISCONFIGURED", "NOT_CHECKED"]),
+  square_journey_state: Object.freeze(["READY", "DISABLED", "MISCONFIGURED", "NOT_CHECKED"]),
+});
+const ALERT_SCHEMA_VERSION = "4";
 const ALERT_MESSAGE_VERSION = "OPS_ALERT_V1";
 const ALERT_MAX_ATTEMPTS = 3;
 const ALERT_LEASE_SECONDS = 240;
@@ -134,11 +201,21 @@ const CONNECTOR_ALERT_KEYS = Object.freeze([
 const MAIN_QUEUE_ALERT_KEYS = Object.freeze(["QUEUE_BACKLOG_STALE"]);
 const DLQ_ALERT_KEYS = Object.freeze(["QUEUE_DLQ_NONEMPTY"]);
 const QUEUE_SOURCE_ALERT_KEYS = Object.freeze(["QUEUE_METRICS_UNAVAILABLE"]);
+const APPS_SCRIPT_ALERT_KEYS = Object.freeze([
+  "APPS_HEALTH_UNAVAILABLE",
+  "APPS_HEALTH_INTEGRITY_FAILURE",
+  "APPS_CONFIGURATION_UNHEALTHY",
+]);
+const CONFIRMED_WARNING_ALERT_KEYS = Object.freeze(new Set([
+  "QUEUE_BACKLOG_STALE",
+  "APPS_HEALTH_UNAVAILABLE",
+]));
 const FIXED_ALERT_KEYS = Object.freeze([
   ...CONNECTOR_ALERT_KEYS,
   ...MAIN_QUEUE_ALERT_KEYS,
   ...DLQ_ALERT_KEYS,
   ...QUEUE_SOURCE_ALERT_KEYS,
+  ...APPS_SCRIPT_ALERT_KEYS,
 ]);
 const ALERT_REASON_BY_KEY = Object.freeze({
   SOURCE_UNAVAILABLE: "CONNECTOR_SIGNAL_SOURCE_UNAVAILABLE",
@@ -152,6 +229,9 @@ const ALERT_REASON_BY_KEY = Object.freeze({
   QUEUE_METRICS_UNAVAILABLE: "QUEUE_METRICS_SOURCE_UNAVAILABLE",
   QUEUE_BACKLOG_STALE: "QUEUE_MESSAGE_AGE_STALE",
   QUEUE_DLQ_NONEMPTY: "QUEUE_DEAD_LETTER_NONEMPTY",
+  APPS_HEALTH_UNAVAILABLE: "APPS_HEALTH_SOURCE_UNAVAILABLE",
+  APPS_HEALTH_INTEGRITY_FAILURE: "APPS_HEALTH_AUTH_OR_CONTRACT_INVALID",
+  APPS_CONFIGURATION_UNHEALTHY: "APPS_RUNTIME_CONFIGURATION_UNHEALTHY",
   ALERT_PATH_TEST: "MONTHLY_ALERT_PATH_TEST",
 });
 
@@ -161,15 +241,20 @@ export default {
     if (enabledFlags.length === 0) return;
 
     const unsupported = enabledFlags.filter((flagName) =>
-      !new Set(["OPS_MONITORING_ENABLED", "OPS_QUEUE_MONITORING_ENABLED", "OPS_ALERTS_ENABLED"])
+      !new Set(["OPS_MONITORING_ENABLED", "OPS_QUEUE_MONITORING_ENABLED",
+        "OPS_APPS_SCRIPT_MONITORING_ENABLED", "OPS_ALERTS_ENABLED"])
         .has(flagName));
     if (unsupported.length > 0) throw new Error("SQUARE_OPS_SCAFFOLD_NOT_ACTIVATION_READY");
 
     if (controller?.cron !== MONITOR_CRON) return;
     const monitoringEnabled = flag(env?.OPS_MONITORING_ENABLED);
     const queueMonitoringEnabled = flag(env?.OPS_QUEUE_MONITORING_ENABLED);
+    const appsScriptMonitoringEnabled = flag(env?.OPS_APPS_SCRIPT_MONITORING_ENABLED);
     const alertsEnabled = flag(env?.OPS_ALERTS_ENABLED);
     if (queueMonitoringEnabled && !monitoringEnabled) throw new Error("OPS_QUEUE_MONITORING_REQUIRES_MONITORING");
+    if (appsScriptMonitoringEnabled && !monitoringEnabled) {
+      throw new Error("OPS_APPS_SCRIPT_MONITORING_REQUIRES_MONITORING");
+    }
     if (alertsEnabled && !monitoringEnabled) throw new Error("OPS_ALERTS_REQUIRE_MONITORING");
     const alertConfig = alertsEnabled ? await validateAlertConfiguration(env) : null;
     const scheduledAt = finiteDate(controller?.scheduledTime) || new Date();
@@ -202,6 +287,13 @@ async function runMonitor(env, scheduledAt, observedAt = new Date()) {
     signals.push(...queueResult.signals);
     for (const alertKey of queueResult.resolvableKeys) resolvableKeys.add(alertKey);
     if (queueResult.sourceState === "UNAVAILABLE") sourceState = "UNAVAILABLE";
+  }
+
+  if (flag(env?.OPS_APPS_SCRIPT_MONITORING_ENABLED)) {
+    const appsScriptResult = await readAppsScriptHealthSignals(env, observationTime);
+    signals.push(...appsScriptResult.signals);
+    for (const alertKey of appsScriptResult.resolvableKeys) resolvableKeys.add(alertKey);
+    if (appsScriptResult.sourceState === "UNAVAILABLE") sourceState = "UNAVAILABLE";
   }
 
   const completedAt = new Date(Math.max(Date.now(), observationTime.getTime())).toISOString();
@@ -270,8 +362,8 @@ async function runMonitor(env, scheduledAt, observedAt = new Date()) {
          )
     `, [signal.severity, incidentId, signal.count, signal.reasonCode, incidentObservedAt, environment,
       signal.alertKey, startedAt,
-      signal.alertKey === "QUEUE_BACKLOG_STALE" && signal.severity === "WARNING" ? 1 : 0,
-      QUEUE_WARNING_MIN_CONFIRMATION_SECONDS, QUEUE_WARNING_MAX_CONFIRMATION_SECONDS]));
+      CONFIRMED_WARNING_ALERT_KEYS.has(signal.alertKey) && signal.severity === "WARNING" ? 1 : 0,
+      CONFIRMED_WARNING_MIN_CONFIRMATION_SECONDS, CONFIRMED_WARNING_MAX_CONFIRMATION_SECONDS]));
   }
 
   for (const alertKey of resolvableKeys) {
@@ -602,7 +694,7 @@ async function planAlertDeliveries(db, nowIso, dedupeSeconds = DEFAULT_ALERT_DED
        WHERE incident.incident_state <> 'RESOLVED'
          AND incident.environment_code = ?6
          AND (
-           incident.alert_key <> 'QUEUE_BACKLOG_STALE' OR
+           incident.alert_key NOT IN ('QUEUE_BACKLOG_STALE', 'APPS_HEALTH_UNAVAILABLE') OR
            incident.severity_code = 'CRITICAL' OR
            (
              incident.occurrence_count >= 2 AND
@@ -610,7 +702,7 @@ async function planAlertDeliveries(db, nowIso, dedupeSeconds = DEFAULT_ALERT_DED
                CAST(strftime('%s', incident.first_seen_at) AS INTEGER) >= ?7
            )
          )
-    `, [...common, QUEUE_WARNING_MIN_CONFIRMATION_SECONDS]);
+    `, [...common, CONFIRMED_WARNING_MIN_CONFIRMATION_SECONDS]);
     await opsRun(db, "ops_alert_plan_escalation", `
       INSERT OR IGNORE INTO alert_deliveries (
         alert_delivery_id, alert_incident_id, delivery_kind, channel_code, target_role_code,
@@ -833,6 +925,37 @@ async function sha256Hex(value) {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+async function hmacSha256Hex(value, secret) {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(value));
+  return [...new Uint8Array(signature)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function constantTimeHexEqual(left, right) {
+  if (!/^[0-9a-f]{64}$/.test(left) || !/^[0-9a-f]{64}$/.test(right)) return false;
+  let difference = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    difference |= left.charCodeAt(index) ^ right.charCodeAt(index);
+  }
+  return difference === 0;
+}
+
+function constantTimeSecretEqual(left, right) {
+  const maximum = Math.max(left.length, right.length);
+  let difference = left.length ^ right.length;
+  for (let index = 0; index < maximum; index += 1) {
+    difference |= (left.charCodeAt(index) || 0) ^ (right.charCodeAt(index) || 0);
+  }
+  return difference === 0;
+}
+
 async function opsAll(db, op, sql, values) {
   const result = await db.prepare(`/*op:${op}*/${sql}`).bind(...values).all();
   if (!result || result.success === false || !Array.isArray(result.results)) throw new Error("OPS_QUERY_FAILED");
@@ -986,6 +1109,277 @@ async function readQueueSignals(env, now, fetchImpl = globalThis.fetch) {
     signals: Object.freeze(signals),
     resolvableKeys: Object.freeze([...resolvableKeys]),
   });
+}
+
+async function readAppsScriptHealthSignals(env, now, fetchImpl = globalThis.fetch) {
+  let result;
+  try {
+    result = await fetchAppsScriptHealth(env, now, fetchImpl);
+  } catch (error) {
+    const integrityFailure = error?.code === "OPS_APPS_HEALTH_INTEGRITY_FAILURE";
+    return Object.freeze({
+      sourceState: "UNAVAILABLE",
+      signals: Object.freeze([
+        integrityFailure
+          ? makeSignal("APPS_HEALTH_INTEGRITY_FAILURE", "CRITICAL", 1,
+            "APPS_HEALTH_AUTH_OR_CONTRACT_INVALID")
+          : makeSignal("APPS_HEALTH_UNAVAILABLE", "WARNING", 1,
+            "APPS_HEALTH_SOURCE_UNAVAILABLE"),
+      ]),
+      resolvableKeys: Object.freeze([]),
+    });
+  }
+
+  if (result.inspectionState !== "COMPLETE") {
+    return Object.freeze({
+      sourceState: "UNAVAILABLE",
+      signals: Object.freeze([
+        makeSignal("APPS_HEALTH_UNAVAILABLE", "WARNING", 1, "APPS_HEALTH_SOURCE_UNAVAILABLE"),
+      ]),
+      resolvableKeys: Object.freeze([]),
+    });
+  }
+
+  if (!result.configurationHealthy) {
+    return Object.freeze({
+      sourceState: "AVAILABLE",
+      signals: Object.freeze([
+        makeSignal("APPS_CONFIGURATION_UNHEALTHY", "CRITICAL", 1,
+          "APPS_RUNTIME_CONFIGURATION_UNHEALTHY"),
+      ]),
+      resolvableKeys: Object.freeze([
+        "APPS_HEALTH_UNAVAILABLE",
+        "APPS_HEALTH_INTEGRITY_FAILURE",
+      ]),
+    });
+  }
+
+  return Object.freeze({
+    sourceState: "AVAILABLE",
+    signals: Object.freeze([]),
+    resolvableKeys: APPS_SCRIPT_ALERT_KEYS,
+  });
+}
+
+async function fetchAppsScriptHealth(env, now, fetchImpl) {
+  let config;
+  try {
+    config = validateAppsScriptHealthConfiguration(env);
+  } catch {
+    throw appsHealthUnavailableError();
+  }
+  if (typeof fetchImpl !== "function") throw appsHealthUnavailableError();
+  const requestTimestamp = String(Math.floor(now.getTime() / 1000));
+  const requestNonce = crypto.randomUUID();
+  const requestValues = Object.freeze({
+    response_mode: APPS_HEALTH_RESPONSE_MODE,
+    operation: APPS_HEALTH_OPERATION,
+    ops_health_contract_version: APPS_HEALTH_CONTRACT_VERSION,
+    source_environment_code: config.sourceEnvironment,
+    request_timestamp: requestTimestamp,
+    request_nonce: requestNonce,
+  });
+  const canonicalRequest = canonicalSignedFields(requestValues, APPS_HEALTH_REQUEST_FIELDS);
+  const requestSignature = await hmacSha256Hex(canonicalRequest, config.sharedSecret);
+  const requestBody = `${canonicalRequest}&request_signature=${encodeURIComponent(requestSignature)}`;
+  if (new TextEncoder().encode(requestBody).byteLength > APPS_HEALTH_MAX_REQUEST_BYTES) {
+    throw appsHealthUnavailableError();
+  }
+
+  const timeoutSignal = AbortSignal.timeout(APPS_HEALTH_TIMEOUT_MS);
+  let redirectResponse;
+  try {
+    redirectResponse = await fetchImpl(config.url, {
+      method: "POST",
+      headers: Object.freeze({
+        Accept: "application/json",
+        "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+      }),
+      body: requestBody,
+      redirect: "manual",
+      signal: timeoutSignal,
+    });
+  } catch {
+    throw appsHealthUnavailableError();
+  }
+  if (![302, 303].includes(Number(redirectResponse?.status))) throw appsHealthUnavailableError();
+
+  const redirectLocation = String(redirectResponse.headers?.get("location") || "");
+  if (!redirectLocation || redirectLocation.length > 2048) throw appsHealthIntegrityError();
+  let responseUrl;
+  try {
+    responseUrl = new URL(redirectLocation);
+  } catch {
+    throw appsHealthIntegrityError();
+  }
+  if (responseUrl.origin !== APPS_SCRIPT_RESPONSE_ORIGIN || responseUrl.pathname !== "/macros/echo" ||
+      responseUrl.username || responseUrl.password || responseUrl.port || responseUrl.hash) {
+    throw appsHealthIntegrityError();
+  }
+
+  let response;
+  try {
+    response = await fetchImpl(responseUrl.toString(), {
+      method: "GET",
+      headers: Object.freeze({ Accept: "application/json" }),
+      redirect: "error",
+      signal: timeoutSignal,
+    });
+  } catch {
+    throw appsHealthUnavailableError();
+  }
+  if (!response?.ok) throw appsHealthUnavailableError();
+  const responseContentType = String(response.headers?.get("content-type") || "");
+  if (responseContentType.length > 128 ||
+      !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(responseContentType)) {
+    throw appsHealthUnavailableError();
+  }
+
+  let responseText;
+  try {
+    responseText = await readBoundedResponseText(response, APPS_HEALTH_MAX_RESPONSE_BYTES);
+  } catch {
+    throw appsHealthUnavailableError();
+  }
+  let payload;
+  try {
+    payload = JSON.parse(responseText);
+  } catch {
+    throw appsHealthUnavailableError();
+  }
+  return verifyAppsScriptHealthPayload(payload, config, now, requestTimestamp, requestNonce);
+}
+
+function validateAppsScriptHealthConfiguration(env) {
+  if (String(env?.OPS_SCHEMA_VERSION || "").trim() !== ALERT_SCHEMA_VERSION) {
+    throw new Error("OPS_APPS_HEALTH_SCHEMA_VERSION_INVALID");
+  }
+  const sourceEnvironment = String(env?.OPS_APPS_SOURCE_ENVIRONMENT || "").trim().toLowerCase();
+  const operationsEnvironment = String(env?.OPS_ENVIRONMENT || "").trim().toLowerCase();
+  if (!new Set(["sandbox", "production"]).has(sourceEnvironment) ||
+      sourceEnvironment !== operationsEnvironment) {
+    throw new Error("OPS_APPS_SOURCE_ENVIRONMENT_INVALID");
+  }
+  const rawUrl = String(env?.OPS_APPS_SCRIPT_HEALTH_URL || "");
+  let url;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new Error("OPS_APPS_HEALTH_URL_INVALID");
+  }
+  if (url.origin !== APPS_SCRIPT_ORIGIN ||
+      !/^\/macros\/s\/[A-Za-z0-9_-]{20,256}\/exec$/.test(url.pathname) ||
+      url.username || url.password || url.port || url.search || url.hash || url.toString() !== rawUrl) {
+    throw new Error("OPS_APPS_HEALTH_URL_INVALID");
+  }
+  const sharedSecret = String(env?.OPS_APPS_SCRIPT_HEALTH_SHARED_SECRET || "");
+  if (sharedSecret.length < 32 || sharedSecret.length > 512 || sharedSecret !== sharedSecret.trim() ||
+      /[\u0000-\u001f\u007f]/.test(sharedSecret)) {
+    throw new Error("OPS_APPS_HEALTH_SHARED_SECRET_INVALID");
+  }
+  for (const credentialName of ["OPS_CLOUDFLARE_QUEUES_READ_TOKEN"]) {
+    const otherCredential = String(env?.[credentialName] || "");
+    if (otherCredential && constantTimeSecretEqual(sharedSecret, otherCredential)) {
+      throw new Error("OPS_APPS_HEALTH_SECRET_REUSE_FORBIDDEN");
+    }
+  }
+  const expectedStates = Object.freeze({
+    lead_sheet_state: expectedAppsState(env?.OPS_EXPECT_APPS_LEAD_SHEET_STATE,
+      APPS_HEALTH_ALLOWED_STATES.lead_sheet_state),
+    journey_ledger_state: expectedAppsState(env?.OPS_EXPECT_APPS_JOURNEY_LEDGER_STATE,
+      APPS_HEALTH_ALLOWED_STATES.journey_ledger_state),
+    worker_json_state: expectedAppsState(env?.OPS_EXPECT_APPS_WORKER_JSON_STATE,
+      APPS_HEALTH_ALLOWED_STATES.worker_json_state),
+    owner_notification_state: expectedAppsState(env?.OPS_EXPECT_APPS_OWNER_NOTIFICATION_STATE,
+      APPS_HEALTH_ALLOWED_STATES.owner_notification_state),
+    square_journey_state: expectedAppsState(env?.OPS_EXPECT_APPS_SQUARE_JOURNEY_STATE,
+      APPS_HEALTH_ALLOWED_STATES.square_journey_state),
+  });
+  return Object.freeze({ url: rawUrl, sharedSecret, sourceEnvironment, expectedStates });
+}
+
+function expectedAppsState(value, allowedValues) {
+  const state = String(value || "").trim();
+  if (!allowedValues.includes(state) || state === "NOT_CHECKED") {
+    throw new Error("OPS_APPS_EXPECTED_STATE_INVALID");
+  }
+  return state;
+}
+
+async function verifyAppsScriptHealthPayload(payload, config, now, requestTimestamp, requestNonce) {
+  if (!isPlainRecord(payload) ||
+      !sameOrderedValues(Object.keys(payload), [...APPS_HEALTH_RESPONSE_FIELDS, "response_signature"])) {
+    throw appsHealthIntegrityError();
+  }
+  for (const field of APPS_HEALTH_RESPONSE_FIELDS) {
+    const value = payload[field];
+    if (field === "ok" || field === "read_only") {
+      if (typeof value !== "boolean") throw appsHealthIntegrityError();
+    } else if (field === "writes_performed") {
+      if (!Number.isInteger(value)) throw appsHealthIntegrityError();
+    } else if (typeof value !== "string") {
+      throw appsHealthIntegrityError();
+    }
+  }
+  if (typeof payload.response_signature !== "string" || !/^[0-9a-f]{64}$/.test(payload.response_signature)) {
+    throw appsHealthIntegrityError();
+  }
+  for (const [field, allowedValues] of Object.entries(APPS_HEALTH_ALLOWED_STATES)) {
+    if (!allowedValues.includes(payload[field])) throw appsHealthIntegrityError();
+  }
+  if (!new Set(["COMPLETE", "DISABLED", "FAILED"]).has(payload.inspection_state) ||
+      payload.operation !== APPS_HEALTH_OPERATION ||
+      payload.ops_health_contract_version !== APPS_HEALTH_CONTRACT_VERSION ||
+      payload.source_environment_code !== config.sourceEnvironment ||
+      payload.request_timestamp !== requestTimestamp || payload.request_nonce !== requestNonce ||
+      payload.read_only !== true || payload.writes_performed !== 0) {
+    throw appsHealthIntegrityError();
+  }
+  for (const [field, expected] of Object.entries(APPS_HEALTH_FIXED_VALUES)) {
+    if (payload[field] !== expected) throw appsHealthIntegrityError();
+  }
+  const checkedAt = optionalDate(payload.checked_at_utc);
+  if (!checkedAt || checkedAt.toISOString() !== payload.checked_at_utc ||
+      Math.abs(now.getTime() - checkedAt.getTime()) > APPS_HEALTH_FRESHNESS_SECONDS * 1000) {
+    throw appsHealthIntegrityError();
+  }
+  const canonicalResponse = canonicalSignedFields(payload, APPS_HEALTH_RESPONSE_FIELDS);
+  const expectedSignature = await hmacSha256Hex(canonicalResponse, config.sharedSecret);
+  if (!constantTimeHexEqual(payload.response_signature, expectedSignature)) throw appsHealthIntegrityError();
+
+  if (payload.inspection_state !== "COMPLETE") {
+    if (payload.ok !== false || APPS_HEALTH_STATE_FIELDS.some((field) => payload[field] !== "NOT_CHECKED")) {
+      throw appsHealthIntegrityError();
+    }
+    return Object.freeze({ inspectionState: payload.inspection_state, configurationHealthy: false });
+  }
+  if (payload.ok !== true || APPS_HEALTH_STATE_FIELDS.some((field) => payload[field] === "NOT_CHECKED")) {
+    throw appsHealthIntegrityError();
+  }
+  const configurationHealthy = APPS_HEALTH_STATE_FIELDS.every(
+    (field) => payload[field] === config.expectedStates[field],
+  );
+  return Object.freeze({ inspectionState: "COMPLETE", configurationHealthy });
+}
+
+function canonicalSignedFields(values, fields) {
+  return fields.map((field) => `${field}=${encodeURIComponent(String(values[field]))}`).join("&");
+}
+
+function sameOrderedValues(actual, expected) {
+  return actual.length === expected.length && actual.every((value, index) => value === expected[index]);
+}
+
+function appsHealthUnavailableError() {
+  const error = new Error("OPS_APPS_HEALTH_UNAVAILABLE");
+  error.code = "OPS_APPS_HEALTH_UNAVAILABLE";
+  return error;
+}
+
+function appsHealthIntegrityError() {
+  const error = new Error("OPS_APPS_HEALTH_INTEGRITY_FAILURE");
+  error.code = "OPS_APPS_HEALTH_INTEGRITY_FAILURE";
+  return error;
 }
 
 function validateQueueMetricsConfiguration(env) {
@@ -1187,6 +1581,11 @@ export const __test = Object.freeze({
   readConnectorSignals,
   readQueueSignals,
   fetchQueueMetrics,
+  readAppsScriptHealthSignals,
+  fetchAppsScriptHealth,
+  verifyAppsScriptHealthPayload,
+  canonicalSignedFields,
+  hmacSha256Hex,
   runAlertEngine,
   planAlertDeliveries,
   buildAlertMessage,

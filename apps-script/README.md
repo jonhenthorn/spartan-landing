@@ -38,6 +38,32 @@ Open the deployed `/exec` URL with no lead fields. Before the refreshed website 
 
 `worker_json_configured` proves only that a secret of the minimum length exists in Apps Script Properties; it never reveals the secret. The internal discovery contract version proves only that this handler recognizes signed discovery requests. `owner_notifications_configured` means owner delivery is enabled, the required properties are complete, and the exact configured `SHEET_NAME` tab currently resolves. It does not prove that the current account owns an operational trigger; use `diagnoseOwnerNotifications()` for that. Health proves which handler answers the endpoint. It does not prove that a POST reaches the intended Sheet, that the Worker secret matches, that Brevo can deliver the confirmation message, or that the browser result flow works.
 
+### Default-off signed operations health
+
+The private `spartan-ops-apps-health-v1-2026-08-18` contract gives the isolated operations monitor a metadata-only view of this handler without sharing a customer-form or Square-connector secret. It is off unless `OPS_HEALTH_ENABLED` is exact `true`. A valid request must be an ASCII `application/x-www-form-urlencoded` POST of no more than 2 KiB with these seven fields once each, with no extras, in this exact order:
+
+1. `response_mode=ops_health_json`
+2. `operation=ops_health`
+3. `ops_health_contract_version=spartan-ops-apps-health-v1-2026-08-18`
+4. `source_environment_code=sandbox` or `production`, matching `OPS_HEALTH_ENVIRONMENT`
+5. `request_timestamp`, exactly ten digits and no more than 300 seconds before or after Apps Script time
+6. `request_nonce`, a lowercase RFC 4122 version-4 UUID
+7. `request_signature`, a lowercase 64-character HMAC-SHA256 hex signature
+
+The request signature covers the first six fields as canonical `key=encodeURIComponent(value)` pairs joined by `&`. The response has an independent signature over every field before `response_signature`, in the fixed order defined by `OPS_HEALTH_RESPONSE_SIGNED_FIELDS`. The monitor must reject a response with a missing field, extra field, changed order, stale timestamp echo, changed nonce echo, invalid state or invalid signature.
+
+The nonce binds a response to its specific request; it is not a durable one-time replay ledger. An identical valid signed request may be accepted again during the 300-second freshness window, but it can only repeat the same metadata-only inspection and cannot write to the Sheet, properties, cache or a provider.
+
+A valid authenticated request receives one of three signed inspection states:
+
+- `DISABLED`: health inspection is off; all five component states are `NOT_CHECKED`.
+- `COMPLETE`: the read-only metadata inspection completed. Lead and journey-ledger states are `READY` or `NOT_READY`; Worker JSON is `CONFIGURED` or `NOT_CONFIGURED`; owner notifications and Square journey are `READY`, `DISABLED` or `MISCONFIGURED`.
+- `FAILED`: the authenticated request was valid but the configured environment did not match or the metadata inspection could not complete; all component states are `NOT_CHECKED`.
+
+Malformed, duplicate, oversized, stale, unsigned or incorrectly signed requests receive only the generic unsigned `ops_health_request_rejected` response. Validation and authentication happen before any Sheet access. A successful inspection reads only safe Script Property states, the configured lead-tab header metadata and the two exact journey-ledger schemas and formatting states. It never returns or logs property values, Sheet/tab names, IDs, row counts, customer data or exception details; calls no mail, Brevo or Square provider; and performs no Sheet, property, cache or other write. The public GET health response and every existing form, discovery and Square connector contract remain separate and unchanged.
+
+Run `node scripts/validate-apps-health.mjs` from the repository root before any reviewed Apps Script release. It proves exact request and response ordering/signatures, the inclusive ±300-second freshness boundary, strict content/body/duplicate handling, separate-secret enforcement, authentication-before-Sheet access, repeat-request read-only behavior, two batched ledger-format reads per inspection, all signed inspection states and the no-write/no-log/no-provider/no-PII boundary.
+
 ### Verified production snapshot — August 10, 2026
 
 - The existing web-app URL serves Apps Script Version 11 and reports `spartan-forms-v3.1-2026-08-10`.
@@ -62,6 +88,9 @@ Open **Apps Script -> Project settings -> Script properties** and set:
 - `BREVO_DOI_TEMPLATE_ID`: the positive numeric ID of the active Brevo double-opt-in confirmation template.
 - `OWNER_NOTIFICATION_ENABLED`: leave `false` through code paste, mail authorization, deployment, and the no-send configuration diagnostic. Enable it only for the controlled labeled delivery test and later operation. Only exact `true` enables delivery.
 - `OWNER_NOTIFICATION_EMAIL`: the single owner-controlled mailbox that should receive counts-only submission alerts. Use `bixbynutrition@gmail.com` for the current Spartan business inbox unless ownership changes.
+- `OPS_HEALTH_ENABLED`: leave exact `false` through code deployment, dedicated-secret setup and the separate sandbox monitor preflight. Only exact `true` runs the signed metadata inspection; authenticated requests still receive a signed `DISABLED` result while it is false.
+- `OPS_HEALTH_ENVIRONMENT`: exact `sandbox` or `production`. It must match the signed request's `source_environment_code`; a mismatch returns a signed `FAILED` state without a Sheet inspection.
+- `OPS_HEALTH_SHARED_SECRET`: a dedicated random secret of at least 32 bytes matching only the isolated operations monitor. It must differ from both `WORKER_SHARED_SECRET` and `SQUARE_CONNECTOR_SHARED_SECRET`; reusing either write-capable secret makes the health endpoint reject every request. Never place it in page code, GitHub, screenshots, Sheet cells, analytics or shell history.
 - `SQUARE_JOURNEY_ENABLED`: leave exact `false` through code deployment, connector infrastructure setup, sandbox testing and the owner-canary preflight. Only exact `true` enables the private signed Square prepare/finalize/event handlers.
 - `SQUARE_CONNECTOR_SHARED_SECRET`: a separate random secret of at least 32 bytes matching the isolated Square Worker. Never reuse `WORKER_SHARED_SECRET`, an API token or the pass/hash key.
 - `SQUARE_LOCATION_ID`: the verified Spartan location ID. The current reviewed value is `3MDGSXS33HERT`.

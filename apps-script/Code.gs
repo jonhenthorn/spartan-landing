@@ -123,6 +123,46 @@ const DISCOVERY_SOURCE_VALUES = [
   'other'
 ];
 const SQUARE_CONNECTOR_CONTRACT_VERSION = 'spartan-square-connector-v1-2026-08-17';
+const OPS_HEALTH_CONTRACT_VERSION = 'spartan-ops-apps-health-v1-2026-08-18';
+const OPS_HEALTH_RESPONSE_MODE = 'ops_health_json';
+const OPS_HEALTH_OPERATION = 'ops_health';
+const OPS_HEALTH_AUTH_MAX_AGE_SECONDS = 300;
+const OPS_HEALTH_MAX_BODY_BYTES = 2048;
+const OPS_HEALTH_REQUEST_FIELDS = [
+  'response_mode',
+  'operation',
+  'ops_health_contract_version',
+  'source_environment_code',
+  'request_timestamp',
+  'request_nonce',
+  'request_signature'
+];
+const OPS_HEALTH_REQUEST_SIGNED_FIELDS = OPS_HEALTH_REQUEST_FIELDS.slice(0, -1);
+const OPS_HEALTH_RESPONSE_SIGNED_FIELDS = [
+  'ok',
+  'inspection_state',
+  'operation',
+  'ops_health_contract_version',
+  'source_environment_code',
+  'service',
+  'handler_version',
+  'form_contract_version',
+  'worker_form_contract_version',
+  'discovery_contract_version',
+  'square_connector_contract_version',
+  'journey_ledger_version',
+  'owner_notification_version',
+  'lead_sheet_state',
+  'journey_ledger_state',
+  'worker_json_state',
+  'owner_notification_state',
+  'square_journey_state',
+  'read_only',
+  'writes_performed',
+  'checked_at_utc',
+  'request_timestamp',
+  'request_nonce'
+];
 const SQUARE_CUSTOMER_PROFILE_CONSENT_VERSION = 'square-customer-profile-v1-2026-08-17';
 const SQUARE_CUSTOMER_PROFILE_CONSENT_LANGUAGE = 'Save my name and mobile number in Spartan Nutrition’s Square Customer Directory to find my first-visit offer and link my in-store purchases. This is not permission for marketing emails or texts.';
 const SQUARE_CUSTOMER_PROFILE_CONSENT_HEADERS = [
@@ -323,6 +363,10 @@ function doGet(e) {
 }
 
 function doPost(e) {
+  if (isOpsHealthRequestCandidate_(e)) {
+    return opsHealthJsonPostResponse_(e);
+  }
+
   const params = (e && e.parameter) || {};
   if (params.response_mode === SQUARE_OFFER_PREPARE_RESPONSE_MODE) {
     return squareOfferPrepareJsonPostResponse_(params);
@@ -349,6 +393,289 @@ function doPost(e) {
     console.error(error && error.stack ? error.stack : error);
     return errorResponse_();
   }
+}
+
+/**
+ * A dedicated, signed, read-only health contract for the isolated operations
+ * monitor. The complete event is validated before any Sheet lookup so a
+ * malformed or unsigned health request cannot fall through to a customer form
+ * path or trigger an inspection. This contract never uses either write-capable
+ * Worker secret.
+ */
+function isOpsHealthRequestCandidate_(e) {
+  const parameter = (e && e.parameter) || {};
+  const parameters = (e && e.parameters) || {};
+  const observedFields = new Set([
+    ...Object.keys(parameter),
+    ...Object.keys(parameters)
+  ]);
+  const reservedHealthFields = [
+    'ops_health_contract_version',
+    'source_environment_code',
+    'request_timestamp',
+    'request_nonce',
+    'request_signature'
+  ];
+  const valuesFor = field => {
+    const values = parameters[field];
+    if (Array.isArray(values)) return values.map(value => String(value || ''));
+    if (values !== undefined && values !== null) return [String(values)];
+    if (parameter[field] !== undefined && parameter[field] !== null) {
+      return [String(parameter[field])];
+    }
+    return [];
+  };
+  return reservedHealthFields.some(field => observedFields.has(field))
+    || valuesFor('response_mode').includes(OPS_HEALTH_RESPONSE_MODE)
+    || valuesFor('operation').includes(OPS_HEALTH_OPERATION)
+    || valuesFor('ops_health_contract_version').includes(OPS_HEALTH_CONTRACT_VERSION);
+}
+
+function opsHealthJsonPostResponse_(e) {
+  const request = parseOpsHealthRequest_(e);
+  if (!request) return opsHealthUnsignedFailureResponse_();
+
+  const properties = PropertiesService.getScriptProperties();
+  const secret = String(properties.getProperty('OPS_HEALTH_SHARED_SECRET') || '');
+  const workerSecret = String(properties.getProperty('WORKER_SHARED_SECRET') || '');
+  const squareSecret = String(properties.getProperty('SQUARE_CONNECTOR_SHARED_SECRET') || '');
+  if (
+    secret.length < 32
+    || (workerSecret && secret === workerSecret)
+    || (squareSecret && secret === squareSecret)
+  ) {
+    return opsHealthUnsignedFailureResponse_();
+  }
+
+  const expectedRequestSignature = hmacSha256Hex_(
+    canonicalOpsHealthPayload_(request, OPS_HEALTH_REQUEST_SIGNED_FIELDS),
+    secret
+  );
+  if (!constantTimeEqual_(request.request_signature, expectedRequestSignature)) {
+    return opsHealthUnsignedFailureResponse_();
+  }
+
+  const configuredEnvironment = String(
+    properties.getProperty('OPS_HEALTH_ENVIRONMENT') || ''
+  );
+  const enabled = String(properties.getProperty('OPS_HEALTH_ENABLED') || '') === 'true';
+  const responseBase = {
+    requestTimestamp: request.request_timestamp,
+    requestNonce: request.request_nonce,
+    sourceEnvironmentCode: request.source_environment_code,
+    secret
+  };
+
+  if (
+    !['sandbox', 'production'].includes(configuredEnvironment)
+    || configuredEnvironment !== request.source_environment_code
+  ) {
+    return opsHealthSignedStateResponse_({
+      ...responseBase,
+      inspectionState: 'FAILED'
+    });
+  }
+
+  if (!enabled) {
+    return opsHealthSignedStateResponse_({
+      ...responseBase,
+      inspectionState: 'DISABLED'
+    });
+  }
+
+  try {
+    const inspection = inspectOpsHealthState_(properties, secret);
+    return opsHealthSignedStateResponse_({
+      ...responseBase,
+      inspectionState: 'COMPLETE',
+      componentStates: inspection
+    });
+  } catch (error) {
+    // This endpoint deliberately emits no log entry or exception detail. A
+    // valid caller receives a signed FAILED state and nothing about the Sheet,
+    // properties, customer records, identifiers or underlying exception.
+    return opsHealthSignedStateResponse_({
+      ...responseBase,
+      inspectionState: 'FAILED'
+    });
+  }
+}
+
+function parseOpsHealthRequest_(e) {
+  const postData = e && e.postData;
+  const body = postData && typeof postData.contents === 'string'
+    ? postData.contents
+    : '';
+  const contentType = String((postData && postData.type) || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '');
+  const declaredLength = Number(postData && postData.length);
+  if (!/^application\/x-www-form-urlencoded(?:;charset=utf-8)?$/.test(contentType)) return null;
+  if (!body || body.length > OPS_HEALTH_MAX_BODY_BYTES) return null;
+  if (!/^[\x20-\x7e]+$/.test(body)) return null;
+  if (
+    postData.length !== undefined
+    && (!Number.isInteger(declaredLength) || declaredLength !== body.length)
+  ) {
+    return null;
+  }
+
+  const parameters = (e && e.parameters) || null;
+  if (!parameters || typeof parameters !== 'object' || Array.isArray(parameters)) return null;
+  const observedFields = Object.keys(parameters);
+  if (observedFields.length !== OPS_HEALTH_REQUEST_FIELDS.length) return null;
+  if (OPS_HEALTH_REQUEST_FIELDS.some(field => !Object.prototype.hasOwnProperty.call(parameters, field))) {
+    return null;
+  }
+
+  const request = {};
+  for (const field of OPS_HEALTH_REQUEST_FIELDS) {
+    const values = parameters[field];
+    if (!Array.isArray(values) || values.length !== 1 || typeof values[0] !== 'string') return null;
+    request[field] = values[0];
+  }
+
+  const canonicalBody = canonicalOpsHealthPayload_(request, OPS_HEALTH_REQUEST_FIELDS);
+  if (body !== canonicalBody) return null;
+  if (request.response_mode !== OPS_HEALTH_RESPONSE_MODE) return null;
+  if (request.operation !== OPS_HEALTH_OPERATION) return null;
+  if (request.ops_health_contract_version !== OPS_HEALTH_CONTRACT_VERSION) return null;
+  if (!/^(sandbox|production)$/.test(request.source_environment_code)) return null;
+  if (!/^\d{10}$/.test(request.request_timestamp)) return null;
+  const requestTimestampSeconds = Number(request.request_timestamp);
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  if (Math.abs(nowSeconds - requestTimestampSeconds) > OPS_HEALTH_AUTH_MAX_AGE_SECONDS) return null;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(request.request_nonce)) {
+    return null;
+  }
+  if (!/^[0-9a-f]{64}$/.test(request.request_signature)) return null;
+  return request;
+}
+
+function canonicalOpsHealthPayload_(values, fields) {
+  return fields
+    .map(field => `${field}=${encodeURIComponent(String(values[field]))}`)
+    .join('&');
+}
+
+function opsHealthUnsignedFailureResponse_() {
+  return jsonResponse_({
+    ok: false,
+    code: 'ops_health_request_rejected'
+  });
+}
+
+function opsHealthSignedStateResponse_(options) {
+  const checkedAtUtc = new Date().toISOString();
+  const notCheckedStates = {
+    lead_sheet_state: 'NOT_CHECKED',
+    journey_ledger_state: 'NOT_CHECKED',
+    worker_json_state: 'NOT_CHECKED',
+    owner_notification_state: 'NOT_CHECKED',
+    square_journey_state: 'NOT_CHECKED'
+  };
+  const states = options.componentStates || notCheckedStates;
+  const response = {
+    ok: options.inspectionState === 'COMPLETE',
+    inspection_state: options.inspectionState,
+    operation: OPS_HEALTH_OPERATION,
+    ops_health_contract_version: OPS_HEALTH_CONTRACT_VERSION,
+    source_environment_code: options.sourceEnvironmentCode,
+    service: SERVICE_NAME,
+    handler_version: FORM_HANDLER_VERSION,
+    form_contract_version: FORM_CONTRACT_VERSION,
+    worker_form_contract_version: WORKER_FORM_CONTRACT_VERSION,
+    discovery_contract_version: DISCOVERY_CONTRACT_VERSION,
+    square_connector_contract_version: SQUARE_CONNECTOR_CONTRACT_VERSION,
+    journey_ledger_version: JOURNEY_LEDGER_VERSION,
+    owner_notification_version: OWNER_NOTIFICATION_VERSION,
+    lead_sheet_state: states.lead_sheet_state,
+    journey_ledger_state: states.journey_ledger_state,
+    worker_json_state: states.worker_json_state,
+    owner_notification_state: states.owner_notification_state,
+    square_journey_state: states.square_journey_state,
+    read_only: true,
+    writes_performed: 0,
+    checked_at_utc: checkedAtUtc,
+    request_timestamp: options.requestTimestamp,
+    request_nonce: options.requestNonce
+  };
+  response.response_signature = hmacSha256Hex_(
+    canonicalOpsHealthPayload_(response, OPS_HEALTH_RESPONSE_SIGNED_FIELDS),
+    options.secret
+  );
+  return jsonResponse_(response);
+}
+
+function inspectOpsHealthState_(properties, opsHealthSecret) {
+  const spreadsheetId = cleanText_(properties.getProperty('SPREADSHEET_ID'), 200);
+  const configuredSheetName = cleanText_(properties.getProperty('SHEET_NAME'), 100);
+  let spreadsheet = null;
+  let leadSheetReady = false;
+
+  if (spreadsheetId && configuredSheetName) {
+    spreadsheet = SpreadsheetApp.openById(spreadsheetId);
+    const leadSheet = spreadsheet.getSheetByName(configuredSheetName);
+    if (leadSheet) leadSheetReady = isOpsHealthLeadSheetReady_(leadSheet);
+  }
+
+  const journeyLedgerReady = spreadsheet
+    ? isOpsHealthJourneyLedgerReady_(spreadsheet)
+    : false;
+  const workerSecret = String(properties.getProperty('WORKER_SHARED_SECRET') || '');
+  const ownerNotificationEnabled = String(
+    properties.getProperty('OWNER_NOTIFICATION_ENABLED') || ''
+  ).trim().toLowerCase() === 'true';
+  const ownerEmail = normalizeStoredEmail_(properties.getProperty('OWNER_NOTIFICATION_EMAIL'));
+  const squareEnabled = String(properties.getProperty('SQUARE_JOURNEY_ENABLED') || '') === 'true';
+  const squareSecret = String(properties.getProperty('SQUARE_CONNECTOR_SHARED_SECRET') || '');
+  const squarePropertiesReady = squareSecret.length >= 32
+    && squareSecret !== opsHealthSecret
+    && (!workerSecret || squareSecret !== workerSecret)
+    && Boolean(cleanText_(properties.getProperty('SQUARE_LOCATION_ID'), 100))
+    && Boolean(cleanText_(properties.getProperty('SQUARE_FIRST_DRINK_DISCOUNT_ID'), 192))
+    && Boolean(cleanText_(properties.getProperty('SQUARE_FIRST_VISIT_GROUP_ID'), 192));
+
+  return {
+    lead_sheet_state: leadSheetReady ? 'READY' : 'NOT_READY',
+    journey_ledger_state: journeyLedgerReady ? 'READY' : 'NOT_READY',
+    worker_json_state: workerSecret.length >= 32 && workerSecret !== opsHealthSecret
+      ? 'CONFIGURED'
+      : 'NOT_CONFIGURED',
+    owner_notification_state: ownerNotificationEnabled
+      ? (leadSheetReady && isEmail_(ownerEmail) ? 'READY' : 'MISCONFIGURED')
+      : 'DISABLED',
+    square_journey_state: squareEnabled
+      ? (leadSheetReady && journeyLedgerReady && squarePropertiesReady ? 'READY' : 'MISCONFIGURED')
+      : 'DISABLED'
+  };
+}
+
+function isOpsHealthLeadSheetReady_(sheet) {
+  const lastColumn = sheet.getLastColumn();
+  if (lastColumn < HISTORIC_HEADERS.length) return false;
+  const headerRange = sheet.getRange(1, 1, 1, lastColumn);
+  const headers = headerRange.getValues()[0].map(value => String(value || '').trim());
+  const formulas = headerRange.getFormulas()[0];
+  if (formulas.some(formula => Boolean(formula))) return false;
+  if (HISTORIC_HEADERS.some((header, index) => headers[index] !== header)) return false;
+  return REQUIRED_HEADERS.every(
+    requiredHeader => headers.filter(header => header === requiredHeader).length === 1
+  );
+}
+
+function isOpsHealthJourneyLedgerReady_(spreadsheet) {
+  const inspections = JOURNEY_LEDGER_SHEET_SPECS.map(
+    spec => inspectJourneyLedgerSheet_(spreadsheet, spec)
+  );
+  return inspections.every(inspection => (
+    inspection.sheet
+    && ['verified', 'nonempty'].includes(inspection.state)
+    && inspection.headerRowBold
+    && inspection.frozenHeaderRows === 1
+    && inspection.plainTextColumnsReady
+  ));
 }
 
 /**
@@ -1030,12 +1357,15 @@ function inspectJourneyLedgerSheet_(spreadsheet, spec) {
   const headerRowBold = exactHeaderRange.getFontWeights()[0]
     .every(weight => weight === 'bold');
   const maxRows = sheet.getMaxRows();
-  const plainTextColumnsReady = spec.plainTextHeaders.every(header => {
-    const column = spec.headers.indexOf(header) + 1;
-    return sheet.getRange(1, column, maxRows, 1)
-      .getNumberFormats()
-      .every(row => row[0] === '@');
-  });
+  const plainTextColumnIndexes = spec.plainTextHeaders.map(
+    header => spec.headers.indexOf(header)
+  );
+  const ledgerNumberFormats = sheet
+    .getRange(1, 1, maxRows, spec.headers.length)
+    .getNumberFormats();
+  const plainTextColumnsReady = ledgerNumberFormats.every(
+    row => plainTextColumnIndexes.every(columnIndex => row[columnIndex] === '@')
+  );
 
   return {
     spec,

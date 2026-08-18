@@ -12,10 +12,15 @@ const TEST_ALERT_FROM = ["square-operations", "alerts.example"].join("@");
 const TEST_ALERT_FROM_MIXED_CASE = ["Square-Operations", "Alerts.Example"].join("@");
 const TEST_ALERT_FROM_CHANGED = ["different-square-operations", "alerts.example"].join("@");
 const TEST_PRIVATE_EMAIL = ["private.person", "example.com"].join("@");
+const TEST_APPS_DEPLOYMENT_ID = "AKfycbx" + "a".repeat(48);
+const TEST_APPS_HEALTH_URL = `https://script.google.com/macros/s/${TEST_APPS_DEPLOYMENT_ID}/exec`;
+const TEST_APPS_HEALTH_SECRET = ["apps", "health", "fixture", "separate", "secret", "2026"].join("-");
+const TEST_APPS_REDIRECT_URL = "https://script.googleusercontent.com/macros/echo?user_content_key=fixture&lib=fixture";
 
 const expectedFlags = [
   "OPS_MONITORING_ENABLED",
   "OPS_QUEUE_MONITORING_ENABLED",
+  "OPS_APPS_SCRIPT_MONITORING_ENABLED",
   "OPS_ALERTS_ENABLED",
   "OPS_BACKUPS_ENABLED",
   "OPS_RESTORE_TESTS_ENABLED",
@@ -31,6 +36,25 @@ const expectedMonitorVars = {
   OPS_ALERT_DEDUPE_SECONDS: "3600",
   OPS_QUEUE_WARNING_AGE_SECONDS: "600",
   OPS_QUEUE_CRITICAL_AGE_SECONDS: "1800",
+};
+
+const expectedAppsMonitorVars = {
+  production: {
+    OPS_APPS_SOURCE_ENVIRONMENT: "production",
+    OPS_EXPECT_APPS_LEAD_SHEET_STATE: "READY",
+    OPS_EXPECT_APPS_JOURNEY_LEDGER_STATE: "READY",
+    OPS_EXPECT_APPS_WORKER_JSON_STATE: "CONFIGURED",
+    OPS_EXPECT_APPS_OWNER_NOTIFICATION_STATE: "READY",
+    OPS_EXPECT_APPS_SQUARE_JOURNEY_STATE: "DISABLED",
+  },
+  sandbox: {
+    OPS_APPS_SOURCE_ENVIRONMENT: "sandbox",
+    OPS_EXPECT_APPS_LEAD_SHEET_STATE: "READY",
+    OPS_EXPECT_APPS_JOURNEY_LEDGER_STATE: "READY",
+    OPS_EXPECT_APPS_WORKER_JSON_STATE: "NOT_CONFIGURED",
+    OPS_EXPECT_APPS_OWNER_NOTIFICATION_STATE: "DISABLED",
+    OPS_EXPECT_APPS_SQUARE_JOURNEY_STATE: "DISABLED",
+  },
 };
 
 const expectedColumns = {
@@ -72,7 +96,7 @@ function validateWranglerConfiguration(relativePath, environment) {
   assert.doesNotMatch(config, /^routes?\s*=/m, `${relativePath} must remain scheduled-only`);
   assert.match(config, /\[triggers\][\s\S]*?crons\s*=/, `${relativePath} needs a scheduled trigger`);
   assert.match(config, new RegExp(`^OPS_ENVIRONMENT\\s*=\\s*"${environment}"$`, "m"));
-  assert.match(config, /^OPS_SCHEMA_VERSION\s*=\s*"3"$/m, `${relativePath} must require operations schema 3`);
+  assert.match(config, /^OPS_SCHEMA_VERSION\s*=\s*"4"$/m, `${relativePath} must require operations schema 4`);
 
   for (const flagName of expectedFlags) {
     assert.match(config, new RegExp(`^${flagName}\\s*=\\s*"false"$`, "m"), `${flagName} must default false`);
@@ -80,6 +104,10 @@ function validateWranglerConfiguration(relativePath, environment) {
   for (const [variableName, value] of Object.entries(expectedMonitorVars)) {
     assert.match(config, new RegExp(`^${variableName}\\s*=\\s*"${value}"$`, "m"),
       `${relativePath} must keep ${variableName} at its reviewed default`);
+  }
+  for (const [variableName, value] of Object.entries(expectedAppsMonitorVars[environment])) {
+    assert.match(config, new RegExp(`^${variableName}\\s*=\\s*"${value}"$`, "m"),
+      `${relativePath} must keep ${variableName} at its reviewed value`);
   }
   assert.doesNotMatch(config, /^OPS_[A-Z0-9_]*_ENABLED\s*=\s*"true"$/m, "No ops capability may default on");
   if (environment === "production") {
@@ -119,6 +147,8 @@ function validateWranglerConfiguration(relativePath, environment) {
     `${relativePath} must not gain a producer-capable or consuming Queue binding`);
   assert.doesNotMatch(config, /OPS_CLOUDFLARE_QUEUES_READ_TOKEN/,
     `${relativePath} must not contain the deploy-only Queue read token`);
+  assert.doesNotMatch(config, /OPS_APPS_SCRIPT_HEALTH_(?:URL|SHARED_SECRET)/,
+    `${relativePath} must not contain the deploy-only Apps health URL or shared secret`);
 }
 
 function validateMigration() {
@@ -628,6 +658,133 @@ function validateQueueAlertMigrationUpgrade() {
   "production", "A rejected migration 0003 must atomically preserve the original v2 table");
 }
 
+function validateAppsHealthAlertMigrationUpgrade() {
+  const databasePath = path.join(tempRoot, "ops-apps-alert-upgrade.sqlite");
+  for (const migrationPath of [
+    "square-ops/migrations/0001_ops_state.sql",
+    "square-ops/migrations/0002_alert_delivery_engine.sql",
+    "square-ops/migrations/0003_queue_monitoring_alerts.sql",
+  ]) applyOpsMigrationAtomically(databasePath, migrationPath);
+
+  const incident = {
+    alert_incident_id: "v3-preserved-incident",
+    environment_code: "sandbox",
+    alert_key: "QUEUE_BACKLOG_STALE",
+    severity_code: "WARNING",
+    incident_state: "OPEN",
+    occurrence_count: 2,
+    latest_signal_count: 3,
+    reason_code: "QUEUE_MESSAGE_AGE_STALE",
+    first_seen_at: "2026-08-18T13:00:00.000Z",
+    last_seen_at: "2026-08-18T13:05:00.000Z",
+    dedupe_until: "2026-08-18T14:00:00.000Z",
+    created_at: "2026-08-18T13:00:00.000Z",
+    updated_at: "2026-08-18T13:05:00.000Z",
+  };
+  const delivery = {
+    alert_delivery_id: "v3-preserved-delivery",
+    alert_incident_id: incident.alert_incident_id,
+    delivery_kind: "OPEN",
+    channel_code: "OWNER_EMAIL",
+    target_role_code: "OWNER",
+    environment_code: "sandbox",
+    alert_key: incident.alert_key,
+    severity_code: "WARNING",
+    signal_count: 3,
+    reason_code: incident.reason_code,
+    sender_fingerprint: "b".repeat(64),
+    message_version: "OPS_ALERT_V1",
+    delivery_state: "PENDING",
+    attempt_count: 0,
+    queued_at: "2026-08-18T13:05:00.000Z",
+    available_at: "2026-08-18T13:05:00.000Z",
+    first_observed_at: "2026-08-18T13:00:00.000Z",
+    latest_observed_at: "2026-08-18T13:05:00.000Z",
+    created_at: "2026-08-18T13:05:00.000Z",
+    updated_at: "2026-08-18T13:05:00.000Z",
+  };
+  sqlite(databasePath, `${insertStatement("alert_incidents", incident)}\n${insertStatement("alert_deliveries", delivery)}`);
+  const before = execFileSync("sqlite3", ["-json", databasePath,
+    "SELECT * FROM alert_deliveries ORDER BY alert_delivery_id;"], { encoding: "utf8" }).trim();
+  applyOpsMigrationAtomically(databasePath, "square-ops/migrations/0004_apps_script_health_alerts.sql");
+  const after = execFileSync("sqlite3", ["-json", databasePath,
+    "SELECT * FROM alert_deliveries ORDER BY alert_delivery_id;"], { encoding: "utf8" }).trim();
+  assert.deepEqual(JSON.parse(after), JSON.parse(before), "Migration 0004 must preserve every v3 delivery value");
+  assert.deepEqual(nonemptyLines(sqlite(databasePath,
+    "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='alert_deliveries' AND name NOT LIKE 'sqlite_%' ORDER BY name;")),
+  ["alert_deliveries_incident_state_idx", "alert_deliveries_pending_idx"],
+  "Migration 0004 must recreate both reviewed delivery indexes");
+
+  const allPairs = [
+    ["SOURCE_UNAVAILABLE", "CONNECTOR_SIGNAL_SOURCE_UNAVAILABLE"],
+    ["WEBHOOK_STALE", "WEBHOOK_DELIVERY_STALE"],
+    ["OUTBOX_STALE", "OUTBOX_DELIVERY_STALE"],
+    ["OUTBOX_DEAD", "OUTBOX_DELIVERY_DEAD"],
+    ["WEBHOOK_REJECTED_CRITICAL", "DISCOUNT_OR_CUSTOMER_POLICY_REJECTED"],
+    ["WEBHOOK_REJECTED_WARNING", "WEBHOOK_POLICY_REJECTED"],
+    ["RECONCILIATION_OVERFLOW", "RECONCILIATION_PAGE_LIMIT"],
+    ["RECONCILIATION_STALE", "RECONCILIATION_HEARTBEAT_STALE"],
+    ["QUEUE_METRICS_UNAVAILABLE", "QUEUE_METRICS_SOURCE_UNAVAILABLE"],
+    ["QUEUE_BACKLOG_STALE", "QUEUE_MESSAGE_AGE_STALE"],
+    ["QUEUE_DLQ_NONEMPTY", "QUEUE_DEAD_LETTER_NONEMPTY"],
+    ["APPS_HEALTH_UNAVAILABLE", "APPS_HEALTH_SOURCE_UNAVAILABLE"],
+    ["APPS_HEALTH_INTEGRITY_FAILURE", "APPS_HEALTH_AUTH_OR_CONTRACT_INVALID"],
+    ["APPS_CONFIGURATION_UNHEALTHY", "APPS_RUNTIME_CONFIGURATION_UNHEALTHY"],
+    ["ALERT_PATH_TEST", "MONTHLY_ALERT_PATH_TEST"],
+  ];
+  for (const [index, [alertKey, reasonCode]] of allPairs.entries()) {
+    if (alertKey === incident.alert_key) continue;
+    const pairIncident = {
+      ...incident,
+      alert_incident_id: `v4-pair-incident-${index}`,
+      alert_key: alertKey,
+      reason_code: reasonCode,
+    };
+    const pairDelivery = {
+      ...delivery,
+      alert_delivery_id: `v4-pair-delivery-${index}`,
+      alert_incident_id: pairIncident.alert_incident_id,
+      alert_key: alertKey,
+      reason_code: reasonCode,
+      delivery_kind: alertKey === "ALERT_PATH_TEST" ? "TEST" : "OPEN",
+    };
+    sqlite(databasePath,
+      `${insertStatement("alert_incidents", pairIncident)}\n${insertStatement("alert_deliveries", pairDelivery)}`);
+  }
+  assert.equal(sqlite(databasePath, "SELECT COUNT(*) FROM alert_deliveries;").trim(), String(allPairs.length));
+  assertCheckRejected(databasePath, "Migration 0004 must reject an unreviewed Apps alert/reason pair",
+    insertStatement("alert_deliveries", {
+      ...delivery,
+      alert_delivery_id: "apps-bad-pair",
+      alert_incident_id: "v4-pair-incident-12",
+      alert_key: "APPS_HEALTH_INTEGRITY_FAILURE",
+      reason_code: "APPS_RUNTIME_CONFIGURATION_UNHEALTHY",
+    }));
+  assert.equal(sqlite(databasePath, "PRAGMA integrity_check;").trim(), "ok");
+  assert.equal(sqlite(databasePath, "PRAGMA foreign_key_check;").trim(), "");
+
+  const mismatchPath = path.join(tempRoot, "ops-apps-alert-mismatch.sqlite");
+  for (const migrationPath of [
+    "square-ops/migrations/0001_ops_state.sql",
+    "square-ops/migrations/0002_alert_delivery_engine.sql",
+    "square-ops/migrations/0003_queue_monitoring_alerts.sql",
+  ]) applyOpsMigrationAtomically(mismatchPath, migrationPath);
+  sqlite(mismatchPath, `${insertStatement("alert_incidents", incident)}\n${insertStatement("alert_deliveries", {
+    ...delivery,
+    environment_code: "production",
+  })}`);
+  const rejectedUpgrade = spawnSync("sqlite3", [mismatchPath], {
+    input: atomicMigrationInput("square-ops/migrations/0004_apps_script_health_alerts.sql"),
+    encoding: "utf8",
+  });
+  assert.notEqual(rejectedUpgrade.status, 0,
+    "Migration 0004 must atomically reject environment-mismatched evidence");
+  assert.match(rejectedUpgrade.stderr || "", /CHECK constraint failed/);
+  assert.equal(sqlite(mismatchPath,
+    "SELECT environment_code FROM alert_deliveries WHERE alert_delivery_id='v3-preserved-delivery';").trim(),
+  "production", "A rejected migration 0004 must preserve the original v3 evidence");
+}
+
 class MockStatement {
   constructor(db, op, sql) {
     this.db = db;
@@ -990,8 +1147,14 @@ async function validateWorkerBoundary() {
   assert.match(source, /AbortSignal\.timeout\(QUEUE_METRICS_TIMEOUT_MS\)/,
     "Every Queue metrics request must carry the reviewed timeout signal");
   assert.match(source, /method: "GET"/, "Queue metrics must use a read-only GET request");
-  assert.equal((source.match(/fetchImpl\s*\(/g) || []).length, 1,
-    "The reviewed Queue metrics adapter must remain the only network call");
+  assert.match(source, /const APPS_HEALTH_TIMEOUT_MS = 5000;/,
+    "Apps health must retain one reviewed five-second deadline");
+  assert.match(source, /const APPS_HEALTH_MAX_REQUEST_BYTES = 2048;/,
+    "Apps health POST must remain bounded at two KiB");
+  assert.match(source, /const APPS_HEALTH_MAX_RESPONSE_BYTES = 8192;/,
+    "Apps health response must remain bounded at eight KiB");
+  assert.equal((source.match(/fetchImpl\s*\(/g) || []).length, 3,
+    "Only the reviewed Queue call and two-hop Apps health calls may use network fetch");
   assert.doesNotMatch(source, /\/messages(?:[/'"`?]|$)|graphql|sendBatch\s*\(/i,
     "Operations monitoring must not list, pull, acknowledge, retry or send Queue messages");
   assert.doesNotMatch(source, /\.put\s*\(/, "Operations monitor must not write R2 objects");
@@ -1019,7 +1182,8 @@ async function validateWorkerBoundary() {
         get(target, property, receiver) {
           if (["OPS_DB", "CONNECTOR_DB", "BACKUP_BUCKET", "OPS_OWNER_EMAIL", "OPS_BACKUP_OWNER_EMAIL",
             "OPS_ALERT_FROM_EMAIL", "OPS_CLOUDFLARE_QUEUES_READ_TOKEN", "OPS_CLOUDFLARE_ACCOUNT_ID",
-            "OPS_CONNECTOR_QUEUE_ID", "OPS_CONNECTOR_DLQ_ID"].includes(String(property))) bindingReads += 1;
+            "OPS_CONNECTOR_QUEUE_ID", "OPS_CONNECTOR_DLQ_ID", "OPS_APPS_SCRIPT_HEALTH_URL",
+            "OPS_APPS_SCRIPT_HEALTH_SHARED_SECRET"].includes(String(property))) bindingReads += 1;
           return Reflect.get(target, property, receiver);
         },
       });
@@ -1033,12 +1197,14 @@ async function validateWorkerBoundary() {
     const wrongCronEnvironment = new Proxy({
       OPS_MONITORING_ENABLED: "true",
       OPS_QUEUE_MONITORING_ENABLED: "true",
+      OPS_APPS_SCRIPT_MONITORING_ENABLED: "true",
       OPS_ALERTS_ENABLED: "true",
     }, {
       get(target, property, receiver) {
         if (["OPS_DB", "CONNECTOR_DB", "OPS_OWNER_EMAIL", "OPS_BACKUP_OWNER_EMAIL",
           "OPS_ALERT_FROM_EMAIL", "OPS_CLOUDFLARE_QUEUES_READ_TOKEN", "OPS_CLOUDFLARE_ACCOUNT_ID",
-          "OPS_CONNECTOR_QUEUE_ID", "OPS_CONNECTOR_DLQ_ID"].includes(String(property))) {
+          "OPS_CONNECTOR_QUEUE_ID", "OPS_CONNECTOR_DLQ_ID", "OPS_APPS_SCRIPT_HEALTH_URL",
+          "OPS_APPS_SCRIPT_HEALTH_SHARED_SECRET"].includes(String(property))) {
           wrongCronBindingReads += 1;
         }
         return Reflect.get(target, property, receiver);
@@ -1083,9 +1249,19 @@ async function validateWorkerBoundary() {
     /OPS_QUEUE_MONITORING_REQUIRES_MONITORING/,
     "Queue monitoring must require the aggregate monitor on the exact five-minute cron",
   );
+  await assert.rejects(
+    workerModule.default.scheduled(
+      { cron: "*/5 * * * *", scheduledTime: Date.now() },
+      { OPS_APPS_SCRIPT_MONITORING_ENABLED: "true", OPS_MONITORING_ENABLED: "false" },
+      {},
+    ),
+    /OPS_APPS_SCRIPT_MONITORING_REQUIRES_MONITORING/,
+    "Apps Script monitoring must require the aggregate monitor on the exact five-minute cron",
+  );
 
   await validateMonitorBehavior(workerModule);
   await validateQueueMonitorBehavior(workerModule);
+  await validateAppsScriptHealthMonitorBehavior(workerModule);
   await validateAlertBehavior(workerModule);
 }
 
@@ -1344,7 +1520,7 @@ async function validateQueueMonitorBehavior(workerModule) {
   });
   const baseEnvironment = (ops = new MockOpsDB(), connector = new MockConnectorDB(), extra = {}) => ({
     OPS_ENVIRONMENT: "sandbox",
-    OPS_SCHEMA_VERSION: "3",
+    OPS_SCHEMA_VERSION: "4",
     OPS_MONITORING_ENABLED: "true",
     OPS_QUEUE_MONITORING_ENABLED: "true",
     OPS_ALERTS_ENABLED: "false",
@@ -1541,7 +1717,7 @@ async function validateQueueMonitorBehavior(workerModule) {
     await workerModule.__test.runMonitor(confirmationEnv, observation, observation);
     assert.equal(incident.occurrence_count, 2,
       "A later qualifying sample with at least 240 seconds separation confirms the warning");
-    validateCapturedQueueWarningStatements(confirmationOps.executed, {
+    validateCapturedConfirmedWarningStatements(confirmationOps.executed, "QUEUE_BACKLOG_STALE", {
       occurrenceCount: 2,
       firstSeenAt: base.toISOString(),
       lastSeenAt: at(479).toISOString(),
@@ -1638,20 +1814,412 @@ async function validateQueueMonitorBehavior(workerModule) {
     "A critical Queue age bypasses warning confirmation without duplicating notice kinds");
 }
 
-function validateCapturedQueueWarningStatements(executed, expected) {
-  const databasePath = path.join(tempRoot, `ops-captured-queue-warning-${Date.now()}.sqlite`);
+async function validateAppsScriptHealthMonitorBehavior(workerModule) {
+  const base = new Date("2026-08-18T12:00:00.000Z");
+  const at = (seconds) => new Date(base.getTime() + seconds * 1000);
+  const requestFields = [
+    "response_mode", "operation", "ops_health_contract_version", "source_environment_code",
+    "request_timestamp", "request_nonce",
+  ];
+  const responseFields = [
+    "ok", "inspection_state", "operation", "ops_health_contract_version", "source_environment_code",
+    "service", "handler_version", "form_contract_version", "worker_form_contract_version",
+    "discovery_contract_version", "square_connector_contract_version", "journey_ledger_version",
+    "owner_notification_version", "lead_sheet_state", "journey_ledger_state", "worker_json_state",
+    "owner_notification_state", "square_journey_state", "read_only", "writes_performed",
+    "checked_at_utc", "request_timestamp", "request_nonce",
+  ];
+  const baseEnvironment = (ops = new MockOpsDB(), connector = new MockConnectorDB(), extra = {}) => ({
+    OPS_ENVIRONMENT: "sandbox",
+    OPS_SCHEMA_VERSION: "4",
+    OPS_MONITORING_ENABLED: "true",
+    OPS_QUEUE_MONITORING_ENABLED: "false",
+    OPS_APPS_SCRIPT_MONITORING_ENABLED: "true",
+    OPS_ALERTS_ENABLED: "false",
+    OPS_EXPECT_RECONCILIATION: "false",
+    OPS_WARNING_AGE_SECONDS: "600",
+    OPS_CRITICAL_AGE_SECONDS: "1800",
+    OPS_RECONCILIATION_MAX_AGE_SECONDS: "1800",
+    OPS_REJECTION_LOOKBACK_HOURS: "24",
+    OPS_MONITOR_RETENTION_DAYS: "30",
+    OPS_ALERT_DEDUPE_SECONDS: "3600",
+    OPS_APPS_SOURCE_ENVIRONMENT: "sandbox",
+    OPS_EXPECT_APPS_LEAD_SHEET_STATE: "READY",
+    OPS_EXPECT_APPS_JOURNEY_LEDGER_STATE: "READY",
+    OPS_EXPECT_APPS_WORKER_JSON_STATE: "NOT_CONFIGURED",
+    OPS_EXPECT_APPS_OWNER_NOTIFICATION_STATE: "DISABLED",
+    OPS_EXPECT_APPS_SQUARE_JOURNEY_STATE: "DISABLED",
+    OPS_APPS_SCRIPT_HEALTH_URL: TEST_APPS_HEALTH_URL,
+    OPS_APPS_SCRIPT_HEALTH_SHARED_SECRET: TEST_APPS_HEALTH_SECRET,
+    OPS_DB: ops,
+    CONNECTOR_DB: connector,
+    ...extra,
+  });
+  const buildPayload = async (params, {
+    inspectionState = "COMPLETE",
+    checkedAt = base,
+    mutate = null,
+    invalidSignature = false,
+  } = {}) => {
+    const checked = inspectionState === "COMPLETE";
+    const payload = {
+      ok: checked,
+      inspection_state: inspectionState,
+      operation: "ops_health",
+      ops_health_contract_version: "spartan-ops-apps-health-v1-2026-08-18",
+      source_environment_code: "sandbox",
+      service: "spartan-website-forms",
+      handler_version: "spartan-forms-v3.2-2026-08-15",
+      form_contract_version: "spartan-form-contract-v3-2026-08-10",
+      worker_form_contract_version: "spartan-worker-form-v1-2026-08-15",
+      discovery_contract_version: "spartan-discovery-contract-v1-2026-08-16",
+      square_connector_contract_version: "spartan-square-connector-v1-2026-08-17",
+      journey_ledger_version: "spartan-journey-ledger-v1-2026-08-16",
+      owner_notification_version: "spartan-owner-notifications-v1-2026-08-16",
+      lead_sheet_state: checked ? "READY" : "NOT_CHECKED",
+      journey_ledger_state: checked ? "READY" : "NOT_CHECKED",
+      worker_json_state: checked ? "NOT_CONFIGURED" : "NOT_CHECKED",
+      owner_notification_state: checked ? "DISABLED" : "NOT_CHECKED",
+      square_journey_state: checked ? "DISABLED" : "NOT_CHECKED",
+      read_only: true,
+      writes_performed: 0,
+      checked_at_utc: checkedAt.toISOString(),
+      request_timestamp: params.get("request_timestamp") || "",
+      request_nonce: params.get("request_nonce") || "",
+    };
+    if (mutate) mutate(payload);
+    const canonical = workerModule.__test.canonicalSignedFields(payload, responseFields);
+    payload.response_signature = invalidSignature
+      ? "0".repeat(64)
+      : await workerModule.__test.hmacSha256Hex(canonical, TEST_APPS_HEALTH_SECRET);
+    return payload;
+  };
+  const scriptedFetch = ({
+    redirectStatus = 302,
+    redirectLocation = TEST_APPS_REDIRECT_URL,
+    finalStatus = 200,
+    contentType = "Application/JSON; Charset=UTF-8",
+    rawBody = null,
+    payloadOptions = {},
+    finalError = null,
+  } = {}) => {
+    const calls = [];
+    let requestParams = null;
+    const fetchImpl = async (url, options = {}) => {
+      const callIndex = calls.length;
+      calls.push({ url, options });
+      if (callIndex === 0) {
+        requestParams = new URLSearchParams(String(options.body || ""));
+        return new Response(null, { status: redirectStatus, headers: { Location: redirectLocation } });
+      }
+      if (callIndex !== 1) throw new Error("UNEXPECTED_APPS_HEALTH_FETCH");
+      if (finalError) throw finalError;
+      const body = rawBody === null
+        ? JSON.stringify(await buildPayload(requestParams, payloadOptions))
+        : rawBody;
+      return new Response(body, { status: finalStatus, headers: { "Content-Type": contentType } });
+    };
+    return { fetchImpl, calls };
+  };
+
+  const orderedFixtureParams = new URLSearchParams({
+    request_timestamp: String(Math.floor(base.getTime() / 1000)),
+    request_nonce: "00000000-0000-4000-8000-000000000000",
+  });
+  assert.deepEqual(Object.keys(await buildPayload(orderedFixtureParams)), [...responseFields, "response_signature"],
+    "The Apps response fixture must use the exact production key insertion order");
+
+  for (const redirectStatus of [302, 303]) {
+    const route = scriptedFetch({ redirectStatus });
+    const result = await workerModule.__test.fetchAppsScriptHealth(baseEnvironment(), base, route.fetchImpl);
+    assert.deepEqual(result, { inspectionState: "COMPLETE", configurationHealthy: true });
+    assert.equal(route.calls.length, 2, `HTTP ${redirectStatus} must complete the reviewed two-hop exchange`);
+    const [post, get] = route.calls;
+    assert.equal(post.url, TEST_APPS_HEALTH_URL);
+    const params = new URLSearchParams(post.options.body);
+    assert.deepEqual([...params.keys()], [...requestFields, "request_signature"],
+      "Apps request fields must retain their exact canonical insertion order");
+    const canonicalRequest = requestFields.map((field) =>
+      `${field}=${encodeURIComponent(params.get(field) || "")}`).join("&");
+    assert.equal(params.get("request_signature"),
+      await workerModule.__test.hmacSha256Hex(canonicalRequest, TEST_APPS_HEALTH_SECRET));
+    assert.ok(Buffer.byteLength(post.options.body, "utf8") <= 2048);
+    assert.deepEqual({
+      method: post.options.method,
+      redirect: post.options.redirect,
+      accept: post.options.headers.Accept,
+      contentType: post.options.headers["Content-Type"],
+      hasAuthorization: Object.keys(post.options.headers).some((key) => key.toLowerCase() === "authorization"),
+    }, {
+      method: "POST", redirect: "manual", accept: "application/json",
+      contentType: "application/x-www-form-urlencoded;charset=UTF-8", hasAuthorization: false,
+    });
+    assert.equal(get.url, TEST_APPS_REDIRECT_URL);
+    assert.deepEqual({
+      method: get.options.method,
+      redirect: get.options.redirect,
+      headers: get.options.headers,
+      hasBody: Object.hasOwn(get.options, "body"),
+      sameDeadline: get.options.signal === post.options.signal,
+    }, {
+      method: "GET", redirect: "error", headers: { Accept: "application/json" },
+      hasBody: false, sameDeadline: true,
+    }, "The redirect hop must strip the signed body and reuse the one total deadline");
+  }
+
+  for (const invalidUrl of [
+    `http://script.google.com/macros/s/${TEST_APPS_DEPLOYMENT_ID}/exec`,
+    `${TEST_APPS_HEALTH_URL}?private=1`,
+    `${TEST_APPS_HEALTH_URL}/`,
+    `https://evil.example/macros/s/${TEST_APPS_DEPLOYMENT_ID}/exec`,
+  ]) {
+    let calls = 0;
+    const invalid = await workerModule.__test.readAppsScriptHealthSignals(
+      baseEnvironment(new MockOpsDB(), new MockConnectorDB(), { OPS_APPS_SCRIPT_HEALTH_URL: invalidUrl }),
+      base,
+      async () => { calls += 1; throw new Error("POISON_FETCH_TOUCHED"); },
+    );
+    assert.equal(calls, 0, "Invalid Apps URL configuration must fail before network access");
+    assert.equal(invalid.signals[0].alertKey, "APPS_HEALTH_UNAVAILABLE");
+  }
+  let reuseCalls = 0;
+  const reusedSecret = await workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(
+    new MockOpsDB(), new MockConnectorDB(), { OPS_CLOUDFLARE_QUEUES_READ_TOKEN: TEST_APPS_HEALTH_SECRET },
+  ), base, async () => { reuseCalls += 1; throw new Error("POISON_FETCH_TOUCHED"); });
+  assert.equal(reuseCalls, 0, "A reused Queue token must be rejected before network access");
+  assert.equal(reusedSecret.signals[0].alertKey, "APPS_HEALTH_UNAVAILABLE");
+  for (const invalidSecret of ["", "short", ` ${TEST_APPS_HEALTH_SECRET}`, `${TEST_APPS_HEALTH_SECRET}\n`]) {
+    let calls = 0;
+    const result = await workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(
+      new MockOpsDB(), new MockConnectorDB(), { OPS_APPS_SCRIPT_HEALTH_SHARED_SECRET: invalidSecret },
+    ), base, async () => { calls += 1; throw new Error("POISON_FETCH_TOUCHED"); });
+    assert.equal(calls, 0, "An invalid Apps health secret must fail before network access");
+    assert.equal(result.signals[0].alertKey, "APPS_HEALTH_UNAVAILABLE");
+  }
+  let invalidStateCalls = 0;
+  const invalidExpectedState = await workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(
+    new MockOpsDB(), new MockConnectorDB(), { OPS_EXPECT_APPS_LEAD_SHEET_STATE: "NOT_CHECKED" },
+  ), base, async () => { invalidStateCalls += 1; throw new Error("POISON_FETCH_TOUCHED"); });
+  assert.equal(invalidStateCalls, 0, "An invalid expected component state must fail before network access");
+  assert.equal(invalidExpectedState.signals[0].alertKey, "APPS_HEALTH_UNAVAILABLE");
+
+  for (const status of [200, 301, 307, 400, 429, 500, 503]) {
+    const route = scriptedFetch({ redirectStatus: status });
+    const result = await workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(), base, route.fetchImpl);
+    assert.equal(result.signals[0].alertKey, "APPS_HEALTH_UNAVAILABLE", `Initial HTTP ${status} must fail closed`);
+  }
+  for (const status of [401, 403, 404, 429, 500, 503]) {
+    const route = scriptedFetch({ finalStatus: status });
+    const result = await workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(), base, route.fetchImpl);
+    assert.equal(result.signals[0].alertKey, "APPS_HEALTH_UNAVAILABLE", `Final HTTP ${status} must fail closed`);
+  }
+  for (const [label, route] of [
+    ["malformed JSON", scriptedFetch({ rawBody: "not-json" })],
+    ["wrong content type", scriptedFetch({ contentType: "text/html" })],
+    ["oversized response", scriptedFetch({ rawBody: JSON.stringify({ padding: "x".repeat(9000) }) })],
+    ["second-hop network error", scriptedFetch({ finalError: new Error(`${TEST_PRIVATE_EMAIL}:private`) })],
+  ]) {
+    const result = await workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(), base, route.fetchImpl);
+    assert.equal(result.signals[0].alertKey, "APPS_HEALTH_UNAVAILABLE", `${label} must map to source unavailable`);
+  }
+  const firstHopFailure = await workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(), base,
+    async () => { throw new Error(`${TEST_PRIVATE_EMAIL}:private`); });
+  assert.equal(firstHopFailure.signals[0].alertKey, "APPS_HEALTH_UNAVAILABLE");
+
+  for (const [label, route] of [
+    ["untrusted redirect origin", scriptedFetch({ redirectLocation: "https://evil.example/macros/echo?token=private" })],
+    ["untrusted redirect path", scriptedFetch({ redirectLocation: "https://script.googleusercontent.com/not-echo?token=private" })],
+    ["oversized redirect", scriptedFetch({ redirectLocation: `${TEST_APPS_REDIRECT_URL}${"x".repeat(2100)}` })],
+    ["extra response field", scriptedFetch({ payloadOptions: { mutate(payload) { payload.extra = "private"; } } })],
+    ["missing response field", scriptedFetch({ payloadOptions: { mutate(payload) { delete payload.service; } } })],
+    ["response field order", scriptedFetch({ payloadOptions: { mutate(payload) {
+      const operation = payload.operation; delete payload.operation; payload.operation = operation;
+    } } })],
+    ["wrong response type", scriptedFetch({ payloadOptions: { mutate(payload) { payload.writes_performed = "0"; } } })],
+    ["bad signature", scriptedFetch({ payloadOptions: { invalidSignature: true } })],
+    ["nonce mismatch", scriptedFetch({ payloadOptions: { mutate(payload) { payload.request_nonce = crypto.randomUUID(); } } })],
+    ["timestamp echo mismatch", scriptedFetch({ payloadOptions: { mutate(payload) { payload.request_timestamp = "1000000000"; } } })],
+    ["environment mismatch", scriptedFetch({ payloadOptions: { mutate(payload) { payload.source_environment_code = "production"; } } })],
+    ["contract mismatch", scriptedFetch({ payloadOptions: { mutate(payload) { payload.ops_health_contract_version = "wrong"; } } })],
+    ["version mismatch", scriptedFetch({ payloadOptions: { mutate(payload) { payload.handler_version = "wrong"; } } })],
+    ["invalid state enum", scriptedFetch({ payloadOptions: { mutate(payload) { payload.lead_sheet_state = "UNKNOWN"; } } })],
+    ["stale response", scriptedFetch({ payloadOptions: { checkedAt: at(-301) } })],
+    ["future response", scriptedFetch({ payloadOptions: { checkedAt: at(301) } })],
+  ]) {
+    const result = await workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(), base, route.fetchImpl);
+    assert.deepEqual([result.sourceState, result.signals[0].alertKey],
+      ["UNAVAILABLE", "APPS_HEALTH_INTEGRITY_FAILURE"], `${label} must map to integrity failure`);
+    assert.doesNotMatch(JSON.stringify(result), /private\.person|evil\.example|token=private/,
+      "Raw Apps health failures must not escape into monitor evidence");
+  }
+  for (const checkedAt of [at(-300), at(300)]) {
+    const route = scriptedFetch({ payloadOptions: { checkedAt } });
+    const result = await workerModule.__test.fetchAppsScriptHealth(baseEnvironment(), base, route.fetchImpl);
+    assert.equal(result.configurationHealthy, true, "The exact +/-300-second freshness boundary is accepted");
+  }
+
+  for (const inspectionState of ["DISABLED", "FAILED"]) {
+    const route = scriptedFetch({ payloadOptions: { inspectionState } });
+    const result = await workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(), base, route.fetchImpl);
+    assert.deepEqual([result.sourceState, result.signals[0].alertKey, result.resolvableKeys.length],
+      ["UNAVAILABLE", "APPS_HEALTH_UNAVAILABLE", 0],
+    `Signed ${inspectionState} preserves every existing Apps incident and observes unavailable`);
+  }
+  const invalidDisabled = scriptedFetch({ payloadOptions: {
+    inspectionState: "DISABLED",
+    mutate(payload) { payload.lead_sheet_state = "READY"; },
+  } });
+  assert.equal((await workerModule.__test.readAppsScriptHealthSignals(
+    baseEnvironment(), base, invalidDisabled.fetchImpl)).signals[0].alertKey, "APPS_HEALTH_INTEGRITY_FAILURE");
+  const mismatchRoute = scriptedFetch({ payloadOptions: {
+    mutate(payload) { payload.worker_json_state = "CONFIGURED"; },
+  } });
+  const mismatch = await workerModule.__test.readAppsScriptHealthSignals(
+    baseEnvironment(), base, mismatchRoute.fetchImpl);
+  assert.deepEqual([
+    mismatch.sourceState,
+    mismatch.signals[0].alertKey,
+    [...mismatch.resolvableKeys].sort(),
+  ], ["AVAILABLE", "APPS_CONFIGURATION_UNHEALTHY",
+    ["APPS_HEALTH_INTEGRITY_FAILURE", "APPS_HEALTH_UNAVAILABLE"]]);
+  const healthyRoute = scriptedFetch();
+  const healthy = await workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(), base, healthyRoute.fetchImpl);
+  assert.deepEqual([healthy.sourceState, healthy.signals.length, [...healthy.resolvableKeys].sort()],
+    ["AVAILABLE", 0, ["APPS_CONFIGURATION_UNHEALTHY", "APPS_HEALTH_INTEGRITY_FAILURE",
+      "APPS_HEALTH_UNAVAILABLE"]]);
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error(`${TEST_PRIVATE_EMAIL}:private`); };
+  try {
+    const confirmationOps = new MockOpsDB();
+    const confirmationEnv = baseEnvironment(confirmationOps);
+    await workerModule.__test.runMonitor(confirmationEnv, base, base);
+    await workerModule.__test.runMonitor(confirmationEnv, at(239), at(239));
+    let incident = confirmationOps.incidents.find((row) => row.alert_key === "APPS_HEALTH_UNAVAILABLE");
+    assert.equal(incident.occurrence_count, 1,
+      "An Apps unavailable sample before 240 seconds cannot confirm the warning");
+    await workerModule.__test.runMonitor(confirmationEnv, at(479), at(479));
+    assert.equal(incident.occurrence_count, 2,
+      "An Apps unavailable sample separated by exactly 240 seconds confirms the warning");
+    validateCapturedConfirmedWarningStatements(confirmationOps.executed, "APPS_HEALTH_UNAVAILABLE", {
+      occurrenceCount: 2, firstSeenAt: base.toISOString(), lastSeenAt: at(479).toISOString(),
+    });
+    assert.doesNotMatch(JSON.stringify(confirmationOps.executed), /private\.person|example\.com/,
+      "Raw Apps transport errors must not enter operations evidence");
+
+    const exactOps = new MockOpsDB();
+    const exactEnv = baseEnvironment(exactOps);
+    await workerModule.__test.runMonitor(exactEnv, base, base);
+    await workerModule.__test.runMonitor(exactEnv, at(540), at(540));
+    assert.equal(exactOps.incidents.find((row) => row.alert_key === "APPS_HEALTH_UNAVAILABLE").occurrence_count, 2,
+      "The exact 540-second Apps confirmation gap remains consecutive");
+
+    const resetOps = new MockOpsDB();
+    const resetEnv = baseEnvironment(resetOps);
+    await workerModule.__test.runMonitor(resetEnv, base, base);
+    await workerModule.__test.runMonitor(resetEnv, at(541), at(541));
+    const reset = resetOps.incidents.find((row) => row.alert_key === "APPS_HEALTH_UNAVAILABLE");
+    assert.deepEqual([reset.occurrence_count, reset.first_seen_at], [1, at(541).toISOString()],
+      "An Apps warning gap above 540 seconds restarts confirmation");
+
+    const outOfOrderOps = new MockOpsDB();
+    const outOfOrderEnv = baseEnvironment(outOfOrderOps);
+    await workerModule.__test.runMonitor(outOfOrderEnv, at(600), at(600));
+    await workerModule.__test.runMonitor(outOfOrderEnv, base, base);
+    const outOfOrder = outOfOrderOps.incidents.find((row) => row.alert_key === "APPS_HEALTH_UNAVAILABLE");
+    assert.deepEqual([outOfOrder.occurrence_count, outOfOrder.first_seen_at, outOfOrder.last_seen_at],
+      [1, at(600).toISOString(), at(600).toISOString()],
+    "An older Apps observation cannot confirm or rewrite a newer warning sample");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const partialOps = new MockOpsDB();
+  for (const [id, alertKey, reason] of [
+    ["apps-unavailable-existing", "APPS_HEALTH_UNAVAILABLE", "APPS_HEALTH_SOURCE_UNAVAILABLE"],
+    ["apps-integrity-existing", "APPS_HEALTH_INTEGRITY_FAILURE", "APPS_HEALTH_AUTH_OR_CONTRACT_INVALID"],
+    ["apps-config-existing", "APPS_CONFIGURATION_UNHEALTHY", "APPS_RUNTIME_CONFIGURATION_UNHEALTHY"],
+  ]) {
+    partialOps.incidents.push({
+      alert_incident_id: id, environment_code: "sandbox", alert_key: alertKey,
+      severity_code: alertKey === "APPS_HEALTH_UNAVAILABLE" ? "WARNING" : "CRITICAL",
+      incident_state: "OPEN", occurrence_count: 1, latest_signal_count: 1, reason_code: reason,
+      first_seen_at: at(-600).toISOString(), last_seen_at: at(-600).toISOString(),
+      dedupe_until: at(3000).toISOString(), created_at: at(-600).toISOString(),
+      updated_at: at(-600).toISOString(), resolved_at: null,
+    });
+  }
+  const unavailableEnv = baseEnvironment(partialOps);
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error(`${TEST_PRIVATE_EMAIL}:private`); };
+  let failed;
+  try {
+    failed = await workerModule.__test.runMonitor(unavailableEnv, base, base);
+  } finally {
+    globalThis.fetch = savedFetch;
+  }
+  assert.equal(failed.sourceState, "UNAVAILABLE");
+  assert.ok(partialOps.incidents.every((row) => row.incident_state === "OPEN"),
+    "An unavailable Apps source resolves none of its existing incidents");
+  const mismatchForRecovery = scriptedFetch({ payloadOptions: {
+    mutate(payload) { payload.worker_json_state = "CONFIGURED"; },
+  } });
+  globalThis.fetch = mismatchForRecovery.fetchImpl;
+  try {
+    await workerModule.__test.runMonitor(unavailableEnv, at(300), at(300));
+  } finally {
+    globalThis.fetch = savedFetch;
+  }
+  assert.equal(partialOps.incidents.find((row) => row.alert_key === "APPS_HEALTH_UNAVAILABLE").incident_state,
+    "RESOLVED");
+  assert.equal(partialOps.incidents.find((row) => row.alert_key === "APPS_HEALTH_INTEGRITY_FAILURE").incident_state,
+    "RESOLVED");
+  assert.equal(partialOps.incidents.find((row) => row.alert_key === "APPS_CONFIGURATION_UNHEALTHY").incident_state,
+    "OPEN", "A valid mismatched inspection resolves source/integrity but keeps configuration unhealthy");
+  const healthyForRecovery = scriptedFetch({ payloadOptions: { checkedAt: at(600) } });
+  globalThis.fetch = healthyForRecovery.fetchImpl;
+  try {
+    await workerModule.__test.runMonitor(unavailableEnv, at(600), at(600));
+  } finally {
+    globalThis.fetch = savedFetch;
+  }
+  assert.equal(partialOps.incidents.filter((row) => row.incident_state !== "RESOLVED").length, 0,
+    "A fully healthy signed inspection resolves all Apps-specific incidents");
+  assert.doesNotMatch(JSON.stringify(partialOps.executed),
+    /script\.google|script\.googleusercontent|user_content_key|fixture-separate-secret|request_signature|response_signature/,
+    "Apps URLs, redirect tokens, secrets and signatures must not enter operations evidence");
+
+  const suppressed = createAlertFixture();
+  insertAlertIncident(suppressed.databasePath, {
+    id: "apps-warning-unconfirmed", alertKey: "APPS_HEALTH_UNAVAILABLE", severity: "WARNING",
+    occurrenceCount: 1, firstSeenAt: base.toISOString(), lastSeenAt: base.toISOString(),
+  });
+  await workerModule.__test.runAlertEngine(suppressed.env, base);
+  assert.deepEqual([suppressed.owner.calls.length, suppressed.backup.calls.length], [0, 0],
+    "A single Apps unavailable warning must not create an external delivery");
+  sqlite(suppressed.databasePath, `
+    UPDATE alert_incidents SET occurrence_count=2, last_seen_at='${at(300).toISOString()}',
+      updated_at='${at(300).toISOString()}' WHERE alert_incident_id='apps-warning-unconfirmed';
+  `);
+  await workerModule.__test.runAlertEngine(suppressed.env, at(300));
+  assert.deepEqual([suppressed.owner.calls.length, suppressed.backup.calls.length], [1, 1],
+    "A confirmed Apps unavailable warning creates one role-isolated delivery per owner role");
+}
+
+function validateCapturedConfirmedWarningStatements(executed, alertKey, expected) {
+  const databasePath = path.join(tempRoot, `ops-captured-confirmed-warning-${Date.now()}.sqlite`);
   applyOpsMigrations(databasePath);
   for (const entry of executed) {
-    assert.ok(entry.sql, `Missing captured Queue SQL for ${entry.op}`);
+    assert.ok(entry.sql, `Missing captured confirmed-warning SQL for ${entry.op}`);
     sqlite(databasePath, bindSql(entry.sql, entry.values));
   }
   const row = parseRows(sqlite(databasePath, `
     SELECT occurrence_count, first_seen_at, last_seen_at
       FROM alert_incidents
-     WHERE alert_key='QUEUE_BACKLOG_STALE' AND incident_state='OPEN';
+     WHERE alert_key=${sqlLiteral(alertKey)} AND incident_state='OPEN';
   `))[0];
   assert.deepEqual(row, [String(expected.occurrenceCount), expected.firstSeenAt, expected.lastSeenAt],
-    "Captured Queue warning SQL must preserve the reviewed confirmation behavior on real SQLite");
+    "Captured confirmed-warning SQL must preserve the reviewed behavior on real SQLite");
   assert.equal(sqlite(databasePath, "PRAGMA integrity_check;").trim(), "ok");
   assert.equal(sqlite(databasePath, "PRAGMA foreign_key_check;").trim(), "");
 }
@@ -1668,7 +2236,7 @@ function createAlertFixture({ ownerOutcomes = [], backupOutcomes = [], failSentF
   const db = new SqliteD1(databasePath, { failSentFinalizations, mutateCandidates, beforeClaimOnce });
   const env = {
     OPS_ENVIRONMENT: "sandbox",
-    OPS_SCHEMA_VERSION: "3",
+    OPS_SCHEMA_VERSION: "4",
     OPS_MONITORING_ENABLED: "true",
     OPS_ALERTS_ENABLED: "true",
     OPS_ALERT_DEDUPE_SECONDS: "3600",
@@ -1698,6 +2266,9 @@ function insertAlertIncident(databasePath, {
     QUEUE_METRICS_UNAVAILABLE: "QUEUE_METRICS_SOURCE_UNAVAILABLE",
     QUEUE_BACKLOG_STALE: "QUEUE_MESSAGE_AGE_STALE",
     QUEUE_DLQ_NONEMPTY: "QUEUE_DEAD_LETTER_NONEMPTY",
+    APPS_HEALTH_UNAVAILABLE: "APPS_HEALTH_SOURCE_UNAVAILABLE",
+    APPS_HEALTH_INTEGRITY_FAILURE: "APPS_HEALTH_AUTH_OR_CONTRACT_INVALID",
+    APPS_CONFIGURATION_UNHEALTHY: "APPS_RUNTIME_CONFIGURATION_UNHEALTHY",
   }[alertKey];
   assert.ok(reasonCode, `Missing test reason for ${alertKey}`);
   const dedupeUntil = new Date(Date.parse(firstSeenAt) + 3600 * 1000).toISOString();
@@ -1747,7 +2318,7 @@ async function validateAlertBehavior(workerModule) {
   await assert.rejects(workerModule.__test.runAlertEngine({
     OPS_DB: poisonDb,
     OPS_ENVIRONMENT: "sandbox",
-    OPS_SCHEMA_VERSION: "3",
+    OPS_SCHEMA_VERSION: "4",
     OPS_ALERT_FROM_EMAIL: TEST_ALERT_FROM,
   }, base), /OPS_ALERT_BINDING_NOT_CONFIGURED/);
   assert.equal(poisonPrepareCalls, 0, "Missing email bindings must fail before a D1 operation");
@@ -1755,7 +2326,7 @@ async function validateAlertBehavior(workerModule) {
   await assert.rejects(workerModule.__test.runAlertEngine({
     OPS_DB: poisonDb,
     OPS_ENVIRONMENT: "sandbox",
-    OPS_SCHEMA_VERSION: "3",
+    OPS_SCHEMA_VERSION: "4",
     OPS_ALERT_FROM_EMAIL: TEST_ALERT_FROM,
     OPS_OWNER_EMAIL: sharedBinding,
     OPS_BACKUP_OWNER_EMAIL: sharedBinding,
@@ -1764,7 +2335,7 @@ async function validateAlertBehavior(workerModule) {
   await assert.rejects(workerModule.__test.runAlertEngine({
     OPS_DB: poisonDb,
     OPS_ENVIRONMENT: "unknown",
-    OPS_SCHEMA_VERSION: "3",
+    OPS_SCHEMA_VERSION: "4",
   }, base), /OPS_ENVIRONMENT_INVALID/);
   assert.equal(poisonPrepareCalls, 0, "An invalid alert environment must fail before D1 is touched");
 
@@ -2279,6 +2850,7 @@ function applyOpsMigrations(databasePath) {
     "square-ops/migrations/0001_ops_state.sql",
     "square-ops/migrations/0002_alert_delivery_engine.sql",
     "square-ops/migrations/0003_queue_monitoring_alerts.sql",
+    "square-ops/migrations/0004_apps_script_health_alerts.sql",
   ]) {
     applyOpsMigrationAtomically(databasePath, migrationPath);
   }
@@ -2334,6 +2906,7 @@ try {
   validateMigration();
   validateAlertMigrationUpgrade();
   validateQueueAlertMigrationUpgrade();
+  validateAppsHealthAlertMigrationUpgrade();
   await validateSourceContract();
   await validateWorkerBoundary();
   validateDryRuns();
