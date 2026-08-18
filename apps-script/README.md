@@ -64,6 +64,13 @@ Malformed, duplicate, oversized, stale, unsigned or incorrectly signed requests 
 
 Run `node scripts/validate-apps-health.mjs` from the repository root before any reviewed Apps Script release. It proves exact request and response ordering/signatures, the inclusive ±300-second freshness boundary, strict content/body/duplicate handling, separate-secret enforcement, authentication-before-Sheet access, repeat-request read-only behavior, two batched ledger-format reads per inspection, all signed inspection states and the no-write/no-log/no-provider/no-PII boundary.
 
+### Verified sandbox Apps-health deployment — August 18, 2026
+
+- The existing sandbox web-app deployment now serves Version `3`, description `sandbox-ledger-v3-2026-08-18-apps-health-disabled`, without changing its URL, execute-as owner or `Anyone` access.
+- `OPS_HEALTH_ENABLED` is exact `false` and `OPS_HEALTH_ENVIRONMENT` is `sandbox`. `OPS_HEALTH_SHARED_SECRET` is absent, so no signed health inspection can run.
+- The v1 health contract marker is present in the saved code, while the public GET still returns the existing v3.2 form-service contract. No signed health POST was sent, so the health path made no Sheet read, external-provider call or write.
+- Activation remains blocked until the existing deployment URL is configured in the operations Worker as `OPS_APPS_SCRIPT_HEALTH_URL`, a new dedicated secret is installed as Apps `OPS_HEALTH_SHARED_SECRET` and Worker `OPS_APPS_SCRIPT_HEALTH_SHARED_SECRET`, cold and warm signed checks both finish under the five-second Worker deadline, all disabled/healthy/failure/mismatch/recovery cases reconcile, and `OPS_HEALTH_ENABLED=false`, `OPS_APPS_SCRIPT_MONITORING_ENABLED=false` and `OPS_MONITORING_ENABLED=false` are restored afterward.
+
 ### Verified production snapshot — August 10, 2026
 
 - The existing web-app URL serves Apps Script Version 11 and reports `spartan-forms-v3.1-2026-08-10`.
