@@ -13,7 +13,10 @@ CREATE TABLE IF NOT EXISTS monitor_runs (
   warning_count INTEGER NOT NULL DEFAULT 0 CHECK (warning_count >= 0),
   critical_count INTEGER NOT NULL DEFAULT 0 CHECK (critical_count >= 0),
   oldest_signal_at TEXT,
-  summary_code TEXT NOT NULL,
+  summary_code TEXT NOT NULL CHECK (
+    length(summary_code) BETWEEN 3 AND 80 AND
+    summary_code NOT GLOB '*[^A-Z0-9_]*'
+  ),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   CHECK (
@@ -35,11 +38,18 @@ CREATE INDEX IF NOT EXISTS monitor_runs_state_idx
 CREATE TABLE IF NOT EXISTS alert_incidents (
   alert_incident_id TEXT PRIMARY KEY,
   environment_code TEXT NOT NULL CHECK (environment_code IN ('production', 'sandbox')),
-  alert_key TEXT NOT NULL,
+  alert_key TEXT NOT NULL CHECK (
+    length(alert_key) BETWEEN 3 AND 80 AND
+    alert_key NOT GLOB '*[^A-Z0-9_]*'
+  ),
   severity_code TEXT NOT NULL CHECK (severity_code IN ('WARNING', 'CRITICAL')),
   incident_state TEXT NOT NULL CHECK (incident_state IN ('OPEN', 'ACKNOWLEDGED', 'RESOLVED')),
   occurrence_count INTEGER NOT NULL DEFAULT 1 CHECK (occurrence_count > 0),
-  reason_code TEXT NOT NULL,
+  latest_signal_count INTEGER NOT NULL DEFAULT 1 CHECK (latest_signal_count > 0),
+  reason_code TEXT NOT NULL CHECK (
+    length(reason_code) BETWEEN 3 AND 80 AND
+    reason_code NOT GLOB '*[^A-Z0-9_]*'
+  ),
   first_seen_at TEXT NOT NULL,
   last_seen_at TEXT NOT NULL,
   dedupe_until TEXT NOT NULL,

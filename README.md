@@ -20,7 +20,7 @@ This repository contains the static website published at [spartandrink.com](http
 - `docs/SQUARE-JOURNEY-PILOT.md` — the manual-first Project 2 plan for linking website claims to Square redemptions and repeat visits before referral/reward automation.
 - `square-worker/` — the isolated, default-off website-to-Square connector candidate; it is not deployed or authorized for production.
 - `docs/SQUARE-CONNECTOR-ROLLOUT.md` — the connector's security, privacy, sandbox, canary and rollback gates.
-- `square-ops/` — the scheduled-only, default-off foundation for connector monitoring, owner alerts, private backups and restore evidence; it has no public route and is not deployed.
+- `square-ops/` — the scheduled-only, default-off operations plane; its aggregate D1 monitor is implemented locally, while alerts/backups/restores remain fail-closed and the service has no public route or deployment.
 - `docs/SQUARE-OPERATIONS-RUNBOOK.md` — the operations plane's non-PII data boundary, alert/backup design, activation gates and rollback order.
 - `docs/MARKETING-MEASUREMENT-DICTIONARY.md` — canonical customer milestones, source-of-truth boundaries, KPI formulas, cohorts, alerts and staged data architecture for the marketing portfolio.
 - `docs/EXTERNAL-CONFIGURATION.md` — dated, non-secret evidence of the current Cloudflare, Google and social-link configuration.

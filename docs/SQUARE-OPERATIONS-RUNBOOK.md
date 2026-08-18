@@ -2,7 +2,7 @@
 
 Last reviewed: August 17, 2026
 
-Status: **repository scaffold only; no service, resource, alert, backup or restore automation exists.** Project 2 production activation remains blocked.
+Status: **the bounded D1-only monitor is implemented and locally validated; no operations service/resource, alert sender, recurring backup or restore automation exists.** Project 2 production activation remains blocked.
 
 ## Purpose and authority
 
@@ -15,7 +15,7 @@ The Square connector ledger remains authoritative for claims, provider links, pu
 - Both Wrangler configurations contain placeholder resources and every `OPS_*_ENABLED` flag is `false`.
 - The Worker has only a scheduled handler and no route, `fetch` handler or `workers.dev` exposure.
 - With missing or false flags, it returns without touching any binding, scheduling background work or making a network request.
-- Any true flag fails closed because the monitoring source, alert transport, backup executor and restore executor have not been implemented.
+- Monitoring runs only when its flag is true and the exact five-minute cron fires. The alert, backup and restore flags remain fail-closed because those lanes are not implemented.
 - The migration is local repository design only. It has not been applied to Cloudflare.
 - No connector configuration, sandbox runtime flag, Queue, webhook, Apps Script property or production account is changed by this scaffold.
 
@@ -39,17 +39,21 @@ The checked-in schedules reserve a five-minute control loop and a 03:15 UTC nigh
 
 ### Five-minute monitor lane
 
-Future implementation must read a reviewed, bounded connector signal contract and calculate:
+The implemented evaluator uses four fixed, aggregate-only connector D1 queries. It does not select payloads, cursor values, customer/claim/submission/coupon/reference/order/payment/refund IDs or contact data. It currently evaluates:
 
-- `DEAD` rows and DLQ backlog.
-- Oldest Queue/retry age, retry-attempt thresholds and stale leases.
-- Square authentication/authorization and Square/Apps throttling/service failures.
-- Invalid-signature counts without storing signatures or request bodies.
-- Rejected discount/customer combinations, duplicate-redemption races and ledger/group drift.
-- Reconciliation heartbeat freshness.
-- Backup and restore-test freshness from operations D1.
+- overdue `PENDING`/`ENQUEUED` webhook work from `updated_at`;
+- overdue `RETRY` work from `available_at` without penalizing legitimate future backoff;
+- expired `PROCESSING` work from `lease_expires_at`;
+- stale pending/processing/retry outbox work and any `DEAD` outbox count;
+- recent rejected webhook counts classified inside the aggregate query into fixed warning/critical categories, so raw rejection codes never enter monitor results or operations D1;
+- reconciliation overflow newer than the last successful reconciliation; and
+- reconciliation heartbeat freshness only when `OPS_EXPECT_RECONCILIATION=true`.
 
-The source contract must expose aggregates and bounded codes, not raw business rows. A monitor run is not `HEALTHY` when its source is missing or stale.
+The checked-in warning and critical overdue thresholds are 10 and 30 minutes. Monitoring uses actual observation time, while preserving the scheduled time for audit. A missing/query-failed/malformed signal source records `FAILED/UNAVAILABLE` and cannot clear another active incident. Monotonic run guards prevent an older observation that finishes late from reopening or resolving a newer incident. A later successful reconciliation clears an older overflow marker.
+
+One active incident is retained per environment/fixed alert key. Severity can escalate within that episode and intentionally does not downgrade until the condition verifies clear; recurrence after resolution creates a new historical episode. `occurrence_count` counts monitor observations and `latest_signal_count` records the latest aggregate affected-row count. Monitor-run rows are retained for 30 days. `dedupe_until` is present for the future delivery lane but does not send or suppress anything yet.
+
+Not yet covered by this D1-only slice: Cloudflare Queue/DLQ depth, external credential/provider health, Apps Script probing, alert delivery, backup/restore freshness, or ledger/group comparison beyond the bounded connector codes. These require separately reviewed sources/transports. A monitor run is never `HEALTHY` when its connector source is unavailable.
 
 ### Alert lane
 
@@ -112,12 +116,12 @@ The operations Worker must never be a prerequisite for disabling the customer-fa
 
 ## Activation checklist
 
-All items are currently incomplete:
+Repository design items may be complete while every live activation item remains incomplete:
 
-- [ ] Reviewed operational-signal schema exists and contains no PII/provider/customer identifiers.
+- [x] Reviewed aggregate operational-signal schema and local monitor implementation contain no persisted PII/provider/customer identifiers.
 - [ ] Separate sandbox `OPS_DB`, source binding and private backup bucket are provisioned with least privilege.
 - [ ] All migrations pass local validation and isolated remote application.
-- [ ] Five-minute monitoring proves healthy, warning, critical, stale-source and recovery cases.
+- [ ] Five-minute monitoring proves healthy, warning, critical, stale-source, out-of-order and recovery cases in the isolated remote sandbox. Local deterministic coverage passes only the repository gate.
 - [ ] Owner plus backup-owner delivery, dedupe, failure and recovery notices are proven end to end.
 - [ ] Nightly export, checksum, retention and 26/48-hour freshness alerts are proven.
 - [ ] Quarterly restore, row/unique-key reconciliation, deletion-manifest replay and cleanup are proven.
@@ -127,4 +131,4 @@ All items are currently incomplete:
 
 ## Definition of done
 
-The operations plane is done only when it can detect and externally report the required connector failures, maintain verified private backups, prove isolated restoration and clean rollback, all without PII duplication or a public surface. Every alert and backup must have age, delivery/integrity and recovery evidence. Default-off must remain a tested zero-operation state. This scaffold alone satisfies none of the production activation gates.
+The operations plane is done only when it can detect and externally report the required connector failures, maintain verified private backups, prove isolated restoration and clean rollback, all without PII duplication or a public surface. Every alert and backup must have age, delivery/integrity and recovery evidence. Default-off must remain a tested zero-operation state. The local monitor implementation closes a repository-design gate only; it does not approve deployment or production activation.
