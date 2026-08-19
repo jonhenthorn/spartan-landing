@@ -1149,6 +1149,9 @@ async function validateWorkerBoundary() {
   assert.match(source, /method: "GET"/, "Queue metrics must use a read-only GET request");
   assert.match(source, /const APPS_HEALTH_TIMEOUT_MS = 5000;/,
     "Apps health must retain one reviewed five-second deadline");
+  assert.match(source,
+    /providedTimeoutSignal instanceof AbortSignal[\s\S]*?: AbortSignal\.timeout\(APPS_HEALTH_TIMEOUT_MS\)/,
+    "Scheduled and normal Apps health calls must retain the five-second default deadline");
   for (const outcomeCode of [
     "APPS_HEALTH_SIGNED_DISABLED",
     "APPS_HEALTH_SIGNED_FAILED",
@@ -1969,6 +1972,29 @@ async function validateAppsScriptHealthMonitorBehavior(workerModule) {
   });
   assert.deepEqual(Object.keys(await buildPayload(orderedFixtureParams)), [...responseFields, "response_signature"],
     "The Apps response fixture must use the exact production key insertion order");
+
+  const originalAppsTimeout = AbortSignal.timeout;
+  const defaultDeadlineRequests = [];
+  AbortSignal.timeout = (milliseconds) => {
+    defaultDeadlineRequests.push(milliseconds);
+    return new AbortController().signal;
+  };
+  try {
+    const defaultRoute = scriptedFetch();
+    await workerModule.__test.fetchAppsScriptHealth(baseEnvironment(), base, defaultRoute.fetchImpl);
+  } finally {
+    AbortSignal.timeout = originalAppsTimeout;
+  }
+  assert.deepEqual(defaultDeadlineRequests, [5000],
+    "A scheduled/default Apps request must create exactly one five-second total deadline");
+
+  const providedSignal = new AbortController().signal;
+  const providedRoute = scriptedFetch();
+  await workerModule.__test.fetchAppsScriptHealth(
+    baseEnvironment(), base, providedRoute.fetchImpl, providedSignal);
+  assert.equal(providedRoute.calls.length, 2);
+  assert.ok(providedRoute.calls.every(({ options }) => options.signal === providedSignal),
+    "A local diagnostic may inject one signal that both Google hops reuse");
 
   for (const redirectStatus of [302, 303]) {
     const route = scriptedFetch({ redirectStatus });

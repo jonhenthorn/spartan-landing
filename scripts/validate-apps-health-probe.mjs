@@ -47,7 +47,12 @@ function clock(start = 0, end = 123) {
   return () => values.shift();
 }
 
-function scriptedFetch({ inspectionState = "COMPLETE", corruptSignature = false } = {}) {
+function scriptedFetch({
+  inspectionState = "COMPLETE",
+  corruptSignature = false,
+  firstError = null,
+  finalError = null,
+} = {}) {
   let requestFields;
   let callCount = 0;
   return async (url, options = {}) => {
@@ -61,6 +66,7 @@ function scriptedFetch({ inspectionState = "COMPLETE", corruptSignature = false 
       assert.equal(requestFields.source_environment_code, "sandbox");
       assert.match(requestFields.request_nonce, /^[0-9a-f-]{36}$/);
       assert.match(requestFields.request_signature, /^[0-9a-f]{64}$/);
+      if (firstError) throw firstError;
       return new Response(null, { status: 302, headers: { Location: FIXTURE_REDIRECT } });
     }
     assert.equal(callCount, 2);
@@ -68,6 +74,7 @@ function scriptedFetch({ inspectionState = "COMPLETE", corruptSignature = false 
     assert.equal(options.method, "GET");
     assert.equal(options.body, undefined);
     assert.equal(options.redirect, "error");
+    if (finalError) throw finalError;
 
     const complete = inspectionState === "COMPLETE";
     const payload = {
@@ -145,6 +152,70 @@ assert.equal(budget.ok, false);
 assert.equal(budget.result_code, "APPS_HEALTH_PROBE_BUDGET_EXCEEDED");
 assert.equal(budget.within_5000ms, false);
 
+const lastAcceptedMillisecond = await runAppsHealthProbe({
+  expectation: "healthy",
+  environment: baseEnvironment(),
+  fetchImpl: scriptedFetch(),
+  now: FIXTURE_NOW,
+  clock: clock(0, 4999),
+});
+assert.equal(lastAcceptedMillisecond.ok, true);
+assert.equal(lastAcceptedMillisecond.within_5000ms, true);
+
+for (const [elapsedMs, within5000ms, within10000ms, resultCode] of [
+  [4999, true, true, "APPS_HEALTH_DIAGNOSTIC_MATCHED_WITHIN_5000MS"],
+  [5000, false, true, "APPS_HEALTH_DIAGNOSTIC_MATCHED_OUTSIDE_5000MS"],
+  [9999, false, true, "APPS_HEALTH_DIAGNOSTIC_MATCHED_OUTSIDE_5000MS"],
+  [10000, false, false, "APPS_HEALTH_DIAGNOSTIC_CEILING_EXCEEDED"],
+]) {
+  const diagnostic = await runAppsHealthProbe({
+    expectation: "healthy",
+    diagnostic: true,
+    environment: baseEnvironment(),
+    fetchImpl: scriptedFetch(),
+    now: FIXTURE_NOW,
+    clock: clock(0, elapsedMs),
+  });
+  assert.deepEqual([
+    diagnostic.ok,
+    diagnostic.diagnostic_only,
+    diagnostic.within_5000ms,
+    diagnostic.within_10000ms,
+    diagnostic.result_code,
+  ], [false, true, within5000ms, within10000ms, resultCode],
+  `Diagnostic evidence at ${elapsedMs} ms must never become acceptance`);
+}
+
+const originalTimeout = AbortSignal.timeout;
+const requestedTimeouts = [];
+AbortSignal.timeout = (milliseconds) => {
+  requestedTimeouts.push(milliseconds);
+  return new AbortController().signal;
+};
+try {
+  const normalDeadline = await runAppsHealthProbe({
+    expectation: "healthy",
+    environment: baseEnvironment(),
+    fetchImpl: scriptedFetch(),
+    now: FIXTURE_NOW,
+    clock: clock(),
+  });
+  const diagnosticDeadline = await runAppsHealthProbe({
+    expectation: "healthy",
+    diagnostic: true,
+    environment: baseEnvironment(),
+    fetchImpl: scriptedFetch(),
+    now: FIXTURE_NOW,
+    clock: clock(),
+  });
+  assert.equal(normalDeadline.ok, true);
+  assert.equal(diagnosticDeadline.ok, false);
+} finally {
+  AbortSignal.timeout = originalTimeout;
+}
+assert.deepEqual(requestedTimeouts, [5000, 10000],
+  "Only diagnostic mode may replace the normal five-second deadline with a ten-second ceiling");
+
 const unavailable = await runAppsHealthProbe({
   expectation: "healthy",
   environment: baseEnvironment(),
@@ -155,9 +226,68 @@ const unavailable = await runAppsHealthProbe({
 assert.equal(unavailable.result_code, "OPS_APPS_HEALTH_UNAVAILABLE");
 assert.equal(Object.hasOwn(unavailable, "outcome_code"), false,
   "Internal scheduled-stage outcomes must not change direct probe output");
+assert.equal(Object.hasOwn(unavailable, "failure_stage_code"), false,
+  "Normal direct probe failures must not expose diagnostic stage evidence");
+assert.equal(Object.hasOwn(unavailable, "diagnostic_only"), false);
+assert.equal(Object.hasOwn(unavailable, "within_10000ms"), false);
 assert.doesNotMatch(JSON.stringify(unavailable), /APPS_HEALTH_(?:FIRST|SECOND)_HOP/,
   "Direct probe failures must retain their existing bounded public code");
 assert.doesNotMatch(JSON.stringify(unavailable), /private-user|private-url|private-secret|@/);
+
+for (const [label, fetchImpl, failureStageCode] of [
+  ["first-hop unavailable", scriptedFetch({ firstError: new Error("private first-hop detail") }),
+    "APPS_HEALTH_FIRST_HOP_UNAVAILABLE"],
+  ["second-hop unavailable", scriptedFetch({ finalError: new Error("private second-hop detail") }),
+    "APPS_HEALTH_SECOND_HOP_UNAVAILABLE"],
+]) {
+  const diagnosticFailure = await runAppsHealthProbe({
+    expectation: "healthy",
+    diagnostic: true,
+    environment: baseEnvironment(),
+    fetchImpl,
+    now: FIXTURE_NOW,
+    clock: clock(),
+  });
+  assert.deepEqual([
+    diagnosticFailure.ok,
+    diagnosticFailure.diagnostic_only,
+    diagnosticFailure.result_code,
+    diagnosticFailure.failure_stage_code,
+  ], [false, true, "OPS_APPS_HEALTH_UNAVAILABLE", failureStageCode], label);
+  assert.doesNotMatch(JSON.stringify(diagnosticFailure), /private|detail/);
+}
+
+const withImmediateDiagnosticTimeout = async (fetchImpl) => {
+  const savedTimeout = AbortSignal.timeout;
+  AbortSignal.timeout = () => {
+    const controller = new AbortController();
+    controller.abort();
+    return controller.signal;
+  };
+  try {
+    return await runAppsHealthProbe({
+      expectation: "healthy",
+      diagnostic: true,
+      environment: baseEnvironment(),
+      fetchImpl,
+      now: FIXTURE_NOW,
+      clock: clock(),
+    });
+  } finally {
+    AbortSignal.timeout = savedTimeout;
+  }
+};
+for (const [label, fetchImpl, failureStageCode] of [
+  ["first-hop timeout", scriptedFetch({ firstError: new Error("private timeout detail") }),
+    "APPS_HEALTH_FIRST_HOP_TIMEOUT"],
+  ["second-hop timeout", scriptedFetch({ finalError: new Error("private timeout detail") }),
+    "APPS_HEALTH_SECOND_HOP_TIMEOUT"],
+]) {
+  const diagnosticFailure = await withImmediateDiagnosticTimeout(fetchImpl);
+  assert.equal(diagnosticFailure.failure_stage_code, failureStageCode, label);
+  assert.equal(diagnosticFailure.diagnostic_only, true);
+  assert.doesNotMatch(JSON.stringify(diagnosticFailure), /private|detail/);
+}
 
 const integrity = await runAppsHealthProbe({
   expectation: "healthy",
@@ -167,6 +297,19 @@ const integrity = await runAppsHealthProbe({
   clock: clock(),
 });
 assert.equal(integrity.result_code, "OPS_APPS_HEALTH_INTEGRITY_FAILURE");
+
+const diagnosticIntegrity = await runAppsHealthProbe({
+  expectation: "healthy",
+  diagnostic: true,
+  environment: baseEnvironment(),
+  fetchImpl: scriptedFetch({ corruptSignature: true }),
+  now: FIXTURE_NOW,
+  clock: clock(),
+});
+assert.equal(diagnosticIntegrity.result_code, "OPS_APPS_HEALTH_INTEGRITY_FAILURE");
+assert.equal(diagnosticIntegrity.diagnostic_only, true);
+assert.equal(Object.hasOwn(diagnosticIntegrity, "failure_stage_code"), false,
+  "Integrity remains its existing critical fixed code rather than a transport-stage claim");
 
 let poisonedFetchCalls = 0;
 const invalidExpectation = await runAppsHealthProbe({
@@ -180,8 +323,31 @@ assert.equal(poisonedFetchCalls, 0);
 assert.equal(probeTest.parseExpectation(["--expect=healthy"]), "healthy");
 assert.equal(probeTest.parseExpectation(["--expect=healthy", "extra"]), "");
 assert.equal(probeTest.parseExpectation(["--expect=healthy", "--expect=failed"]), "");
+assert.deepEqual(probeTest.parseProbeArguments(["--expect=healthy"]),
+  { expectation: "healthy", diagnostic: false });
+assert.deepEqual(probeTest.parseProbeArguments(["--expect=healthy", "--diagnostic"]),
+  { expectation: "healthy", diagnostic: true });
+assert.deepEqual(probeTest.parseProbeArguments(["--diagnostic", "--expect=disabled"]),
+  { expectation: "disabled", diagnostic: true });
+for (const invalidArguments of [
+  ["--diagnostic"],
+  ["--expect=healthy", "--diagnostic", "--diagnostic"],
+  ["--expect=healthy", "--diagnostic", "extra"],
+  ["--expect=healthy", "--expect=failed", "--diagnostic"],
+]) {
+  assert.deepEqual(probeTest.parseProbeArguments(invalidArguments),
+    { expectation: "", diagnostic: false });
+}
 assert.deepEqual(Object.keys(probeTest.PROBE_EXPECTATIONS), ["disabled", "failed", "healthy", "mismatch"]);
 assert.equal(probeTest.SANDBOX_DEFAULTS.OPS_ENVIRONMENT, "sandbox");
+assert.equal(probeTest.PROBE_ACCEPTANCE_BUDGET_MS, 5000);
+assert.equal(probeTest.PROBE_DIAGNOSTIC_CEILING_MS, 10000);
+assert.deepEqual([...probeTest.SAFE_FAILURE_STAGE_CODES], [
+  "APPS_HEALTH_FIRST_HOP_TIMEOUT",
+  "APPS_HEALTH_FIRST_HOP_UNAVAILABLE",
+  "APPS_HEALTH_SECOND_HOP_TIMEOUT",
+  "APPS_HEALTH_SECOND_HOP_UNAVAILABLE",
+]);
 
 const source = fs.readFileSync(new URL("./probe-apps-health.mjs", import.meta.url), "utf8");
 assert.doesNotMatch(source, /console\.(?:log|error)|error\.message|error\.stack/);

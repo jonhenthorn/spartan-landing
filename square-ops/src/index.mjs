@@ -1191,7 +1191,7 @@ async function readAppsScriptHealthSignals(env, now, fetchImpl = globalThis.fetc
   });
 }
 
-async function fetchAppsScriptHealth(env, now, fetchImpl) {
+async function fetchAppsScriptHealth(env, now, fetchImpl, providedTimeoutSignal = null) {
   let config;
   try {
     config = validateAppsScriptHealthConfiguration(env);
@@ -1218,7 +1218,9 @@ async function fetchAppsScriptHealth(env, now, fetchImpl) {
     throw appsHealthUnavailableError(APPS_HEALTH_OUTCOME_CODES.FIRST_HOP_UNAVAILABLE);
   }
 
-  const timeoutSignal = AbortSignal.timeout(APPS_HEALTH_TIMEOUT_MS);
+  const timeoutSignal = providedTimeoutSignal instanceof AbortSignal
+    ? providedTimeoutSignal
+    : AbortSignal.timeout(APPS_HEALTH_TIMEOUT_MS);
   let redirectResponse;
   try {
     redirectResponse = await fetchImpl(config.url, {

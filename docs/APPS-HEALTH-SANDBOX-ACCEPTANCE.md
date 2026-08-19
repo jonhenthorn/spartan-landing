@@ -29,7 +29,7 @@ The exact-semantic optimization removes duplicate/disabled property reads and re
 
 ## Purpose
 
-Prove that the isolated operations Worker can authenticate and interpret the sandbox Apps Script read-only health contract without exposing a credential, reading customer cell values, writing a Sheet, enabling alerts or touching production. The health path does inspect bounded header, formula-presence and number-format metadata. The direct probe is mandatory because D1 intentionally records only fixed signal classes; it cannot distinguish a signed `DISABLED` or `FAILED` response from a timeout, nor prove the per-call five-second budget.
+Prove that the isolated operations Worker can authenticate and interpret the sandbox Apps Script read-only health contract without exposing a credential, reading customer cell values, writing a Sheet, enabling alerts or touching production. The health path does inspect bounded header, formula-presence and number-format metadata. The direct probe is mandatory because D1 intentionally records only fixed source-stage classes; it does not expose the signed envelope or prove direct-call timing against the five-second acceptance budget.
 
 Expected supervised duration: **45–55 minutes**. Begin just after a five-minute boundary so credential setup has the largest safe window before the next cron.
 
@@ -106,6 +106,14 @@ The owner starts an isolated subshell, loads the existing URL and dedicated secr
 The subshell and traps remove both values on success, error or interruption. Do not run the probe by exporting credentials in the long-lived parent shell.
 
 Allowed expectations are exact: `disabled`, `failed`, `healthy` and `mismatch`. A successful probe returns only sandbox state, elapsed milliseconds and a fixed result code. Any nonzero exit stops the corresponding acceptance step.
+
+`--diagnostic` is a local stopped-run tool, not another acceptance attempt. Use it only after the normal probe has stopped the worksheet, rollback requirements are satisfied and the owner separately authorizes a diagnostic rerun with fresh controlled credential handling:
+
+```zsh
+node scripts/probe-apps-health.mjs --expect=disabled --diagnostic
+```
+
+Normal probes and scheduled monitoring retain the same five-second transport deadline and exact `<5000 ms` pass policy. Diagnostic mode alone uses one `10000 ms` ceiling, always returns `ok:false` and exits nonzero. A valid signed result from `5000 ms` through `9999 ms` is diagnostic timing evidence only and must never advance a phase; `10000 ms` is outside the diagnostic ceiling. A diagnostic failure may report only one allowlisted fixed `failure_stage_code` for first-/second-hop timeout or unavailability; it never reports a URL, credential, redirect, body or raw provider detail. The original stop, cleanup and fresh-approval requirements remain in force.
 
 ## Safe Worker-version mechanics
 

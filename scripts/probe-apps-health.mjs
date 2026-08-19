@@ -16,6 +16,14 @@ const SAFE_ERROR_CODES = new Set([
   "OPS_APPS_HEALTH_UNAVAILABLE",
   "OPS_APPS_HEALTH_INTEGRITY_FAILURE",
 ]);
+const SAFE_FAILURE_STAGE_CODES = new Set([
+  "APPS_HEALTH_FIRST_HOP_TIMEOUT",
+  "APPS_HEALTH_FIRST_HOP_UNAVAILABLE",
+  "APPS_HEALTH_SECOND_HOP_TIMEOUT",
+  "APPS_HEALTH_SECOND_HOP_UNAVAILABLE",
+]);
+const PROBE_ACCEPTANCE_BUDGET_MS = 5000;
+const PROBE_DIAGNOSTIC_CEILING_MS = 10000;
 
 const SANDBOX_DEFAULTS = Object.freeze({
   OPS_ENVIRONMENT: "sandbox",
@@ -30,6 +38,7 @@ const SANDBOX_DEFAULTS = Object.freeze({
 
 export async function runAppsHealthProbe({
   expectation,
+  diagnostic = false,
   environment = process.env,
   fetchImpl = globalThis.fetch,
   now = new Date(),
@@ -50,17 +59,43 @@ export async function runAppsHealthProbe({
   const started = clock();
   let result;
   try {
-    result = await opsTest.fetchAppsScriptHealth(probeEnvironment, now, fetchImpl);
+    const diagnosticSignal = diagnostic ? AbortSignal.timeout(PROBE_DIAGNOSTIC_CEILING_MS) : null;
+    result = await opsTest.fetchAppsScriptHealth(probeEnvironment, now, fetchImpl, diagnosticSignal);
   } catch (error) {
     const elapsedMs = elapsedMilliseconds(started, clock());
     const safeCode = SAFE_ERROR_CODES.has(error?.code) ? error.code : "APPS_HEALTH_PROBE_FAILED";
-    return fixedFailure(safeCode, elapsedMs);
+    const failureStageCode = diagnostic && SAFE_FAILURE_STAGE_CODES.has(error?.outcomeCode)
+      ? error.outcomeCode
+      : "";
+    return fixedFailure(safeCode, elapsedMs, { diagnostic, failureStageCode });
   }
 
   const elapsedMs = elapsedMilliseconds(started, clock());
-  const withinBudget = elapsedMs < 5000;
+  const withinBudget = elapsedMs < PROBE_ACCEPTANCE_BUDGET_MS;
   const matched = result.inspectionState === expected.inspectionState &&
     result.configurationHealthy === expected.configurationHealthy;
+  if (diagnostic) {
+    const withinDiagnosticCeiling = elapsedMs < PROBE_DIAGNOSTIC_CEILING_MS;
+    return Object.freeze({
+      ok: false,
+      diagnostic_only: true,
+      probe_code: "APPS_HEALTH_SANDBOX_PROBE",
+      environment_code: "sandbox",
+      expected_result: expectation,
+      inspection_state: result.inspectionState,
+      configuration_healthy: result.configurationHealthy,
+      elapsed_ms: elapsedMs,
+      within_5000ms: withinBudget,
+      within_10000ms: withinDiagnosticCeiling,
+      result_code: !withinDiagnosticCeiling
+        ? "APPS_HEALTH_DIAGNOSTIC_CEILING_EXCEEDED"
+        : matched
+          ? withinBudget
+            ? "APPS_HEALTH_DIAGNOSTIC_MATCHED_WITHIN_5000MS"
+            : "APPS_HEALTH_DIAGNOSTIC_MATCHED_OUTSIDE_5000MS"
+          : "APPS_HEALTH_DIAGNOSTIC_RESULT_MISMATCH",
+    });
+  }
   return Object.freeze({
     ok: matched && withinBudget,
     probe_code: "APPS_HEALTH_SANDBOX_PROBE",
@@ -76,15 +111,23 @@ export async function runAppsHealthProbe({
   });
 }
 
-function fixedFailure(code, elapsedMs) {
-  return Object.freeze({
+function fixedFailure(code, elapsedMs, { diagnostic = false, failureStageCode = "" } = {}) {
+  const evidence = {
     ok: false,
     probe_code: "APPS_HEALTH_SANDBOX_PROBE",
     environment_code: "sandbox",
     elapsed_ms: elapsedMs,
-    within_5000ms: elapsedMs < 5000,
+    within_5000ms: elapsedMs < PROBE_ACCEPTANCE_BUDGET_MS,
     result_code: code,
-  });
+  };
+  if (diagnostic) {
+    evidence.diagnostic_only = true;
+    evidence.within_10000ms = elapsedMs < PROBE_DIAGNOSTIC_CEILING_MS;
+    if (SAFE_FAILURE_STAGE_CODES.has(failureStageCode)) {
+      evidence.failure_stage_code = failureStageCode;
+    }
+  }
+  return Object.freeze(evidence);
 }
 
 function elapsedMilliseconds(started, completed) {
@@ -93,15 +136,26 @@ function elapsedMilliseconds(started, completed) {
   return Math.round(elapsed);
 }
 
-function parseExpectation(argv) {
+function parseProbeArguments(argv) {
   const exact = argv.filter((value) => value.startsWith("--expect="));
-  if (argv.length !== 1 || exact.length !== 1) return "";
-  return exact[0].slice("--expect=".length);
+  const diagnosticCount = argv.filter((value) => value === "--diagnostic").length;
+  const expectedLength = diagnosticCount === 1 ? 2 : 1;
+  if (argv.length !== expectedLength || exact.length !== 1 || diagnosticCount > 1) {
+    return Object.freeze({ expectation: "", diagnostic: false });
+  }
+  return Object.freeze({
+    expectation: exact[0].slice("--expect=".length),
+    diagnostic: diagnosticCount === 1,
+  });
+}
+
+function parseExpectation(argv) {
+  return parseProbeArguments(argv).expectation;
 }
 
 async function main() {
-  const expectation = parseExpectation(process.argv.slice(2));
-  const evidence = await runAppsHealthProbe({ expectation });
+  const options = parseProbeArguments(process.argv.slice(2));
+  const evidence = await runAppsHealthProbe(options);
   process.stdout.write(`${JSON.stringify(evidence)}\n`);
   process.exitCode = evidence.ok ? 0 : 1;
 }
@@ -111,6 +165,10 @@ if (import.meta.url === invokedPath) await main();
 
 export const __test = Object.freeze({
   PROBE_EXPECTATIONS,
+  PROBE_ACCEPTANCE_BUDGET_MS,
+  PROBE_DIAGNOSTIC_CEILING_MS,
+  SAFE_FAILURE_STAGE_CODES,
   SANDBOX_DEFAULTS,
+  parseProbeArguments,
   parseExpectation,
 });
