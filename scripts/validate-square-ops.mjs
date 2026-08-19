@@ -1147,11 +1147,13 @@ async function validateWorkerBoundary() {
   assert.match(source, /AbortSignal\.timeout\(QUEUE_METRICS_TIMEOUT_MS\)/,
     "Every Queue metrics request must carry the reviewed timeout signal");
   assert.match(source, /method: "GET"/, "Queue metrics must use a read-only GET request");
-  assert.match(source, /const APPS_HEALTH_TIMEOUT_MS = 5000;/,
-    "Apps health must retain one reviewed five-second deadline");
+  assert.match(source, /const APPS_HEALTH_TRANSPORT_DEADLINE_MS = 10000;/,
+    "Apps health must use the approved ten-second transport deadline");
+  assert.match(source, /const APPS_HEALTH_ACCEPTANCE_SLO_MS = 8000;/,
+    "Apps health must retain the strict less-than-eight-second acceptance SLO");
   assert.match(source,
-    /providedTimeoutSignal instanceof AbortSignal[\s\S]*?: AbortSignal\.timeout\(APPS_HEALTH_TIMEOUT_MS\)/,
-    "Scheduled and normal Apps health calls must retain the five-second default deadline");
+    /providedTimeoutSignal instanceof AbortSignal[\s\S]*?: AbortSignal\.timeout\(APPS_HEALTH_TRANSPORT_DEADLINE_MS\)/,
+    "Scheduled and normal Apps health calls must share the ten-second default deadline");
   for (const outcomeCode of [
     "APPS_HEALTH_SIGNED_DISABLED",
     "APPS_HEALTH_SIGNED_FAILED",
@@ -1164,6 +1166,7 @@ async function validateWorkerBoundary() {
     "APPS_HEALTH_SECOND_HOP_CONTENT_TYPE_INVALID",
     "APPS_HEALTH_SECOND_HOP_BODY_READ_OR_DECODE_FAILED",
     "APPS_HEALTH_SECOND_HOP_JSON_PARSE_FAILED",
+    "APPS_HEALTH_RESPONSE_SLO_EXCEEDED",
     "APPS_HEALTH_INTEGRITY_FAILURE",
   ]) {
     assert.ok(outcomeCode.length <= 80 && /^[A-Z0-9_]+$/.test(outcomeCode),
@@ -1843,6 +1846,10 @@ async function validateQueueMonitorBehavior(workerModule) {
 async function validateAppsScriptHealthMonitorBehavior(workerModule) {
   const base = new Date("2026-08-18T12:00:00.000Z");
   const at = (seconds) => new Date(base.getTime() + seconds * 1000);
+  const clock = (startedAt, completedAt) => {
+    const values = [startedAt, completedAt];
+    return () => values.length > 1 ? values.shift() : values[0];
+  };
   const requestFields = [
     "response_mode", "operation", "ops_health_contract_version", "source_environment_code",
     "request_timestamp", "request_nonce",
@@ -1954,32 +1961,36 @@ async function validateAppsScriptHealthMonitorBehavior(workerModule) {
     };
     return { fetchImpl, calls };
   };
-  const withImmediateAppsTimeout = async (callback) => {
+  const withAppsTimeoutOnFetch = async (fetchImpl, abortOnCall, callback) => {
     const originalTimeout = AbortSignal.timeout;
-    AbortSignal.timeout = () => {
-      const controller = new AbortController();
-      controller.abort();
-      return controller.signal;
+    const controller = new AbortController();
+    AbortSignal.timeout = () => controller.signal;
+    let callCount = 0;
+    const abortingFetch = (...args) => {
+      callCount += 1;
+      if (callCount === abortOnCall) controller.abort();
+      return fetchImpl(...args);
     };
     try {
-      return await callback();
+      return await callback(abortingFetch);
     } finally {
       AbortSignal.timeout = originalTimeout;
     }
   };
-  const runOutcomeMonitor = async (fetchImpl, { immediateTimeout = false } = {}) => {
+  const runOutcomeMonitor = async (fetchImpl, { timeoutHop = 0, elapsedMs = 0 } = {}) => {
     const ops = new MockOpsDB();
     const originalFetch = globalThis.fetch;
-    const run = async () => {
-      globalThis.fetch = fetchImpl;
+    const elapsedClock = clock(0, elapsedMs);
+    const run = async (activeFetch = fetchImpl) => {
+      globalThis.fetch = activeFetch;
       try {
-        await workerModule.__test.runMonitor(baseEnvironment(ops), base, base);
+        await workerModule.__test.runMonitor(baseEnvironment(ops), base, base, elapsedClock);
       } finally {
         globalThis.fetch = originalFetch;
       }
       return ops;
     };
-    return immediateTimeout ? withImmediateAppsTimeout(run) : run();
+    return timeoutHop ? withAppsTimeoutOnFetch(fetchImpl, timeoutHop, run) : run();
   };
 
   const orderedFixtureParams = new URLSearchParams({
@@ -2001,8 +2012,8 @@ async function validateAppsScriptHealthMonitorBehavior(workerModule) {
   } finally {
     AbortSignal.timeout = originalAppsTimeout;
   }
-  assert.deepEqual(defaultDeadlineRequests, [5000],
-    "A scheduled/default Apps request must create exactly one five-second total deadline");
+  assert.deepEqual(defaultDeadlineRequests, [10000],
+    "A scheduled/default Apps request must create exactly one ten-second total deadline");
 
   const providedSignal = new AbortController().signal;
   const providedRoute = scriptedFetch();
@@ -2011,6 +2022,58 @@ async function validateAppsScriptHealthMonitorBehavior(workerModule) {
   assert.equal(providedRoute.calls.length, 2);
   assert.ok(providedRoute.calls.every(({ options }) => options.signal === providedSignal),
     "A local diagnostic may inject one signal that both Google hops reuse");
+
+  const lastAcceptedRoute = scriptedFetch();
+  const lastAccepted = await workerModule.__test.fetchAppsScriptHealth(
+    baseEnvironment(), base, lastAcceptedRoute.fetchImpl, null, clock(0, 7999.9));
+  assert.deepEqual(lastAccepted, { inspectionState: "COMPLETE", configurationHealthy: true },
+    "A raw 7999.9 ms signed response must satisfy the strict less-than-eight-second SLO");
+  for (const elapsedMs of [8000, 9999]) {
+    const slowRoute = scriptedFetch();
+    await assert.rejects(
+      workerModule.__test.fetchAppsScriptHealth(
+        baseEnvironment(), base, slowRoute.fetchImpl, null, clock(0, elapsedMs)),
+      (error) => error?.code === "OPS_APPS_HEALTH_UNAVAILABLE" &&
+        error?.outcomeCode === "APPS_HEALTH_RESPONSE_SLO_EXCEEDED",
+      `A valid signed ${elapsedMs} ms response must be unavailable under the strict SLO`,
+    );
+  }
+
+  const bodyDeadline = new AbortController();
+  const bodyDeadlineSignals = [];
+  let bodyDeadlineCallCount = 0;
+  const bodyDeadlineFetch = async (_url, options = {}) => {
+    bodyDeadlineSignals.push(options.signal);
+    bodyDeadlineCallCount += 1;
+    if (bodyDeadlineCallCount === 1) {
+      return new Response(null, { status: 302, headers: { Location: TEST_APPS_REDIRECT_URL } });
+    }
+    return {
+      status: 200,
+      ok: true,
+      headers: new Headers({ "Content-Type": "application/json" }),
+      body: {
+        getReader() {
+          return {
+            read() {
+              queueMicrotask(() => bodyDeadline.abort());
+              return new Promise(() => {});
+            },
+            cancel() { return Promise.resolve(); },
+          };
+        },
+      },
+    };
+  };
+  await assert.rejects(
+    workerModule.__test.fetchAppsScriptHealth(
+      baseEnvironment(), base, bodyDeadlineFetch, bodyDeadline.signal, clock(0, 10000)),
+    (error) => error?.code === "OPS_APPS_HEALTH_UNAVAILABLE" &&
+      error?.outcomeCode === "APPS_HEALTH_SECOND_HOP_TIMEOUT",
+    "The shared ten-second abort must retain its second-hop timeout classification during body read",
+  );
+  assert.deepEqual(bodyDeadlineSignals, [bodyDeadline.signal, bodyDeadline.signal],
+    "POST, GET and streamed body handling must share one deadline signal");
 
   for (const redirectStatus of [302, 303]) {
     const route = scriptedFetch({ redirectStatus });
@@ -2153,13 +2216,13 @@ async function validateAppsScriptHealthMonitorBehavior(workerModule) {
     ["APPS_HEALTH_UNAVAILABLE", "APPS_HEALTH_FIRST_HOP_UNAVAILABLE"]);
 
   const firstTimeoutRoute = scriptedFetch({ firstError: new Error(`${TEST_PRIVATE_EMAIL}:private-timeout`) });
-  const firstHopTimeout = await withImmediateAppsTimeout(() =>
-    workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(), base, firstTimeoutRoute.fetchImpl));
+  const firstHopTimeout = await withAppsTimeoutOnFetch(firstTimeoutRoute.fetchImpl, 1, (fetchImpl) =>
+    workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(), base, fetchImpl));
   assert.deepEqual([firstHopTimeout.signals[0].alertKey, firstHopTimeout.outcomeCode],
     ["APPS_HEALTH_UNAVAILABLE", "APPS_HEALTH_FIRST_HOP_TIMEOUT"]);
   const secondTimeoutRoute = scriptedFetch({ finalError: new Error(`${TEST_PRIVATE_EMAIL}:private-timeout`) });
-  const secondHopTimeout = await withImmediateAppsTimeout(() =>
-    workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(), base, secondTimeoutRoute.fetchImpl));
+  const secondHopTimeout = await withAppsTimeoutOnFetch(secondTimeoutRoute.fetchImpl, 2, (fetchImpl) =>
+    workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(), base, fetchImpl));
   assert.deepEqual([secondHopTimeout.signals[0].alertKey, secondHopTimeout.outcomeCode],
     ["APPS_HEALTH_UNAVAILABLE", "APPS_HEALTH_SECOND_HOP_TIMEOUT"]);
   const secondBodyTimeoutRoute = scriptedFetch({ finalResponseFactory: () => new Response(
@@ -2168,8 +2231,8 @@ async function validateAppsScriptHealthMonitorBehavior(workerModule) {
     } }),
     { status: 200, headers: { "Content-Type": "application/json" } },
   ) });
-  const secondBodyTimeout = await withImmediateAppsTimeout(() =>
-    workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(), base, secondBodyTimeoutRoute.fetchImpl));
+  const secondBodyTimeout = await withAppsTimeoutOnFetch(secondBodyTimeoutRoute.fetchImpl, 2, (fetchImpl) =>
+    workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(), base, fetchImpl));
   assert.deepEqual([secondBodyTimeout.signals[0].alertKey, secondBodyTimeout.outcomeCode],
     ["APPS_HEALTH_UNAVAILABLE", "APPS_HEALTH_SECOND_HOP_TIMEOUT"],
   "An aborted shared signal takes precedence over a body-read subcode");
@@ -2244,6 +2307,49 @@ async function validateAppsScriptHealthMonitorBehavior(workerModule) {
   ["AVAILABLE", 0, ["APPS_CONFIGURATION_UNHEALTHY", "APPS_HEALTH_INTEGRITY_FAILURE",
     "APPS_HEALTH_UNAVAILABLE"], ""]);
 
+  for (const [label, route] of [
+    ["signed disabled", scriptedFetch({ payloadOptions: { inspectionState: "DISABLED" } })],
+    ["signed failed", scriptedFetch({ payloadOptions: { inspectionState: "FAILED" } })],
+    ["configuration mismatch", scriptedFetch({ payloadOptions: {
+      mutate(payload) { payload.worker_json_state = "CONFIGURED"; },
+    } })],
+  ]) {
+    const slow = await workerModule.__test.readAppsScriptHealthSignals(
+      baseEnvironment(), base, route.fetchImpl, clock(0, 9000));
+    assert.deepEqual([
+      slow.sourceState,
+      slow.outcomeCode,
+      slow.signals[0].alertKey,
+      slow.signals[0].severity,
+      slow.signals[0].reasonCode,
+      slow.resolvableKeys.length,
+    ], [
+      "UNAVAILABLE",
+      "APPS_HEALTH_RESPONSE_SLO_EXCEEDED",
+      "APPS_HEALTH_UNAVAILABLE",
+      "WARNING",
+      "APPS_HEALTH_SOURCE_UNAVAILABLE",
+      0,
+    ], `${label} at 9000 ms must be unavailable and resolve no existing Apps incident`);
+    assert.doesNotMatch(JSON.stringify(slow), /script\.google|user_content_key|signature|request_nonce|@/,
+      `${label} SLO evidence must remain fixed and private`);
+  }
+
+  const slowBadSignature = await workerModule.__test.readAppsScriptHealthSignals(
+    baseEnvironment(), base, scriptedFetch({ payloadOptions: { invalidSignature: true } }).fetchImpl,
+    clock(0, 9000));
+  assert.deepEqual([
+    slowBadSignature.sourceState,
+    slowBadSignature.outcomeCode,
+    slowBadSignature.signals[0].alertKey,
+    slowBadSignature.signals[0].severity,
+  ], [
+    "UNAVAILABLE",
+    "APPS_HEALTH_INTEGRITY_FAILURE",
+    "APPS_HEALTH_INTEGRITY_FAILURE",
+    "CRITICAL",
+  ], "A slow bad signature must remain critical and take precedence over the response SLO");
+
   const unavailableFixture = new Error(`${TEST_PRIVATE_EMAIL}:private-stage-error`);
   const outcomeCases = [
     {
@@ -2257,7 +2363,7 @@ async function validateAppsScriptHealthMonitorBehavior(workerModule) {
     {
       expected: "APPS_HEALTH_FIRST_HOP_TIMEOUT",
       route: scriptedFetch({ firstError: unavailableFixture }),
-      immediateTimeout: true,
+      timeoutHop: 1,
     },
     {
       expected: "APPS_HEALTH_FIRST_HOP_UNAVAILABLE",
@@ -2266,7 +2372,7 @@ async function validateAppsScriptHealthMonitorBehavior(workerModule) {
     {
       expected: "APPS_HEALTH_SECOND_HOP_TIMEOUT",
       route: scriptedFetch({ finalError: unavailableFixture }),
-      immediateTimeout: true,
+      timeoutHop: 2,
     },
     {
       expected: "APPS_HEALTH_SECOND_HOP_FETCH_FAILED",
@@ -2298,7 +2404,7 @@ async function validateAppsScriptHealthMonitorBehavior(workerModule) {
   ];
   for (const testCase of outcomeCases) {
     const ops = await runOutcomeMonitor(testCase.route.fetchImpl, {
-      immediateTimeout: Boolean(testCase.immediateTimeout),
+      timeoutHop: Number(testCase.timeoutHop || 0),
     });
     const run = ops.monitorRuns[0];
     const incident = ops.incidents[0];
@@ -2325,6 +2431,30 @@ async function validateAppsScriptHealthMonitorBehavior(workerModule) {
       /private-stage|private\.example|example\.com|@|script\.google|text\/html/,
       `${testCase.expected} must not persist a raw error or URL`);
   }
+
+  const sloOps = await runOutcomeMonitor(scriptedFetch().fetchImpl, { elapsedMs: 8000 });
+  assert.deepEqual([
+    sloOps.monitorRuns[0].summary_code,
+    sloOps.monitorRuns[0].run_state,
+    sloOps.monitorRuns[0].signal_source_state,
+    sloOps.monitorRuns[0].warning_count,
+    sloOps.monitorRuns[0].critical_count,
+    sloOps.incidents[0].alert_key,
+    sloOps.incidents[0].severity_code,
+    sloOps.incidents[0].reason_code,
+  ], [
+    "APPS_HEALTH_RESPONSE_SLO_EXCEEDED",
+    "FAILED",
+    "UNAVAILABLE",
+    1,
+    0,
+    "APPS_HEALTH_UNAVAILABLE",
+    "WARNING",
+    "APPS_HEALTH_SOURCE_UNAVAILABLE",
+  ], "The scheduled Worker must persist the exact 8000 ms SLO boundary as unavailable");
+  assert.doesNotMatch(JSON.stringify(sloOps.executed),
+    /script\.google|googleusercontent|user_content_key|signature|request_nonce|example\.com|@/,
+    "Scheduled SLO evidence must not persist a URL, request field, secret or provider detail");
 
   const integrityOps = await runOutcomeMonitor(scriptedFetch({
     payloadOptions: { invalidSignature: true },

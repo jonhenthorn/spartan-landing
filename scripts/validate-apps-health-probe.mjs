@@ -132,7 +132,7 @@ for (const [expectation, inspectionState, healthy] of [
     clock: clock(),
   });
   assert.deepEqual(
-    [result.ok, result.inspection_state, result.configuration_healthy, result.within_5000ms, result.elapsed_ms],
+    [result.ok, result.inspection_state, result.configuration_healthy, result.within_8000ms, result.elapsed_ms],
     [true, inspectionState, healthy, true, 123],
   );
 }
@@ -152,26 +152,28 @@ const budget = await runAppsHealthProbe({
   environment: baseEnvironment(),
   fetchImpl: scriptedFetch(),
   now: FIXTURE_NOW,
-  clock: clock(0, 5000),
+  clock: clock(0, 8000),
 });
 assert.equal(budget.ok, false);
-assert.equal(budget.result_code, "APPS_HEALTH_PROBE_BUDGET_EXCEEDED");
-assert.equal(budget.within_5000ms, false);
+assert.equal(budget.result_code, "APPS_HEALTH_RESPONSE_SLO_EXCEEDED");
+assert.equal(budget.within_8000ms, false);
 
 const lastAcceptedMillisecond = await runAppsHealthProbe({
   expectation: "healthy",
   environment: baseEnvironment(),
   fetchImpl: scriptedFetch(),
   now: FIXTURE_NOW,
-  clock: clock(0, 4999),
+  clock: clock(0, 7999.9),
 });
 assert.equal(lastAcceptedMillisecond.ok, true);
-assert.equal(lastAcceptedMillisecond.within_5000ms, true);
+assert.equal(lastAcceptedMillisecond.within_8000ms, true);
+assert.equal(lastAcceptedMillisecond.elapsed_ms, 7999,
+  "Displayed evidence must not contradict the raw strict-less-than SLO decision");
 
-for (const [elapsedMs, within5000ms, within10000ms, resultCode] of [
-  [4999, true, true, "APPS_HEALTH_DIAGNOSTIC_MATCHED_WITHIN_5000MS"],
-  [5000, false, true, "APPS_HEALTH_DIAGNOSTIC_MATCHED_OUTSIDE_5000MS"],
-  [9999, false, true, "APPS_HEALTH_DIAGNOSTIC_MATCHED_OUTSIDE_5000MS"],
+for (const [elapsedMs, within8000ms, within10000ms, resultCode] of [
+  [7999, true, true, "APPS_HEALTH_DIAGNOSTIC_MATCHED_WITHIN_8000MS"],
+  [8000, false, true, "APPS_HEALTH_DIAGNOSTIC_MATCHED_OUTSIDE_8000MS"],
+  [9999, false, true, "APPS_HEALTH_DIAGNOSTIC_MATCHED_OUTSIDE_8000MS"],
   [10000, false, false, "APPS_HEALTH_DIAGNOSTIC_CEILING_EXCEEDED"],
 ]) {
   const diagnostic = await runAppsHealthProbe({
@@ -185,10 +187,10 @@ for (const [elapsedMs, within5000ms, within10000ms, resultCode] of [
   assert.deepEqual([
     diagnostic.ok,
     diagnostic.diagnostic_only,
-    diagnostic.within_5000ms,
+    diagnostic.within_8000ms,
     diagnostic.within_10000ms,
     diagnostic.result_code,
-  ], [false, true, within5000ms, within10000ms, resultCode],
+  ], [false, true, within8000ms, within10000ms, resultCode],
   `Diagnostic evidence at ${elapsedMs} ms must never become acceptance`);
 }
 
@@ -219,8 +221,8 @@ try {
 } finally {
   AbortSignal.timeout = originalTimeout;
 }
-assert.deepEqual(requestedTimeouts, [5000, 10000],
-  "Only diagnostic mode may replace the normal five-second deadline with a ten-second ceiling");
+assert.deepEqual(requestedTimeouts, [10000, 10000],
+  "Normal and diagnostic probes must each create one ten-second shared deadline");
 
 const unavailable = await runAppsHealthProbe({
   expectation: "healthy",
@@ -275,19 +277,22 @@ for (const [label, fetchImpl, failureStageCode] of [
   assert.doesNotMatch(JSON.stringify(diagnosticFailure), /private|detail|text\/html|503/);
 }
 
-const withImmediateDiagnosticTimeout = async (fetchImpl) => {
+const withDiagnosticTimeout = async (fetchImpl, abortOnCall) => {
   const savedTimeout = AbortSignal.timeout;
-  AbortSignal.timeout = () => {
-    const controller = new AbortController();
-    controller.abort();
-    return controller.signal;
+  const controller = new AbortController();
+  AbortSignal.timeout = () => controller.signal;
+  let callCount = 0;
+  const abortingFetch = (...args) => {
+    callCount += 1;
+    if (callCount === abortOnCall) controller.abort();
+    return fetchImpl(...args);
   };
   try {
     return await runAppsHealthProbe({
       expectation: "healthy",
       diagnostic: true,
       environment: baseEnvironment(),
-      fetchImpl,
+      fetchImpl: abortingFetch,
       now: FIXTURE_NOW,
       clock: clock(),
     });
@@ -301,7 +306,8 @@ for (const [label, fetchImpl, failureStageCode] of [
   ["second-hop timeout", scriptedFetch({ finalError: new Error("private timeout detail") }),
     "APPS_HEALTH_SECOND_HOP_TIMEOUT"],
 ]) {
-  const diagnosticFailure = await withImmediateDiagnosticTimeout(fetchImpl);
+  const abortOnCall = failureStageCode === "APPS_HEALTH_FIRST_HOP_TIMEOUT" ? 1 : 2;
+  const diagnosticFailure = await withDiagnosticTimeout(fetchImpl, abortOnCall);
   assert.equal(diagnosticFailure.failure_stage_code, failureStageCode, label);
   assert.equal(diagnosticFailure.diagnostic_only, true);
   assert.doesNotMatch(JSON.stringify(diagnosticFailure), /private|detail/);
@@ -358,8 +364,8 @@ for (const invalidArguments of [
 }
 assert.deepEqual(Object.keys(probeTest.PROBE_EXPECTATIONS), ["disabled", "failed", "healthy", "mismatch"]);
 assert.equal(probeTest.SANDBOX_DEFAULTS.OPS_ENVIRONMENT, "sandbox");
-assert.equal(probeTest.PROBE_ACCEPTANCE_BUDGET_MS, 5000);
-assert.equal(probeTest.PROBE_DIAGNOSTIC_CEILING_MS, 10000);
+assert.equal(probeTest.PROBE_ACCEPTANCE_SLO_MS, 8000);
+assert.equal(probeTest.PROBE_TRANSPORT_DEADLINE_MS, 10000);
 assert.deepEqual([...probeTest.SAFE_FAILURE_STAGE_CODES], [
   "APPS_HEALTH_FIRST_HOP_TIMEOUT",
   "APPS_HEALTH_FIRST_HOP_UNAVAILABLE",

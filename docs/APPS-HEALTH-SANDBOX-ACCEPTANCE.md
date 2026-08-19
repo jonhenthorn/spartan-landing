@@ -2,9 +2,9 @@
 
 Last reviewed: August 19, 2026
 
-Status: **the August 18 run and all August 19 follow-ups stopped under their fail-closed gates; acceptance is not complete.** The optimized Apps code is published as sandbox Version 4 and passed inert no-write intervals. The latest enabled Worker reached the Apps deployment but its first scheduled sample ended `APPS_HEALTH_SECOND_HOP_UNAVAILABLE`; a later local-only diagnostic again showed variable end-to-end latency and stopped before any Worker secret or flag was changed. Cleanup is complete: Apps health is disabled, its property and temporary Keychain material are removed, the operations Worker has no health secrets, all six capabilities are false, and repeated all-off crons wrote nothing. Another live attempt requires a new explicit approval and the transport decision recorded below.
+Status: **the August 18 run and all August 19 follow-ups stopped under their fail-closed gates; acceptance is not complete.** The optimized Apps code is published as sandbox Version 4 and passed inert no-write intervals. The latest enabled Worker reached the Apps deployment but its first scheduled sample ended `APPS_HEALTH_SECOND_HOP_UNAVAILABLE`; a later local-only diagnostic again showed variable end-to-end latency and stopped before any Worker secret or flag was changed. Cleanup is complete: Apps health is disabled, its property and temporary Keychain material are removed, the operations Worker has no health secrets, all six capabilities are false, and repeated all-off crons wrote nothing. Option B is now approved and locally implemented, but the revised Worker has not been deployed and no new credential or live request has occurred.
 
-The exact-semantic optimization removes duplicate/disabled property reads and reuses one workbook-tab enumeration without narrowing the formula or allocated-row formatting checks. It is deployed as sandbox Apps Version 4 and its all-off publication produced no operations or connector write. The five-second gate is unchanged; inert deployment is not successful signed acceptance.
+The exact-semantic optimization removes duplicate/disabled property reads and reuses one workbook-tab enumeration without narrowing the formula or allocated-row formatting checks. It is deployed as sandbox Apps Version 4 and its all-off publication produced no operations or connector write. The live all-off Worker still reflects the prior policy. The locally validated Option B candidate uses one shared `10000 ms` transport deadline and a strict raw `<8000 ms` acceptance SLO; local implementation is not successful signed acceptance.
 
 ## August 18 execution outcome
 
@@ -34,11 +34,20 @@ The exact-semantic optimization removes duplicate/disabled property reads and re
 - Detailed second-hop outcome splitting was committed as `76510a0` and deployed inertly as operations version `d90fcd45-ac10-4800-b14b-c4bd882df554`. It is scheduled-only, schema 4, bound to the exact runtime D1 databases, secretless and all six flags false; the `06:55` cron plus settling wrote nothing.
 - A fresh local-only diagnostic then returned signed `DISABLED` in `5422 ms` and `1585 ms`. The normal strict probe stopped at `5011 ms`, just outside its five-second gate. That diagnostic stopped before any Worker secret or capability flag was installed or enabled, and it produced no D1 row.
 - Cleanup removed the Apps health property and the temporary Keychain URL/secret items. Final operations version `d90fcd45-ac10-4800-b14b-c4bd882df554` remains the sole 100% deployment with all six flags false and an empty secret list. Operations D1 is frozen at 22 runs, three incidents, one active `APPS_HEALTH_UNAVAILABLE` warning at occurrence one, and zero deliveries, backups or restores; the latest run remains the `06:30` row. Connector aggregates and all production/business state remained unchanged.
-- The unresolved decision is exact: retain the five-second transport ceiling and replace or abandon this synchronous source, or separately approve a reviewed ten-second transport ceiling with a `<8 s` acceptance SLO.
+- Option B was approved after this cleanup: use one shared ten-second transport deadline with a strict raw `<8000 ms` acceptance SLO. That approval does not itself prove, deploy or accept the source.
+
+## Approved Option B candidate — local only
+
+- One `10000 ms` signal begins before request signing and is reused for the signed POST, accepted Google redirect, read-only GET, streamed body read, JSON parsing and response-HMAC/configuration verification. There is no retry.
+- Only an authenticated, contract-correct response whose raw monotonic elapsed time is strictly below `8000 ms` may be accepted. Exact `8000 ms` through `9999 ms` becomes fixed `APPS_HEALTH_RESPONSE_SLO_EXCEEDED`, the existing source-unavailable warning/reason, and resolves no Apps incident.
+- A deadline abort retains the applicable first- or second-hop timeout classification. A contract or HMAC failure remains immediate critical integrity failure and takes precedence over SLO timing, including for a slow response.
+- Diagnostic mode remains always non-passing. It may collect signed timing evidence under the same shared transport deadline, but it cannot advance an acceptance phase.
+- Local tests cover raw `7999.9 ms` acceptance, exact `8000 ms` and `9999 ms` SLO failure, streamed-body abort at the transport deadline with one shared signal, slow signed `DISABLED`/`FAILED`/configuration-mismatch responses, slow bad-signature integrity precedence, fixed scheduled D1 evidence and privacy bounds.
+- No Worker, Apps property, credential, D1 row, connector state or production state was changed while implementing this candidate.
 
 ## Purpose
 
-Prove that the isolated operations Worker can authenticate and interpret the sandbox Apps Script read-only health contract without exposing a credential, reading customer cell values, writing a Sheet, enabling alerts or touching production. The health path does inspect bounded header, formula-presence and number-format metadata. The direct probe is mandatory because D1 intentionally records only fixed source-stage classes; it does not expose the signed envelope or prove direct-call timing against the five-second acceptance budget.
+Prove that the isolated operations Worker can authenticate and interpret the sandbox Apps Script read-only health contract without exposing a credential, reading customer cell values, writing a Sheet, enabling alerts or touching production. The health path does inspect bounded header, formula-presence and number-format metadata. The direct probe is mandatory because D1 intentionally records only fixed source-stage classes; it does not expose the signed envelope or prove direct-call timing against the strict raw `<8000 ms` acceptance SLO.
 
 Expected supervised duration: **45–55 minutes**. Begin just after a five-minute boundary so credential setup has the largest safe window before the next cron.
 
@@ -62,7 +71,8 @@ Stop and run the emergency rollback if any of these occurs:
 - Any non-Apps operations capability becomes true, or any route, `fetch` handler, Queue/email/R2 binding or unexpected secret appears.
 - The credential-inert or final all-off cron changes any D1 count or prior maximum timestamp.
 - Any `alert_deliveries` row is created.
-- The direct verifier returns a different signed state than expected, reports `elapsed_ms >= 5000`, or reports `OPS_APPS_HEALTH_INTEGRITY_FAILURE`.
+- The direct verifier returns a different signed state than expected, reports `within_8000ms=false` or `APPS_HEALTH_RESPONSE_SLO_EXCEEDED`, or reports `OPS_APPS_HEALTH_INTEGRITY_FAILURE`.
+- Any scheduled Apps observation differs from the phase's exact expected state/summary, including SLO, either timeout, any second-hop fetch/redirect/HTTP/content/body/JSON stage, integrity failure or unexpected configuration result. Stop before another cron; do not use a later sample to override it.
 - Connector aggregate signals are no longer zero at the preflight boundary.
 - Any production, website, Square, customer, order, coupon, Brevo or form state changes.
 
@@ -122,7 +132,7 @@ Allowed expectations are exact: `disabled`, `failed`, `healthy` and `mismatch`. 
 node scripts/probe-apps-health.mjs --expect=disabled --diagnostic
 ```
 
-Normal probes and scheduled monitoring retain the same five-second transport deadline and exact `<5000 ms` pass policy. Diagnostic mode alone uses one `10000 ms` ceiling, always returns `ok:false` and exits nonzero. A valid signed result from `5000 ms` through `9999 ms` is diagnostic timing evidence only and must never advance a phase; `10000 ms` is outside the diagnostic ceiling. A diagnostic failure may report only one allowlisted fixed `failure_stage_code`: first-hop timeout/unavailable, second-hop timeout, or second-hop fetch failure, unexpected no-follow redirect, non-`2xx`, invalid content type, body read/decode failure or JSON parse failure. It never reports a URL, credential, HTTP status, `Location`, content type, redirect/body value or raw provider detail. The original stop, cleanup and fresh-approval requirements remain in force.
+Normal probes and scheduled monitoring use the same one-signal `10000 ms` transport deadline and exact raw `<8000 ms` pass policy. Exact `8000 ms` through `9999 ms` returns fixed `APPS_HEALTH_RESPONSE_SLO_EXCEEDED`; a deadline abort remains a hop-specific timeout. Diagnostic mode uses that same deadline, always returns `ok:false` and exits nonzero, including for a valid signed result inside the SLO. A diagnostic failure may report only one allowlisted fixed `failure_stage_code`: first-hop timeout/unavailable, second-hop timeout, or second-hop fetch failure, unexpected no-follow redirect, non-`2xx`, invalid content type, body read/decode failure or JSON parse failure. It never reports a URL, credential, HTTP status, `Location`, content type, redirect/body value or raw provider detail. The original stop, cleanup and fresh-credential requirements remain in force.
 
 ## Safe Worker-version mechanics
 
@@ -153,19 +163,19 @@ Do not use `--keep-vars`: the checked sandbox configuration plus the explicit ov
 2. Upload a candidate Worker version from the full sandbox configuration with only `OPS_MONITORING_ENABLED=true` and `OPS_APPS_SCRIPT_MONITORING_ENABLED=true`; retain every other false value and both secrets.
 3. Before deployment, inspect authoritative version metadata. Require the runtime—not preview—D1 IDs, only a scheduled handler, no route or new binding, Queue/alerts/backups/restores false, and the two intended flags true.
 4. Deploy that candidate at 100% and record its version ID as the normal enabled-test version.
-5. Run the direct verifier twice with `--expect=disabled`. Both calls must return signed `DISABLED`, `configuration_healthy=false` and `elapsed_ms < 5000`.
+5. Run the direct verifier twice with `--expect=disabled`. Both calls must return signed `DISABLED`, `configuration_healthy=false` and `within_8000ms=true`. The raw timing decision, not a rounded display value, controls this gate.
 6. Observe two consecutive five-minute crons 240–540 seconds apart. Each must record `FAILED` / `UNAVAILABLE`, warning count 1 and no delivery. `APPS_HEALTH_UNAVAILABLE` must progress from occurrence 1 to 2 without any other Apps incident.
 
 ## Phase 3 — signed healthy state and recovery
 
 1. Change only sandbox Apps `OPS_HEALTH_ENABLED=true`; keep environment `sandbox`.
-2. Run two immediate direct probes with `--expect=healthy`. Treat the first as the first enabled full-inspection candidate and the second as the immediate repeat; neither proves provider cold-start behavior. Both must return `COMPLETE`, `configuration_healthy=true` and `elapsed_ms < 5000`.
+2. Run two immediate direct probes with `--expect=healthy`. Treat the first as the first enabled full-inspection candidate and the second as the immediate repeat; neither proves provider cold-start behavior. Both must return `COMPLETE`, `configuration_healthy=true` and `within_8000ms=true` under the raw strict-less-than SLO.
 3. The next cron must record `HEALTHY` / `AVAILABLE`, zero Apps signals and resolve the prior Apps-unavailable incident. Deliveries remain zero.
 
 ## Phase 4 — signed failed state and recovery
 
 1. Change only sandbox Apps `OPS_HEALTH_ENVIRONMENT` from `sandbox` to `production`; do not touch a Sheet or write-capable flag.
-2. Run the direct verifier with `--expect=failed`. Require signed `FAILED`, all component states internally verified as `NOT_CHECKED`, and `elapsed_ms < 5000`.
+2. Run the direct verifier with `--expect=failed`. Require signed `FAILED`, all component states internally verified as `NOT_CHECKED`, and `within_8000ms=true` under the raw strict-less-than SLO.
 3. The next cron must record `FAILED` / `UNAVAILABLE`, warning count 1 and no delivery.
 4. Restore `OPS_HEALTH_ENVIRONMENT=sandbox`, run `--expect=healthy`, then require the next cron to return `HEALTHY` and resolve the unavailable incident.
 
@@ -175,7 +185,7 @@ Do not use `--keep-vars`: the checked sandbox configuration plus the explicit ov
 2. Upload a separate candidate Worker version with the normal two test flags true and only `OPS_EXPECT_APPS_WORKER_JSON_STATE=CONFIGURED` instead of the reviewed sandbox value `NOT_CONFIGURED`.
 3. Inspect authoritative metadata before deployment exactly as in Phase 2, then deploy and record the mismatch-test version ID.
 4. Run the mismatch probe in the same trapped subshell pattern, adding `export OPS_EXPECT_APPS_WORKER_JSON_STATE=CONFIGURED` before `node scripts/probe-apps-health.mjs --expect=mismatch` and adding that third variable to `cleanup_probe`. Do not export it in the parent shell.
-5. Require signed `COMPLETE`, `configuration_healthy=false`, `elapsed_ms < 5000`, then a cron record of `CRITICAL` / `AVAILABLE` with only `APPS_CONFIGURATION_UNHEALTHY`. Deliveries remain zero.
+5. Require signed `COMPLETE`, `configuration_healthy=false`, `within_8000ms=true` under the raw strict-less-than SLO, then a cron record of `CRITICAL` / `AVAILABLE` with only `APPS_CONFIGURATION_UNHEALTHY`. Deliveries remain zero.
 6. Redeploy the recorded normal enabled-test version, run `--expect=healthy`, and require the next cron to return `HEALTHY` and resolve every Apps incident.
 
 ## Phase 6 — normal rollback and cleanup
@@ -251,4 +261,4 @@ This execution did **not** pass the worksheet and does not approve another live 
 | Current D1 reconciliation | 22 runs; 3 incidents; 1 active `APPS_HEALTH_UNAVAILABLE` occurrence 1; 0 deliveries/backups/restores; latest row remains `06:30` |
 | Connector/production boundary | Connector aggregates unchanged; production and customer/business systems untouched |
 
-Before any revised run, obtain a new explicit approval, preserve every failed-run record and use a fresh dedicated credential. The approving decision must choose one of two paths: retain the five-second ceiling and replace or abandon the synchronous source, or approve a reviewed ten-second transport ceiling with a `<8 s` acceptance SLO.
+Option B is explicitly approved for the revised sandbox run. Preserve every failed-run record, use a fresh dedicated credential, deploy inertly first, and follow every hard-stop and cleanup gate below. The approval does not authorize production, Queue access, alerts, email, backup/restore work or weakening the strict `<8000 ms` acceptance SLO.

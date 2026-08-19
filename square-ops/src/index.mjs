@@ -89,7 +89,8 @@ const CLOUDFLARE_API_ORIGIN = "https://api.cloudflare.com";
 const APPS_HEALTH_CONTRACT_VERSION = "spartan-ops-apps-health-v1-2026-08-18";
 const APPS_HEALTH_RESPONSE_MODE = "ops_health_json";
 const APPS_HEALTH_OPERATION = "ops_health";
-const APPS_HEALTH_TIMEOUT_MS = 5000;
+const APPS_HEALTH_TRANSPORT_DEADLINE_MS = 10000;
+const APPS_HEALTH_ACCEPTANCE_SLO_MS = 8000;
 const APPS_HEALTH_MAX_REQUEST_BYTES = 2048;
 const APPS_HEALTH_MAX_RESPONSE_BYTES = 8192;
 const APPS_HEALTH_FRESHNESS_SECONDS = 300;
@@ -105,6 +106,7 @@ const APPS_HEALTH_OUTCOME_CODES = Object.freeze({
   SECOND_HOP_CONTENT_TYPE_INVALID: "APPS_HEALTH_SECOND_HOP_CONTENT_TYPE_INVALID",
   SECOND_HOP_BODY_READ_OR_DECODE_FAILED: "APPS_HEALTH_SECOND_HOP_BODY_READ_OR_DECODE_FAILED",
   SECOND_HOP_JSON_PARSE_FAILED: "APPS_HEALTH_SECOND_HOP_JSON_PARSE_FAILED",
+  SLO_EXCEEDED: "APPS_HEALTH_RESPONSE_SLO_EXCEEDED",
   INTEGRITY_FAILURE: "APPS_HEALTH_INTEGRITY_FAILURE",
 });
 const APPS_HEALTH_UNAVAILABLE_OUTCOME_CODES = new Set([
@@ -117,6 +119,7 @@ const APPS_HEALTH_UNAVAILABLE_OUTCOME_CODES = new Set([
   APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_CONTENT_TYPE_INVALID,
   APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_BODY_READ_OR_DECODE_FAILED,
   APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_JSON_PARSE_FAILED,
+  APPS_HEALTH_OUTCOME_CODES.SLO_EXCEEDED,
 ]);
 const APPS_SCRIPT_ORIGIN = "https://script.google.com";
 const APPS_SCRIPT_RESPONSE_ORIGIN = "https://script.googleusercontent.com";
@@ -288,7 +291,7 @@ export default {
   },
 };
 
-async function runMonitor(env, scheduledAt, observedAt = new Date()) {
+async function runMonitor(env, scheduledAt, observedAt = new Date(), appsHealthClock = appsHealthMonotonicNow) {
   const environment = String(env?.OPS_ENVIRONMENT || "").trim().toLowerCase();
   if (!new Set(["production", "sandbox"]).has(environment)) throw new Error("OPS_ENVIRONMENT_INVALID");
   if (!env?.OPS_DB) throw new Error("OPS_DB_NOT_CONFIGURED");
@@ -316,7 +319,12 @@ async function runMonitor(env, scheduledAt, observedAt = new Date()) {
   }
 
   if (flag(env?.OPS_APPS_SCRIPT_MONITORING_ENABLED)) {
-    const appsScriptResult = await readAppsScriptHealthSignals(env, observationTime);
+    const appsScriptResult = await readAppsScriptHealthSignals(
+      env,
+      observationTime,
+      globalThis.fetch,
+      appsHealthClock,
+    );
     appsHealthOutcomeCode = appsScriptResult.outcomeCode;
     signals.push(...appsScriptResult.signals);
     for (const alertKey of appsScriptResult.resolvableKeys) resolvableKeys.add(alertKey);
@@ -1140,10 +1148,11 @@ async function readQueueSignals(env, now, fetchImpl = globalThis.fetch) {
   });
 }
 
-async function readAppsScriptHealthSignals(env, now, fetchImpl = globalThis.fetch) {
+async function readAppsScriptHealthSignals(env, now, fetchImpl = globalThis.fetch,
+  clock = appsHealthMonotonicNow) {
   let result;
   try {
-    result = await fetchAppsScriptHealth(env, now, fetchImpl);
+    result = await fetchAppsScriptHealth(env, now, fetchImpl, null, clock);
   } catch (error) {
     const integrityFailure = error?.code === "OPS_APPS_HEALTH_INTEGRITY_FAILURE";
     const unavailableOutcomeCode = APPS_HEALTH_UNAVAILABLE_OUTCOME_CODES.has(error?.outcomeCode)
@@ -1201,7 +1210,12 @@ async function readAppsScriptHealthSignals(env, now, fetchImpl = globalThis.fetc
   });
 }
 
-async function fetchAppsScriptHealth(env, now, fetchImpl, providedTimeoutSignal = null) {
+async function fetchAppsScriptHealth(env, now, fetchImpl, providedTimeoutSignal = null,
+  clock = appsHealthMonotonicNow, enforceAcceptanceSlo = true) {
+  const startedAt = appsHealthClockValue(clock);
+  const timeoutSignal = providedTimeoutSignal instanceof AbortSignal
+    ? providedTimeoutSignal
+    : AbortSignal.timeout(APPS_HEALTH_TRANSPORT_DEADLINE_MS);
   let config;
   try {
     config = validateAppsScriptHealthConfiguration(env);
@@ -1222,15 +1236,23 @@ async function fetchAppsScriptHealth(env, now, fetchImpl, providedTimeoutSignal 
     request_nonce: requestNonce,
   });
   const canonicalRequest = canonicalSignedFields(requestValues, APPS_HEALTH_REQUEST_FIELDS);
-  const requestSignature = await hmacSha256Hex(canonicalRequest, config.sharedSecret);
+  let requestSignature;
+  try {
+    requestSignature = await awaitAppsHealthDeadline(
+      hmacSha256Hex(canonicalRequest, config.sharedSecret),
+      timeoutSignal,
+      APPS_HEALTH_OUTCOME_CODES.FIRST_HOP_TIMEOUT,
+    );
+  } catch {
+    throw appsHealthUnavailableError(timeoutSignal.aborted
+      ? APPS_HEALTH_OUTCOME_CODES.FIRST_HOP_TIMEOUT
+      : APPS_HEALTH_OUTCOME_CODES.FIRST_HOP_UNAVAILABLE);
+  }
   const requestBody = `${canonicalRequest}&request_signature=${encodeURIComponent(requestSignature)}`;
   if (new TextEncoder().encode(requestBody).byteLength > APPS_HEALTH_MAX_REQUEST_BYTES) {
     throw appsHealthUnavailableError(APPS_HEALTH_OUTCOME_CODES.FIRST_HOP_UNAVAILABLE);
   }
 
-  const timeoutSignal = providedTimeoutSignal instanceof AbortSignal
-    ? providedTimeoutSignal
-    : AbortSignal.timeout(APPS_HEALTH_TIMEOUT_MS);
   let redirectResponse;
   try {
     redirectResponse = await fetchImpl(config.url, {
@@ -1249,6 +1271,9 @@ async function fetchAppsScriptHealth(env, now, fetchImpl, providedTimeoutSignal 
       : APPS_HEALTH_OUTCOME_CODES.FIRST_HOP_UNAVAILABLE);
   }
   if (![302, 303].includes(Number(redirectResponse?.status))) {
+    if (timeoutSignal.aborted) {
+      throw appsHealthUnavailableError(APPS_HEALTH_OUTCOME_CODES.FIRST_HOP_TIMEOUT);
+    }
     throw appsHealthUnavailableError(APPS_HEALTH_OUTCOME_CODES.FIRST_HOP_UNAVAILABLE);
   }
 
@@ -1263,6 +1288,9 @@ async function fetchAppsScriptHealth(env, now, fetchImpl, providedTimeoutSignal 
   if (responseUrl.origin !== APPS_SCRIPT_RESPONSE_ORIGIN || responseUrl.pathname !== "/macros/echo" ||
       responseUrl.username || responseUrl.password || responseUrl.port || responseUrl.hash) {
     throw appsHealthIntegrityError();
+  }
+  if (timeoutSignal.aborted) {
+    throw appsHealthUnavailableError(APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_TIMEOUT);
   }
 
   let response;
@@ -1279,20 +1307,29 @@ async function fetchAppsScriptHealth(env, now, fetchImpl, providedTimeoutSignal 
       : APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_FETCH_FAILED);
   }
   if (Number(response?.status) >= 300 && Number(response?.status) < 400) {
+    if (timeoutSignal.aborted) {
+      throw appsHealthUnavailableError(APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_TIMEOUT);
+    }
     throw appsHealthUnavailableError(APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_REDIRECT_UNEXPECTED);
   }
   if (!response?.ok) {
+    if (timeoutSignal.aborted) {
+      throw appsHealthUnavailableError(APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_TIMEOUT);
+    }
     throw appsHealthUnavailableError(APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_HTTP_NON_2XX);
   }
   const responseContentType = String(response.headers?.get("content-type") || "");
   if (responseContentType.length > 128 ||
       !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(responseContentType)) {
+    if (timeoutSignal.aborted) {
+      throw appsHealthUnavailableError(APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_TIMEOUT);
+    }
     throw appsHealthUnavailableError(APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_CONTENT_TYPE_INVALID);
   }
 
   let responseText;
   try {
-    responseText = await readBoundedResponseText(response, APPS_HEALTH_MAX_RESPONSE_BYTES);
+    responseText = await readBoundedResponseText(response, APPS_HEALTH_MAX_RESPONSE_BYTES, timeoutSignal);
   } catch {
     throw appsHealthUnavailableError(timeoutSignal.aborted
       ? APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_TIMEOUT
@@ -1302,9 +1339,59 @@ async function fetchAppsScriptHealth(env, now, fetchImpl, providedTimeoutSignal 
   try {
     payload = JSON.parse(responseText);
   } catch {
+    if (timeoutSignal.aborted) {
+      throw appsHealthUnavailableError(APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_TIMEOUT);
+    }
     throw appsHealthUnavailableError(APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_JSON_PARSE_FAILED);
   }
-  return verifyAppsScriptHealthPayload(payload, config, now, requestTimestamp, requestNonce);
+  const verified = await awaitAppsHealthDeadline(
+    verifyAppsScriptHealthPayload(payload, config, now, requestTimestamp, requestNonce),
+    timeoutSignal,
+    APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_TIMEOUT,
+  );
+  if (timeoutSignal.aborted) {
+    throw appsHealthUnavailableError(APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_TIMEOUT);
+  }
+  const elapsedMs = appsHealthElapsedMilliseconds(startedAt, appsHealthClockValue(clock));
+  if (enforceAcceptanceSlo && elapsedMs >= APPS_HEALTH_ACCEPTANCE_SLO_MS) {
+    throw appsHealthUnavailableError(APPS_HEALTH_OUTCOME_CODES.SLO_EXCEEDED);
+  }
+  return verified;
+}
+
+function appsHealthMonotonicNow() {
+  return typeof globalThis.performance?.now === "function" ? globalThis.performance.now() : Date.now();
+}
+
+function appsHealthClockValue(clock) {
+  try {
+    const value = Number(clock());
+    return Number.isFinite(value) ? value : Number.NaN;
+  } catch {
+    return Number.NaN;
+  }
+}
+
+function appsHealthElapsedMilliseconds(startedAt, completedAt) {
+  const elapsed = completedAt - startedAt;
+  return Number.isFinite(elapsed) && elapsed >= 0 ? elapsed : APPS_HEALTH_TRANSPORT_DEADLINE_MS;
+}
+
+async function awaitAppsHealthDeadline(operation, timeoutSignal, timeoutOutcomeCode) {
+  let abortHandler;
+  const aborted = new Promise((_resolve, reject) => {
+    abortHandler = () => reject(appsHealthUnavailableError(timeoutOutcomeCode));
+    if (timeoutSignal.aborted) {
+      abortHandler();
+      return;
+    }
+    timeoutSignal.addEventListener("abort", abortHandler, { once: true });
+  });
+  try {
+    return await Promise.race([operation, aborted]);
+  } finally {
+    timeoutSignal.removeEventListener("abort", abortHandler);
+  }
 }
 
 function validateAppsScriptHealthConfiguration(env) {
@@ -1520,23 +1607,28 @@ async function fetchQueueMetrics(accountId, queueId, token, now, fetchImpl) {
   });
 }
 
-async function readBoundedResponseText(response, maximumBytes) {
+async function readBoundedResponseText(response, maximumBytes, timeoutSignal = null) {
   if (!response || !response.body || typeof response.body.getReader !== "function") {
     throw new Error("OPS_QUEUE_RESPONSE_INVALID");
   }
   const reader = response.body.getReader();
   const chunks = [];
   let byteCount = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (!(value instanceof Uint8Array)) throw new Error("OPS_QUEUE_RESPONSE_INVALID");
-    byteCount += value.byteLength;
-    if (byteCount > maximumBytes) {
-      try { await reader.cancel(); } catch { /* no-op */ }
-      throw new Error("OPS_QUEUE_RESPONSE_TOO_LARGE");
+  try {
+    while (true) {
+      const { done, value } = await readResponseChunk(reader, timeoutSignal);
+      if (done) break;
+      if (!(value instanceof Uint8Array)) throw new Error("OPS_QUEUE_RESPONSE_INVALID");
+      byteCount += value.byteLength;
+      if (byteCount > maximumBytes) throw new Error("OPS_QUEUE_RESPONSE_TOO_LARGE");
+      chunks.push(value);
     }
-    chunks.push(value);
+  } catch (error) {
+    try {
+      const cancellation = reader.cancel();
+      if (cancellation && typeof cancellation.catch === "function") void cancellation.catch(() => {});
+    } catch { /* no-op */ }
+    throw error;
   }
   const combined = new Uint8Array(byteCount);
   let offset = 0;
@@ -1545,6 +1637,21 @@ async function readBoundedResponseText(response, maximumBytes) {
     offset += chunk.byteLength;
   }
   return new TextDecoder("utf-8", { fatal: true }).decode(combined);
+}
+
+async function readResponseChunk(reader, timeoutSignal) {
+  if (!(timeoutSignal instanceof AbortSignal)) return reader.read();
+  if (timeoutSignal.aborted) throw new Error("OPS_RESPONSE_READ_ABORTED");
+  let abortHandler;
+  const aborted = new Promise((_resolve, reject) => {
+    abortHandler = () => reject(new Error("OPS_RESPONSE_READ_ABORTED"));
+    timeoutSignal.addEventListener("abort", abortHandler, { once: true });
+  });
+  try {
+    return await Promise.race([reader.read(), aborted]);
+  } finally {
+    timeoutSignal.removeEventListener("abort", abortHandler);
+  }
 }
 
 function queueMetricInteger(value, maximum) {
