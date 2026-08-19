@@ -93,6 +93,21 @@ const APPS_HEALTH_TIMEOUT_MS = 5000;
 const APPS_HEALTH_MAX_REQUEST_BYTES = 2048;
 const APPS_HEALTH_MAX_RESPONSE_BYTES = 8192;
 const APPS_HEALTH_FRESHNESS_SECONDS = 300;
+const APPS_HEALTH_OUTCOME_CODES = Object.freeze({
+  SIGNED_DISABLED: "APPS_HEALTH_SIGNED_DISABLED",
+  SIGNED_FAILED: "APPS_HEALTH_SIGNED_FAILED",
+  FIRST_HOP_TIMEOUT: "APPS_HEALTH_FIRST_HOP_TIMEOUT",
+  FIRST_HOP_UNAVAILABLE: "APPS_HEALTH_FIRST_HOP_UNAVAILABLE",
+  SECOND_HOP_TIMEOUT: "APPS_HEALTH_SECOND_HOP_TIMEOUT",
+  SECOND_HOP_UNAVAILABLE: "APPS_HEALTH_SECOND_HOP_UNAVAILABLE",
+  INTEGRITY_FAILURE: "APPS_HEALTH_INTEGRITY_FAILURE",
+});
+const APPS_HEALTH_UNAVAILABLE_OUTCOME_CODES = new Set([
+  APPS_HEALTH_OUTCOME_CODES.FIRST_HOP_TIMEOUT,
+  APPS_HEALTH_OUTCOME_CODES.FIRST_HOP_UNAVAILABLE,
+  APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_TIMEOUT,
+  APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_UNAVAILABLE,
+]);
 const APPS_SCRIPT_ORIGIN = "https://script.google.com";
 const APPS_SCRIPT_RESPONSE_ORIGIN = "https://script.googleusercontent.com";
 const APPS_HEALTH_REQUEST_FIELDS = Object.freeze([
@@ -271,6 +286,7 @@ async function runMonitor(env, scheduledAt, observedAt = new Date()) {
 
   const startedAt = observationTime.toISOString();
   let sourceState = "AVAILABLE";
+  let appsHealthOutcomeCode = "";
   const signals = [];
   const resolvableKeys = new Set();
   try {
@@ -291,6 +307,7 @@ async function runMonitor(env, scheduledAt, observedAt = new Date()) {
 
   if (flag(env?.OPS_APPS_SCRIPT_MONITORING_ENABLED)) {
     const appsScriptResult = await readAppsScriptHealthSignals(env, observationTime);
+    appsHealthOutcomeCode = appsScriptResult.outcomeCode;
     signals.push(...appsScriptResult.signals);
     for (const alertKey of appsScriptResult.resolvableKeys) resolvableKeys.add(alertKey);
     if (appsScriptResult.sourceState === "UNAVAILABLE") sourceState = "UNAVAILABLE";
@@ -303,7 +320,9 @@ async function runMonitor(env, scheduledAt, observedAt = new Date()) {
   const runState = sourceState === "UNAVAILABLE"
     ? "FAILED"
     : criticalCount > 0 ? "CRITICAL" : warningCount > 0 ? "WARNING" : "HEALTHY";
-  const summaryCode = runState === "HEALTHY" ? "ALL_CLEAR" : `MONITOR_${runState}`;
+  const summaryCode = runState === "HEALTHY"
+    ? "ALL_CLEAR"
+    : appsHealthOutcomeCode || `MONITOR_${runState}`;
   const incidentObservedAt = startedAt;
   const dedupeUntil = new Date(Date.parse(incidentObservedAt) + clampInt(env.OPS_ALERT_DEDUPE_SECONDS,
     DEFAULT_ALERT_DEDUPE_SECONDS, 60, 86400) * 1000).toISOString();
@@ -1117,8 +1136,14 @@ async function readAppsScriptHealthSignals(env, now, fetchImpl = globalThis.fetc
     result = await fetchAppsScriptHealth(env, now, fetchImpl);
   } catch (error) {
     const integrityFailure = error?.code === "OPS_APPS_HEALTH_INTEGRITY_FAILURE";
+    const unavailableOutcomeCode = APPS_HEALTH_UNAVAILABLE_OUTCOME_CODES.has(error?.outcomeCode)
+      ? error.outcomeCode
+      : APPS_HEALTH_OUTCOME_CODES.FIRST_HOP_UNAVAILABLE;
     return Object.freeze({
       sourceState: "UNAVAILABLE",
+      outcomeCode: integrityFailure
+        ? APPS_HEALTH_OUTCOME_CODES.INTEGRITY_FAILURE
+        : unavailableOutcomeCode,
       signals: Object.freeze([
         integrityFailure
           ? makeSignal("APPS_HEALTH_INTEGRITY_FAILURE", "CRITICAL", 1,
@@ -1133,6 +1158,9 @@ async function readAppsScriptHealthSignals(env, now, fetchImpl = globalThis.fetc
   if (result.inspectionState !== "COMPLETE") {
     return Object.freeze({
       sourceState: "UNAVAILABLE",
+      outcomeCode: result.inspectionState === "DISABLED"
+        ? APPS_HEALTH_OUTCOME_CODES.SIGNED_DISABLED
+        : APPS_HEALTH_OUTCOME_CODES.SIGNED_FAILED,
       signals: Object.freeze([
         makeSignal("APPS_HEALTH_UNAVAILABLE", "WARNING", 1, "APPS_HEALTH_SOURCE_UNAVAILABLE"),
       ]),
@@ -1143,6 +1171,7 @@ async function readAppsScriptHealthSignals(env, now, fetchImpl = globalThis.fetc
   if (!result.configurationHealthy) {
     return Object.freeze({
       sourceState: "AVAILABLE",
+      outcomeCode: "",
       signals: Object.freeze([
         makeSignal("APPS_CONFIGURATION_UNHEALTHY", "CRITICAL", 1,
           "APPS_RUNTIME_CONFIGURATION_UNHEALTHY"),
@@ -1156,6 +1185,7 @@ async function readAppsScriptHealthSignals(env, now, fetchImpl = globalThis.fetc
 
   return Object.freeze({
     sourceState: "AVAILABLE",
+    outcomeCode: "",
     signals: Object.freeze([]),
     resolvableKeys: APPS_SCRIPT_ALERT_KEYS,
   });
@@ -1166,9 +1196,11 @@ async function fetchAppsScriptHealth(env, now, fetchImpl) {
   try {
     config = validateAppsScriptHealthConfiguration(env);
   } catch {
-    throw appsHealthUnavailableError();
+    throw appsHealthUnavailableError(APPS_HEALTH_OUTCOME_CODES.FIRST_HOP_UNAVAILABLE);
   }
-  if (typeof fetchImpl !== "function") throw appsHealthUnavailableError();
+  if (typeof fetchImpl !== "function") {
+    throw appsHealthUnavailableError(APPS_HEALTH_OUTCOME_CODES.FIRST_HOP_UNAVAILABLE);
+  }
   const requestTimestamp = String(Math.floor(now.getTime() / 1000));
   const requestNonce = crypto.randomUUID();
   const requestValues = Object.freeze({
@@ -1183,7 +1215,7 @@ async function fetchAppsScriptHealth(env, now, fetchImpl) {
   const requestSignature = await hmacSha256Hex(canonicalRequest, config.sharedSecret);
   const requestBody = `${canonicalRequest}&request_signature=${encodeURIComponent(requestSignature)}`;
   if (new TextEncoder().encode(requestBody).byteLength > APPS_HEALTH_MAX_REQUEST_BYTES) {
-    throw appsHealthUnavailableError();
+    throw appsHealthUnavailableError(APPS_HEALTH_OUTCOME_CODES.FIRST_HOP_UNAVAILABLE);
   }
 
   const timeoutSignal = AbortSignal.timeout(APPS_HEALTH_TIMEOUT_MS);
@@ -1200,9 +1232,13 @@ async function fetchAppsScriptHealth(env, now, fetchImpl) {
       signal: timeoutSignal,
     });
   } catch {
-    throw appsHealthUnavailableError();
+    throw appsHealthUnavailableError(timeoutSignal.aborted
+      ? APPS_HEALTH_OUTCOME_CODES.FIRST_HOP_TIMEOUT
+      : APPS_HEALTH_OUTCOME_CODES.FIRST_HOP_UNAVAILABLE);
   }
-  if (![302, 303].includes(Number(redirectResponse?.status))) throw appsHealthUnavailableError();
+  if (![302, 303].includes(Number(redirectResponse?.status))) {
+    throw appsHealthUnavailableError(APPS_HEALTH_OUTCOME_CODES.FIRST_HOP_UNAVAILABLE);
+  }
 
   const redirectLocation = String(redirectResponse.headers?.get("location") || "");
   if (!redirectLocation || redirectLocation.length > 2048) throw appsHealthIntegrityError();
@@ -1226,26 +1262,32 @@ async function fetchAppsScriptHealth(env, now, fetchImpl) {
       signal: timeoutSignal,
     });
   } catch {
-    throw appsHealthUnavailableError();
+    throw appsHealthUnavailableError(timeoutSignal.aborted
+      ? APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_TIMEOUT
+      : APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_UNAVAILABLE);
   }
-  if (!response?.ok) throw appsHealthUnavailableError();
+  if (!response?.ok) {
+    throw appsHealthUnavailableError(APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_UNAVAILABLE);
+  }
   const responseContentType = String(response.headers?.get("content-type") || "");
   if (responseContentType.length > 128 ||
       !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(responseContentType)) {
-    throw appsHealthUnavailableError();
+    throw appsHealthUnavailableError(APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_UNAVAILABLE);
   }
 
   let responseText;
   try {
     responseText = await readBoundedResponseText(response, APPS_HEALTH_MAX_RESPONSE_BYTES);
   } catch {
-    throw appsHealthUnavailableError();
+    throw appsHealthUnavailableError(timeoutSignal.aborted
+      ? APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_TIMEOUT
+      : APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_UNAVAILABLE);
   }
   let payload;
   try {
     payload = JSON.parse(responseText);
   } catch {
-    throw appsHealthUnavailableError();
+    throw appsHealthUnavailableError(APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_UNAVAILABLE);
   }
   return verifyAppsScriptHealthPayload(payload, config, now, requestTimestamp, requestNonce);
 }
@@ -1370,9 +1412,12 @@ function sameOrderedValues(actual, expected) {
   return actual.length === expected.length && actual.every((value, index) => value === expected[index]);
 }
 
-function appsHealthUnavailableError() {
+function appsHealthUnavailableError(outcomeCode = APPS_HEALTH_OUTCOME_CODES.FIRST_HOP_UNAVAILABLE) {
   const error = new Error("OPS_APPS_HEALTH_UNAVAILABLE");
   error.code = "OPS_APPS_HEALTH_UNAVAILABLE";
+  error.outcomeCode = APPS_HEALTH_UNAVAILABLE_OUTCOME_CODES.has(outcomeCode)
+    ? outcomeCode
+    : APPS_HEALTH_OUTCOME_CODES.FIRST_HOP_UNAVAILABLE;
   return error;
 }
 

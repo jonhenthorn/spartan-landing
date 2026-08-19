@@ -1149,6 +1149,18 @@ async function validateWorkerBoundary() {
   assert.match(source, /method: "GET"/, "Queue metrics must use a read-only GET request");
   assert.match(source, /const APPS_HEALTH_TIMEOUT_MS = 5000;/,
     "Apps health must retain one reviewed five-second deadline");
+  for (const outcomeCode of [
+    "APPS_HEALTH_SIGNED_DISABLED",
+    "APPS_HEALTH_SIGNED_FAILED",
+    "APPS_HEALTH_FIRST_HOP_TIMEOUT",
+    "APPS_HEALTH_FIRST_HOP_UNAVAILABLE",
+    "APPS_HEALTH_SECOND_HOP_TIMEOUT",
+    "APPS_HEALTH_SECOND_HOP_UNAVAILABLE",
+    "APPS_HEALTH_INTEGRITY_FAILURE",
+  ]) {
+    assert.match(source, new RegExp(`"${outcomeCode}"`),
+      `${outcomeCode} must remain a fixed source-stage outcome`);
+  }
   assert.match(source, /const APPS_HEALTH_MAX_REQUEST_BYTES = 2048;/,
     "Apps health POST must remain bounded at two KiB");
   assert.match(source, /const APPS_HEALTH_MAX_RESPONSE_BYTES = 8192;/,
@@ -1901,6 +1913,7 @@ async function validateAppsScriptHealthMonitorBehavior(workerModule) {
     contentType = "Application/JSON; Charset=UTF-8",
     rawBody = null,
     payloadOptions = {},
+    firstError = null,
     finalError = null,
   } = {}) => {
     const calls = [];
@@ -1909,6 +1922,7 @@ async function validateAppsScriptHealthMonitorBehavior(workerModule) {
       const callIndex = calls.length;
       calls.push({ url, options });
       if (callIndex === 0) {
+        if (firstError) throw firstError;
         requestParams = new URLSearchParams(String(options.body || ""));
         return new Response(null, { status: redirectStatus, headers: { Location: redirectLocation } });
       }
@@ -1920,6 +1934,33 @@ async function validateAppsScriptHealthMonitorBehavior(workerModule) {
       return new Response(body, { status: finalStatus, headers: { "Content-Type": contentType } });
     };
     return { fetchImpl, calls };
+  };
+  const withImmediateAppsTimeout = async (callback) => {
+    const originalTimeout = AbortSignal.timeout;
+    AbortSignal.timeout = () => {
+      const controller = new AbortController();
+      controller.abort();
+      return controller.signal;
+    };
+    try {
+      return await callback();
+    } finally {
+      AbortSignal.timeout = originalTimeout;
+    }
+  };
+  const runOutcomeMonitor = async (fetchImpl, { immediateTimeout = false } = {}) => {
+    const ops = new MockOpsDB();
+    const originalFetch = globalThis.fetch;
+    const run = async () => {
+      globalThis.fetch = fetchImpl;
+      try {
+        await workerModule.__test.runMonitor(baseEnvironment(ops), base, base);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+      return ops;
+    };
+    return immediateTimeout ? withImmediateAppsTimeout(run) : run();
   };
 
   const orderedFixtureParams = new URLSearchParams({
@@ -1980,38 +2021,46 @@ async function validateAppsScriptHealthMonitorBehavior(workerModule) {
       async () => { calls += 1; throw new Error("POISON_FETCH_TOUCHED"); },
     );
     assert.equal(calls, 0, "Invalid Apps URL configuration must fail before network access");
-    assert.equal(invalid.signals[0].alertKey, "APPS_HEALTH_UNAVAILABLE");
+    assert.deepEqual([invalid.signals[0].alertKey, invalid.outcomeCode],
+      ["APPS_HEALTH_UNAVAILABLE", "APPS_HEALTH_FIRST_HOP_UNAVAILABLE"]);
   }
   let reuseCalls = 0;
   const reusedSecret = await workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(
     new MockOpsDB(), new MockConnectorDB(), { OPS_CLOUDFLARE_QUEUES_READ_TOKEN: TEST_APPS_HEALTH_SECRET },
   ), base, async () => { reuseCalls += 1; throw new Error("POISON_FETCH_TOUCHED"); });
   assert.equal(reuseCalls, 0, "A reused Queue token must be rejected before network access");
-  assert.equal(reusedSecret.signals[0].alertKey, "APPS_HEALTH_UNAVAILABLE");
+  assert.deepEqual([reusedSecret.signals[0].alertKey, reusedSecret.outcomeCode],
+    ["APPS_HEALTH_UNAVAILABLE", "APPS_HEALTH_FIRST_HOP_UNAVAILABLE"]);
   for (const invalidSecret of ["", "short", ` ${TEST_APPS_HEALTH_SECRET}`, `${TEST_APPS_HEALTH_SECRET}\n`]) {
     let calls = 0;
     const result = await workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(
       new MockOpsDB(), new MockConnectorDB(), { OPS_APPS_SCRIPT_HEALTH_SHARED_SECRET: invalidSecret },
     ), base, async () => { calls += 1; throw new Error("POISON_FETCH_TOUCHED"); });
     assert.equal(calls, 0, "An invalid Apps health secret must fail before network access");
-    assert.equal(result.signals[0].alertKey, "APPS_HEALTH_UNAVAILABLE");
+    assert.deepEqual([result.signals[0].alertKey, result.outcomeCode],
+      ["APPS_HEALTH_UNAVAILABLE", "APPS_HEALTH_FIRST_HOP_UNAVAILABLE"]);
   }
   let invalidStateCalls = 0;
   const invalidExpectedState = await workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(
     new MockOpsDB(), new MockConnectorDB(), { OPS_EXPECT_APPS_LEAD_SHEET_STATE: "NOT_CHECKED" },
   ), base, async () => { invalidStateCalls += 1; throw new Error("POISON_FETCH_TOUCHED"); });
   assert.equal(invalidStateCalls, 0, "An invalid expected component state must fail before network access");
-  assert.equal(invalidExpectedState.signals[0].alertKey, "APPS_HEALTH_UNAVAILABLE");
+  assert.deepEqual([invalidExpectedState.signals[0].alertKey, invalidExpectedState.outcomeCode],
+    ["APPS_HEALTH_UNAVAILABLE", "APPS_HEALTH_FIRST_HOP_UNAVAILABLE"]);
 
   for (const status of [200, 301, 307, 400, 429, 500, 503]) {
     const route = scriptedFetch({ redirectStatus: status });
     const result = await workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(), base, route.fetchImpl);
-    assert.equal(result.signals[0].alertKey, "APPS_HEALTH_UNAVAILABLE", `Initial HTTP ${status} must fail closed`);
+    assert.deepEqual([result.signals[0].alertKey, result.outcomeCode],
+      ["APPS_HEALTH_UNAVAILABLE", "APPS_HEALTH_FIRST_HOP_UNAVAILABLE"],
+      `Initial HTTP ${status} must fail closed at the first hop`);
   }
   for (const status of [401, 403, 404, 429, 500, 503]) {
     const route = scriptedFetch({ finalStatus: status });
     const result = await workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(), base, route.fetchImpl);
-    assert.equal(result.signals[0].alertKey, "APPS_HEALTH_UNAVAILABLE", `Final HTTP ${status} must fail closed`);
+    assert.deepEqual([result.signals[0].alertKey, result.outcomeCode],
+      ["APPS_HEALTH_UNAVAILABLE", "APPS_HEALTH_SECOND_HOP_UNAVAILABLE"],
+      `Final HTTP ${status} must fail closed at the redirected second hop`);
   }
   for (const [label, route] of [
     ["malformed JSON", scriptedFetch({ rawBody: "not-json" })],
@@ -2020,11 +2069,27 @@ async function validateAppsScriptHealthMonitorBehavior(workerModule) {
     ["second-hop network error", scriptedFetch({ finalError: new Error(`${TEST_PRIVATE_EMAIL}:private`) })],
   ]) {
     const result = await workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(), base, route.fetchImpl);
-    assert.equal(result.signals[0].alertKey, "APPS_HEALTH_UNAVAILABLE", `${label} must map to source unavailable`);
+    assert.deepEqual([result.signals[0].alertKey, result.outcomeCode],
+      ["APPS_HEALTH_UNAVAILABLE", "APPS_HEALTH_SECOND_HOP_UNAVAILABLE"],
+      `${label} must map to redirected second-hop unavailable`);
   }
   const firstHopFailure = await workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(), base,
     async () => { throw new Error(`${TEST_PRIVATE_EMAIL}:private`); });
-  assert.equal(firstHopFailure.signals[0].alertKey, "APPS_HEALTH_UNAVAILABLE");
+  assert.deepEqual([firstHopFailure.signals[0].alertKey, firstHopFailure.outcomeCode],
+    ["APPS_HEALTH_UNAVAILABLE", "APPS_HEALTH_FIRST_HOP_UNAVAILABLE"]);
+
+  const firstTimeoutRoute = scriptedFetch({ firstError: new Error(`${TEST_PRIVATE_EMAIL}:private-timeout`) });
+  const firstHopTimeout = await withImmediateAppsTimeout(() =>
+    workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(), base, firstTimeoutRoute.fetchImpl));
+  assert.deepEqual([firstHopTimeout.signals[0].alertKey, firstHopTimeout.outcomeCode],
+    ["APPS_HEALTH_UNAVAILABLE", "APPS_HEALTH_FIRST_HOP_TIMEOUT"]);
+  const secondTimeoutRoute = scriptedFetch({ finalError: new Error(`${TEST_PRIVATE_EMAIL}:private-timeout`) });
+  const secondHopTimeout = await withImmediateAppsTimeout(() =>
+    workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(), base, secondTimeoutRoute.fetchImpl));
+  assert.deepEqual([secondHopTimeout.signals[0].alertKey, secondHopTimeout.outcomeCode],
+    ["APPS_HEALTH_UNAVAILABLE", "APPS_HEALTH_SECOND_HOP_TIMEOUT"]);
+  assert.doesNotMatch(JSON.stringify([firstHopTimeout, secondHopTimeout]), /private-timeout|example\.com|@/,
+    "Timeout outcomes must not retain raw errors");
 
   for (const [label, route] of [
     ["untrusted redirect origin", scriptedFetch({ redirectLocation: "https://evil.example/macros/echo?token=private" })],
@@ -2047,8 +2112,9 @@ async function validateAppsScriptHealthMonitorBehavior(workerModule) {
     ["future response", scriptedFetch({ payloadOptions: { checkedAt: at(301) } })],
   ]) {
     const result = await workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(), base, route.fetchImpl);
-    assert.deepEqual([result.sourceState, result.signals[0].alertKey],
-      ["UNAVAILABLE", "APPS_HEALTH_INTEGRITY_FAILURE"], `${label} must map to integrity failure`);
+    assert.deepEqual([result.sourceState, result.signals[0].alertKey, result.outcomeCode],
+      ["UNAVAILABLE", "APPS_HEALTH_INTEGRITY_FAILURE", "APPS_HEALTH_INTEGRITY_FAILURE"],
+      `${label} must map to integrity failure`);
     assert.doesNotMatch(JSON.stringify(result), /private\.person|evil\.example|token=private/,
       "Raw Apps health failures must not escape into monitor evidence");
   }
@@ -2061,8 +2127,10 @@ async function validateAppsScriptHealthMonitorBehavior(workerModule) {
   for (const inspectionState of ["DISABLED", "FAILED"]) {
     const route = scriptedFetch({ payloadOptions: { inspectionState } });
     const result = await workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(), base, route.fetchImpl);
-    assert.deepEqual([result.sourceState, result.signals[0].alertKey, result.resolvableKeys.length],
-      ["UNAVAILABLE", "APPS_HEALTH_UNAVAILABLE", 0],
+    assert.deepEqual([result.sourceState, result.signals[0].alertKey, result.resolvableKeys.length,
+      result.outcomeCode],
+    ["UNAVAILABLE", "APPS_HEALTH_UNAVAILABLE", 0,
+      `APPS_HEALTH_SIGNED_${inspectionState}`],
     `Signed ${inspectionState} preserves every existing Apps incident and observes unavailable`);
   }
   const invalidDisabled = scriptedFetch({ payloadOptions: {
@@ -2080,13 +2148,95 @@ async function validateAppsScriptHealthMonitorBehavior(workerModule) {
     mismatch.sourceState,
     mismatch.signals[0].alertKey,
     [...mismatch.resolvableKeys].sort(),
+    mismatch.outcomeCode,
   ], ["AVAILABLE", "APPS_CONFIGURATION_UNHEALTHY",
-    ["APPS_HEALTH_INTEGRITY_FAILURE", "APPS_HEALTH_UNAVAILABLE"]]);
+    ["APPS_HEALTH_INTEGRITY_FAILURE", "APPS_HEALTH_UNAVAILABLE"], ""]);
   const healthyRoute = scriptedFetch();
   const healthy = await workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(), base, healthyRoute.fetchImpl);
-  assert.deepEqual([healthy.sourceState, healthy.signals.length, [...healthy.resolvableKeys].sort()],
-    ["AVAILABLE", 0, ["APPS_CONFIGURATION_UNHEALTHY", "APPS_HEALTH_INTEGRITY_FAILURE",
-      "APPS_HEALTH_UNAVAILABLE"]]);
+  assert.deepEqual([healthy.sourceState, healthy.signals.length, [...healthy.resolvableKeys].sort(),
+    healthy.outcomeCode],
+  ["AVAILABLE", 0, ["APPS_CONFIGURATION_UNHEALTHY", "APPS_HEALTH_INTEGRITY_FAILURE",
+    "APPS_HEALTH_UNAVAILABLE"], ""]);
+
+  const unavailableFixture = new Error(`${TEST_PRIVATE_EMAIL}:private-stage-error`);
+  const outcomeCases = [
+    {
+      expected: "APPS_HEALTH_SIGNED_DISABLED",
+      route: scriptedFetch({ payloadOptions: { inspectionState: "DISABLED" } }),
+    },
+    {
+      expected: "APPS_HEALTH_SIGNED_FAILED",
+      route: scriptedFetch({ payloadOptions: { inspectionState: "FAILED" } }),
+    },
+    {
+      expected: "APPS_HEALTH_FIRST_HOP_TIMEOUT",
+      route: scriptedFetch({ firstError: unavailableFixture }),
+      immediateTimeout: true,
+    },
+    {
+      expected: "APPS_HEALTH_FIRST_HOP_UNAVAILABLE",
+      route: scriptedFetch({ firstError: unavailableFixture }),
+    },
+    {
+      expected: "APPS_HEALTH_SECOND_HOP_TIMEOUT",
+      route: scriptedFetch({ finalError: unavailableFixture }),
+      immediateTimeout: true,
+    },
+    {
+      expected: "APPS_HEALTH_SECOND_HOP_UNAVAILABLE",
+      route: scriptedFetch({ finalError: unavailableFixture }),
+    },
+  ];
+  for (const testCase of outcomeCases) {
+    const ops = await runOutcomeMonitor(testCase.route.fetchImpl, {
+      immediateTimeout: Boolean(testCase.immediateTimeout),
+    });
+    const run = ops.monitorRuns[0];
+    const incident = ops.incidents[0];
+    assert.deepEqual([
+      run.summary_code,
+      run.run_state,
+      run.signal_source_state,
+      run.warning_count,
+      run.critical_count,
+      incident.alert_key,
+      incident.severity_code,
+      incident.reason_code,
+    ], [
+      testCase.expected,
+      "FAILED",
+      "UNAVAILABLE",
+      1,
+      0,
+      "APPS_HEALTH_UNAVAILABLE",
+      "WARNING",
+      "APPS_HEALTH_SOURCE_UNAVAILABLE",
+    ], `${testCase.expected} must persist without changing alert semantics`);
+    assert.doesNotMatch(JSON.stringify(ops.executed), /private-stage-error|example\.com|@|script\.google/,
+      `${testCase.expected} must not persist a raw error or URL`);
+  }
+
+  const integrityOps = await runOutcomeMonitor(scriptedFetch({
+    payloadOptions: { invalidSignature: true },
+  }).fetchImpl);
+  assert.deepEqual([
+    integrityOps.monitorRuns[0].summary_code,
+    integrityOps.monitorRuns[0].run_state,
+    integrityOps.monitorRuns[0].warning_count,
+    integrityOps.monitorRuns[0].critical_count,
+    integrityOps.incidents[0].alert_key,
+    integrityOps.incidents[0].severity_code,
+  ], ["APPS_HEALTH_INTEGRITY_FAILURE", "FAILED", 0, 1, "APPS_HEALTH_INTEGRITY_FAILURE", "CRITICAL"],
+  "Integrity failure must remain critical while using only its fixed summary code");
+
+  const healthyOps = await runOutcomeMonitor(scriptedFetch().fetchImpl);
+  assert.deepEqual([
+    healthyOps.monitorRuns[0].summary_code,
+    healthyOps.monitorRuns[0].run_state,
+    healthyOps.monitorRuns[0].signal_source_state,
+    healthyOps.incidents.length,
+  ], ["ALL_CLEAR", "HEALTHY", "AVAILABLE", 0],
+  "A verified healthy Apps response must retain the existing ALL_CLEAR summary");
 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => { throw new Error(`${TEST_PRIVATE_EMAIL}:private`); };

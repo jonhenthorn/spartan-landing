@@ -153,6 +153,10 @@ const unavailable = await runAppsHealthProbe({
   clock: clock(),
 });
 assert.equal(unavailable.result_code, "OPS_APPS_HEALTH_UNAVAILABLE");
+assert.equal(Object.hasOwn(unavailable, "outcome_code"), false,
+  "Internal scheduled-stage outcomes must not change direct probe output");
+assert.doesNotMatch(JSON.stringify(unavailable), /APPS_HEALTH_(?:FIRST|SECOND)_HOP/,
+  "Direct probe failures must retain their existing bounded public code");
 assert.doesNotMatch(JSON.stringify(unavailable), /private-user|private-url|private-secret|@/);
 
 const integrity = await runAppsHealthProbe({
