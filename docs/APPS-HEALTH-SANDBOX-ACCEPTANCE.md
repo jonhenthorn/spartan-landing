@@ -1,10 +1,10 @@
 # Signed Apps-health sandbox acceptance worksheet
 
-Last reviewed: August 18, 2026
+Last reviewed: August 19, 2026
 
-Status: **executed once on August 18, 2026; did not pass Phase 3.** Phases 0–2 passed, but the first enabled full inspection took `5016 ms`, exceeding the strict `<5000 ms` gate by 16 ms. The immediate repeat returned a valid healthy result in `3878 ms`, but it does not override the stop condition. Phases 4 and 5 were not run. Emergency cleanup is complete: the Apps endpoint is disabled, the dedicated Apps property and both Worker secrets are removed, every operations capability flag is false, and the final all-off cron wrote nothing. Do not retry until the live-latency path or reviewed timeout is changed offline and a new run is separately approved.
+Status: **the August 18 run and both August 19 follow-up attempts stopped under their fail-closed gates; acceptance is not complete.** The optimized Apps code is published as sandbox Version 4 and passed an inert no-write interval. On August 19, fresh credentials also passed the credential-inert interval and two signed `DISABLED` probes (`1791 ms`, `1009 ms`), but the run stopped during Phase 2 when automation output disclosed private Apps configuration. The exposed connector signing secret was rotated in both disabled sandbox stores. A final hardened attempt then stopped before any credential was saved or sent because its exact new-property selector was not unique. Cleanup is complete: Apps health is disabled, its property and both Worker secrets are absent, all six operations capabilities are false, and the final all-off cron wrote nothing. Do not make a fourth attempt without a new explicit approval and a separately reviewed owner-controlled property workflow.
 
-Local follow-up: an undeployed exact-semantic optimization now removes duplicate/disabled property reads and reuses one workbook-tab enumeration without narrowing the formula or allocated-row formatting checks. The five-second gate is unchanged. This source change is not evidence of improved live latency and does not authorize deployment, credential creation or another signed request.
+The exact-semantic optimization removes duplicate/disabled property reads and reuses one workbook-tab enumeration without narrowing the formula or allocated-row formatting checks. It is deployed as sandbox Apps Version 4 and its all-off publication produced no operations or connector write. The five-second gate is unchanged; inert deployment is not successful signed acceptance.
 
 ## August 18 execution outcome
 
@@ -14,8 +14,18 @@ Local follow-up: an undeployed exact-semantic optimization now removes duplicate
 - Enabled-test version `f68abb5f-2507-4af3-8f46-40b4b87a61ea` had only aggregate monitoring and the Apps source true. Queue, alerts, backups and restores stayed false; the exact runtime D1 bindings and two reviewed secret names were verified before deployment.
 - Two direct disabled probes returned valid signed `DISABLED` results in `1500 ms` and `1485 ms`. The supervised interval ran longer than planned and produced nine—not two—consecutive five-minute `FAILED` / `UNAVAILABLE` observations from `2026-08-18T17:45:54.816Z` through `2026-08-18T18:25:54.803Z`. They remained one warning incident with occurrence count nine and zero deliveries.
 - After enabling only the metadata inspection, the first direct healthy probe failed the deadline at `5016 ms`. The immediate repeat returned valid signed `COMPLETE`, configuration healthy, in `3878 ms`. Per the stop rule, the run ended without the forced-environment or configuration-mismatch phases and without waiting for a healthy recovery cron.
-- Emergency cleanup first redeployed the known all-off rollback version, then used a tracked all-off cleanup version so Cloudflare could delete both versioned secret bindings. Final operations version `65e97390-997e-46e8-9afa-f8721c644ef0` is at 100%, has the exact runtime D1 bindings, no secret or unexpected binding, and all six flags false. Apps Version 3 has health disabled, environment `sandbox` and no health secret. Keychain items, browser-held values and clipboards were cleared.
+- Emergency cleanup first redeployed the known all-off rollback version, then used a tracked all-off cleanup version so Cloudflare could delete both versioned secret bindings. At the August 18 close, operations version `65e97390-997e-46e8-9afa-f8721c644ef0` was at 100%, had the exact runtime D1 bindings, no secret or unexpected binding, and all six flags false. Apps Version 3 had health disabled, environment `sandbox` and no health secret. Keychain items, browser-held values and clipboards were cleared.
 - Final operations D1 contains 17 monitor runs and three incidents. The new `APPS_HEALTH_UNAVAILABLE` warning remains open with occurrence count nine as preserved failed-run evidence; deliveries, backups and restores remain zero. The all-off cron after cleanup changed no count or prior maximum timestamp. No production, customer, order, coupon, Square, Brevo, website or form state changed.
+
+## August 19 follow-up outcomes
+
+- Sandbox Apps Version 4 was published on the existing deployment with health disabled. Its public form-service contract remained unchanged, and the next all-off operations interval left D1 and connector aggregates unchanged.
+- The first corrected attempt installed a fresh dedicated credential while every capability was false. Credential-inert operations version `69e5238e-2990-4c8a-b81b-f4ca3fb70b72` produced no write. Enabled-test version `a21de7b9-f103-4b18-9be6-1820b81a4eb3` enabled only aggregate and Apps monitoring; signed `DISABLED` probes passed in `1791 ms` and `1009 ms`.
+- One scheduled observation at `2026-08-19T03:00:44.646Z` recorded `FAILED` / `UNAVAILABLE`, one warning and no delivery. The existing Apps-unavailable incident reset its confirmation sequence to occurrence one after the gap exceeded 540 seconds; this did not create a fourth incident. A second required observation never ran.
+- The attempt stopped when automation output displayed the private Apps deployment locator and private Script Property values, including the active sandbox Square-connector signing secret. No private locator or value is reproduced here. Apps health was never enabled, so healthy, forced-failure, mismatch and recovery phases were not run.
+- Incident cleanup removed the Apps health property, both Worker health secrets and all temporary Keychain/clipboard material. The exposed connector signing secret was revoked and replaced in Apps Script and the disabled connector. Connector version `0ff5a2ab-2f2c-4872-a624-29d976ab54de` is at 100% with all automation and harness flags false, canary-only true and an empty allowlist.
+- Operations version `d600bb6e-2a54-44c5-addd-2d3ada1ed393` is at 100%, schema 4, scheduled-only, secretless and all six flags false. The `03:10` UTC trigger wrote nothing. Final operations D1 has 18 monitor runs, three incidents, one active `APPS_HEALTH_UNAVAILABLE` warning at occurrence one, and zero deliveries, backups or restores. Connector D1/business state and production remained unchanged.
+- One final hardened attempt used exact-key-only browser rules. It stopped before any health credential was saved or sent because the newly added property field could not be resolved uniquely. The unsaved blank row was discarded, the unused fresh Keychain credential was deleted, and no Worker secret, flag or D1 state changed. No fourth attempt is authorized by this worksheet.
 
 ## Purpose
 
@@ -54,9 +64,9 @@ Do not blindly retry a timeout or integrity failure. Preserve the fixed evidence
 Require all of the following before credential entry:
 
 - Git worktree clean; current branch and draft PR synchronized.
-- Apps sandbox deployment Version `3`; `OPS_HEALTH_ENABLED=false`; `OPS_HEALTH_ENVIRONMENT=sandbox`; `OPS_HEALTH_SHARED_SECRET` absent.
-- Operations Worker Version `804dae4f-44d8-45de-a6e1-6ca3182d682e` at 100%, scheduled-only, schema `4`, exact runtime D1 bindings, no secrets and all six capability flags false.
-- Runtime operations D1: 8 monitor runs, 2 resolved incidents, 0 active incidents, 0 deliveries, 0 backups and 0 restores.
+- Apps sandbox deployment Version `4`; `OPS_HEALTH_ENABLED=false`; `OPS_HEALTH_ENVIRONMENT=sandbox`; `OPS_HEALTH_SHARED_SECRET` absent.
+- Operations Worker Version `d600bb6e-2a54-44c5-addd-2d3ada1ed393` at 100%, scheduled-only, schema `4`, exact runtime D1 bindings, no secrets and all six capability flags false.
+- Runtime operations D1: 18 monitor runs, 3 incidents, 1 active Apps-unavailable warning at occurrence one, 0 deliveries, 0 backups and 0 restores.
 - Connector aggregate sources: zero due/nonterminal work, dead outbox, bounded rejections and reconciliation overflow.
 - `node scripts/validate-apps-health-probe.mjs`, `node scripts/validate-apps-health.mjs` and `node scripts/validate-square-ops.mjs` pass.
 
@@ -162,16 +172,16 @@ Rollback exposure first:
 5. Deploy the tracked sandbox configuration so all six capability flags are false. Verify no secret name, route, email/Queue/R2 binding or unexpected variable remains.
 6. Wait through one final cron plus settling minute. Require every count and prior maximum timestamp to remain unchanged.
 
-Passing target (not achieved by the August 18 run):
+Passing target (not achieved by any completed run):
 
-- Apps: Version 3, `OPS_HEALTH_ENABLED=false`, environment `sandbox`, no health secret.
+- Apps: Version 4, `OPS_HEALTH_ENABLED=false`, environment `sandbox`, no health secret.
 - Operations Worker: schema 4, all six capabilities false, no Apps URL/secret, no Queue token, email or R2 binding, scheduled-only and no public route.
 - D1: preserved fixed monitor/incident evidence; zero active incident, delivery, backup and restore rows. The failed run ended with one open warning incident, so this criterion is **not met**.
 - Production and business state unchanged; the sandbox connector remains disabled, with any credential-exposure remediation and resulting version recorded separately.
 
 ## Emergency rollback
 
-1. Immediately deploy Version `804dae4f-44d8-45de-a6e1-6ca3182d682e` at 100%. Confirm the rollback even if Cloudflare warns that its secret bindings differ from the current test version.
+1. Immediately return to the newest reviewed all-off version. The current verified target is `d600bb6e-2a54-44c5-addd-2d3ada1ed393`; re-verify it before any future run rather than assuming this identifier remains current.
 2. Verify schema 4, exact runtime D1 IDs, all six false flags, no URL/secret and only the scheduled handler.
 3. Set Apps `OPS_HEALTH_ENABLED=false`, restore environment `sandbox` and remove `OPS_HEALTH_SHARED_SECRET`.
 4. Clear temporary credential material. Rotate the dedicated health secret if it appeared anywhere.
@@ -196,4 +206,19 @@ Passing target (not achieved by the August 18 run):
 
 This execution did **not** pass the worksheet and does not approve another live retry. Queue monitoring, alert delivery, backups/restores, physical scanner compatibility and production canary approval remain separate gates.
 
-Before any revised run, publish the reviewed optimized Apps version while health remains disabled, repeat the inert no-write proof, and obtain a new explicit approval. The new run must use a fresh dedicated health credential and must preserve this failed-run record rather than overwriting it.
+## Evidence record — August 19 stopped follow-ups
+
+| Evidence | Result |
+|---|---|
+| Optimized Apps publication | Version 4 on the existing sandbox deployment; health disabled; public contract unchanged; all-off cron wrote nothing |
+| Credential-inert version | `69e5238e-2990-4c8a-b81b-f4ca3fb70b72`; counts and prior timestamps unchanged |
+| Enabled test and direct disabled probes | `a21de7b9-f103-4b18-9be6-1820b81a4eb3`; signed `DISABLED` in `1791 ms` and `1009 ms` |
+| Scheduled evidence | One `FAILED` / `UNAVAILABLE` warning at `2026-08-19T03:00:44.646Z`; no second observation or delivery |
+| Exposure stop and remediation | Private values were not copied into this record; health credentials removed; connector signing secret rotated in both stores |
+| Healthy/failure/mismatch/recovery phases | Not run; Apps health was never enabled |
+| Current operations boundary | `d600bb6e-2a54-44c5-addd-2d3ada1ed393`; all six flags false; secretless; final all-off cron wrote nothing |
+| Current connector boundary | `0ff5a2ab-2f2c-4872-a624-29d976ab54de`; all automation/harness flags false; canary-only true/empty |
+| Final D1 reconciliation | 18 runs; 3 incidents; 1 active `APPS_HEALTH_UNAVAILABLE` occurrence 1; 0 deliveries/backups/restores |
+| Hardened final attempt | Stopped before credential save/send on non-unique field selector; unsaved row discarded and unused credential deleted |
+
+Before any revised run, obtain a new explicit approval. It must use a fresh dedicated health credential, start from the 18/3/1 baseline, preserve both failed-run records and use an owner-controlled property workflow that cannot render unrelated values or the private endpoint.
