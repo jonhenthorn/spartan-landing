@@ -1158,12 +1158,23 @@ async function validateWorkerBoundary() {
     "APPS_HEALTH_FIRST_HOP_TIMEOUT",
     "APPS_HEALTH_FIRST_HOP_UNAVAILABLE",
     "APPS_HEALTH_SECOND_HOP_TIMEOUT",
-    "APPS_HEALTH_SECOND_HOP_UNAVAILABLE",
+    "APPS_HEALTH_SECOND_HOP_FETCH_FAILED",
+    "APPS_HEALTH_SECOND_HOP_REDIRECT_UNEXPECTED",
+    "APPS_HEALTH_SECOND_HOP_HTTP_NON_2XX",
+    "APPS_HEALTH_SECOND_HOP_CONTENT_TYPE_INVALID",
+    "APPS_HEALTH_SECOND_HOP_BODY_READ_OR_DECODE_FAILED",
+    "APPS_HEALTH_SECOND_HOP_JSON_PARSE_FAILED",
     "APPS_HEALTH_INTEGRITY_FAILURE",
   ]) {
+    assert.ok(outcomeCode.length <= 80 && /^[A-Z0-9_]+$/.test(outcomeCode),
+      `${outcomeCode} must fit the existing bounded summary-code schema`);
     assert.match(source, new RegExp(`"${outcomeCode}"`),
       `${outcomeCode} must remain a fixed source-stage outcome`);
   }
+  assert.doesNotMatch(source, /"APPS_HEALTH_SECOND_HOP_UNAVAILABLE"/,
+    "The ambiguous second-hop unavailable outcome must not remain emit-capable");
+  assert.equal((source.match(/\.get\("location"\)/g) || []).length, 1,
+    "Only the initial Google redirect may read a Location header");
   assert.match(source, /const APPS_HEALTH_MAX_REQUEST_BYTES = 2048;/,
     "Apps health POST must remain bounded at two KiB");
   assert.match(source, /const APPS_HEALTH_MAX_RESPONSE_BYTES = 8192;/,
@@ -1918,6 +1929,8 @@ async function validateAppsScriptHealthMonitorBehavior(workerModule) {
     payloadOptions = {},
     firstError = null,
     finalError = null,
+    finalLocation = null,
+    finalResponseFactory = null,
   } = {}) => {
     const calls = [];
     let requestParams = null;
@@ -1931,10 +1944,13 @@ async function validateAppsScriptHealthMonitorBehavior(workerModule) {
       }
       if (callIndex !== 1) throw new Error("UNEXPECTED_APPS_HEALTH_FETCH");
       if (finalError) throw finalError;
+      if (finalResponseFactory) return finalResponseFactory();
       const body = rawBody === null
         ? JSON.stringify(await buildPayload(requestParams, payloadOptions))
         : rawBody;
-      return new Response(body, { status: finalStatus, headers: { "Content-Type": contentType } });
+      const headers = { "Content-Type": contentType };
+      if (finalLocation !== null) headers.Location = finalLocation;
+      return new Response(body, { status: finalStatus, headers });
     };
     return { fetchImpl, calls };
   };
@@ -2029,7 +2045,7 @@ async function validateAppsScriptHealthMonitorBehavior(workerModule) {
       hasBody: Object.hasOwn(get.options, "body"),
       sameDeadline: get.options.signal === post.options.signal,
     }, {
-      method: "GET", redirect: "error", headers: { Accept: "application/json" },
+      method: "GET", redirect: "manual", headers: { Accept: "application/json" },
       hasBody: false, sameDeadline: true,
     }, "The redirect hop must strip the signed body and reuse the one total deadline");
   }
@@ -2081,23 +2097,55 @@ async function validateAppsScriptHealthMonitorBehavior(workerModule) {
       ["APPS_HEALTH_UNAVAILABLE", "APPS_HEALTH_FIRST_HOP_UNAVAILABLE"],
       `Initial HTTP ${status} must fail closed at the first hop`);
   }
+  for (const status of [302, 303, 307]) {
+    const route = scriptedFetch({
+      finalStatus: status,
+      finalLocation: `https://private.example/redirect?token=${TEST_PRIVATE_EMAIL}`,
+    });
+    const result = await workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(), base, route.fetchImpl);
+    assert.deepEqual([result.signals[0].alertKey, result.outcomeCode],
+      ["APPS_HEALTH_UNAVAILABLE", "APPS_HEALTH_SECOND_HOP_REDIRECT_UNEXPECTED"],
+      `Final HTTP ${status} must be observed without following or reading its Location`);
+    assert.doesNotMatch(JSON.stringify(result), /private\.example|token=|example\.com|@/,
+      "An unexpected second-hop redirect must not retain its Location");
+  }
   for (const status of [401, 403, 404, 429, 500, 503]) {
     const route = scriptedFetch({ finalStatus: status });
     const result = await workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(), base, route.fetchImpl);
     assert.deepEqual([result.signals[0].alertKey, result.outcomeCode],
-      ["APPS_HEALTH_UNAVAILABLE", "APPS_HEALTH_SECOND_HOP_UNAVAILABLE"],
-      `Final HTTP ${status} must fail closed at the redirected second hop`);
+      ["APPS_HEALTH_UNAVAILABLE", "APPS_HEALTH_SECOND_HOP_HTTP_NON_2XX"],
+      `Final HTTP ${status} must map to one status-free fixed outcome`);
   }
-  for (const [label, route] of [
-    ["malformed JSON", scriptedFetch({ rawBody: "not-json" })],
-    ["wrong content type", scriptedFetch({ contentType: "text/html" })],
-    ["oversized response", scriptedFetch({ rawBody: JSON.stringify({ padding: "x".repeat(9000) }) })],
-    ["second-hop network error", scriptedFetch({ finalError: new Error(`${TEST_PRIVATE_EMAIL}:private`) })],
+  for (const [label, route, expected] of [
+    ["second-hop fetch throw",
+      scriptedFetch({ finalError: new Error(`${TEST_PRIVATE_EMAIL}:private-fetch`) }),
+      "APPS_HEALTH_SECOND_HOP_FETCH_FAILED"],
+    ["wrong content type", scriptedFetch({ contentType: "text/html; private=detail" }),
+      "APPS_HEALTH_SECOND_HOP_CONTENT_TYPE_INVALID"],
+    ["oversized content type", scriptedFetch({ contentType: `application/json;${"x".repeat(130)}` }),
+      "APPS_HEALTH_SECOND_HOP_CONTENT_TYPE_INVALID"],
+    ["missing response body", scriptedFetch({ finalResponseFactory: () => new Response(null, {
+      status: 200, headers: { "Content-Type": "application/json" },
+    }) }), "APPS_HEALTH_SECOND_HOP_BODY_READ_OR_DECODE_FAILED"],
+    ["body stream read failure", scriptedFetch({ finalResponseFactory: () => new Response(
+      new ReadableStream({ start(controller) {
+        controller.error(new Error(`${TEST_PRIVATE_EMAIL}:private-body-read`));
+      } }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    ) }), "APPS_HEALTH_SECOND_HOP_BODY_READ_OR_DECODE_FAILED"],
+    ["oversized response", scriptedFetch({ rawBody: JSON.stringify({ padding: "x".repeat(9000) }) }),
+      "APPS_HEALTH_SECOND_HOP_BODY_READ_OR_DECODE_FAILED"],
+    ["invalid UTF-8", scriptedFetch({ rawBody: Uint8Array.of(0xc3, 0x28) }),
+      "APPS_HEALTH_SECOND_HOP_BODY_READ_OR_DECODE_FAILED"],
+    ["malformed JSON", scriptedFetch({ rawBody: "not-json-private-body" }),
+      "APPS_HEALTH_SECOND_HOP_JSON_PARSE_FAILED"],
   ]) {
     const result = await workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(), base, route.fetchImpl);
     assert.deepEqual([result.signals[0].alertKey, result.outcomeCode],
-      ["APPS_HEALTH_UNAVAILABLE", "APPS_HEALTH_SECOND_HOP_UNAVAILABLE"],
-      `${label} must map to redirected second-hop unavailable`);
+      ["APPS_HEALTH_UNAVAILABLE", expected], `${label} must map to its fixed second-hop outcome`);
+    assert.doesNotMatch(JSON.stringify(result),
+      /private-fetch|private=detail|private-body|example\.com|@|not-json/,
+      `${label} must not retain private response or error detail`);
   }
   const firstHopFailure = await workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(), base,
     async () => { throw new Error(`${TEST_PRIVATE_EMAIL}:private`); });
@@ -2114,7 +2162,19 @@ async function validateAppsScriptHealthMonitorBehavior(workerModule) {
     workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(), base, secondTimeoutRoute.fetchImpl));
   assert.deepEqual([secondHopTimeout.signals[0].alertKey, secondHopTimeout.outcomeCode],
     ["APPS_HEALTH_UNAVAILABLE", "APPS_HEALTH_SECOND_HOP_TIMEOUT"]);
-  assert.doesNotMatch(JSON.stringify([firstHopTimeout, secondHopTimeout]), /private-timeout|example\.com|@/,
+  const secondBodyTimeoutRoute = scriptedFetch({ finalResponseFactory: () => new Response(
+    new ReadableStream({ start(controller) {
+      controller.error(new Error(`${TEST_PRIVATE_EMAIL}:private-body-timeout`));
+    } }),
+    { status: 200, headers: { "Content-Type": "application/json" } },
+  ) });
+  const secondBodyTimeout = await withImmediateAppsTimeout(() =>
+    workerModule.__test.readAppsScriptHealthSignals(baseEnvironment(), base, secondBodyTimeoutRoute.fetchImpl));
+  assert.deepEqual([secondBodyTimeout.signals[0].alertKey, secondBodyTimeout.outcomeCode],
+    ["APPS_HEALTH_UNAVAILABLE", "APPS_HEALTH_SECOND_HOP_TIMEOUT"],
+  "An aborted shared signal takes precedence over a body-read subcode");
+  assert.doesNotMatch(JSON.stringify([firstHopTimeout, secondHopTimeout, secondBodyTimeout]),
+    /private-timeout|private-body|example\.com|@/,
     "Timeout outcomes must not retain raw errors");
 
   for (const [label, route] of [
@@ -2209,8 +2269,31 @@ async function validateAppsScriptHealthMonitorBehavior(workerModule) {
       immediateTimeout: true,
     },
     {
-      expected: "APPS_HEALTH_SECOND_HOP_UNAVAILABLE",
+      expected: "APPS_HEALTH_SECOND_HOP_FETCH_FAILED",
       route: scriptedFetch({ finalError: unavailableFixture }),
+    },
+    {
+      expected: "APPS_HEALTH_SECOND_HOP_REDIRECT_UNEXPECTED",
+      route: scriptedFetch({
+        finalStatus: 302,
+        finalLocation: `https://private.example/redirect?token=${TEST_PRIVATE_EMAIL}`,
+      }),
+    },
+    {
+      expected: "APPS_HEALTH_SECOND_HOP_HTTP_NON_2XX",
+      route: scriptedFetch({ finalStatus: 503 }),
+    },
+    {
+      expected: "APPS_HEALTH_SECOND_HOP_CONTENT_TYPE_INVALID",
+      route: scriptedFetch({ contentType: "text/html; private=stage" }),
+    },
+    {
+      expected: "APPS_HEALTH_SECOND_HOP_BODY_READ_OR_DECODE_FAILED",
+      route: scriptedFetch({ rawBody: Uint8Array.of(0xc3, 0x28) }),
+    },
+    {
+      expected: "APPS_HEALTH_SECOND_HOP_JSON_PARSE_FAILED",
+      route: scriptedFetch({ rawBody: "private-stage-invalid-json" }),
     },
   ];
   for (const testCase of outcomeCases) {
@@ -2238,7 +2321,8 @@ async function validateAppsScriptHealthMonitorBehavior(workerModule) {
       "WARNING",
       "APPS_HEALTH_SOURCE_UNAVAILABLE",
     ], `${testCase.expected} must persist without changing alert semantics`);
-    assert.doesNotMatch(JSON.stringify(ops.executed), /private-stage-error|example\.com|@|script\.google/,
+    assert.doesNotMatch(JSON.stringify(ops.executed),
+      /private-stage|private\.example|example\.com|@|script\.google|text\/html/,
       `${testCase.expected} must not persist a raw error or URL`);
   }
 

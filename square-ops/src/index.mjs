@@ -99,14 +99,24 @@ const APPS_HEALTH_OUTCOME_CODES = Object.freeze({
   FIRST_HOP_TIMEOUT: "APPS_HEALTH_FIRST_HOP_TIMEOUT",
   FIRST_HOP_UNAVAILABLE: "APPS_HEALTH_FIRST_HOP_UNAVAILABLE",
   SECOND_HOP_TIMEOUT: "APPS_HEALTH_SECOND_HOP_TIMEOUT",
-  SECOND_HOP_UNAVAILABLE: "APPS_HEALTH_SECOND_HOP_UNAVAILABLE",
+  SECOND_HOP_FETCH_FAILED: "APPS_HEALTH_SECOND_HOP_FETCH_FAILED",
+  SECOND_HOP_REDIRECT_UNEXPECTED: "APPS_HEALTH_SECOND_HOP_REDIRECT_UNEXPECTED",
+  SECOND_HOP_HTTP_NON_2XX: "APPS_HEALTH_SECOND_HOP_HTTP_NON_2XX",
+  SECOND_HOP_CONTENT_TYPE_INVALID: "APPS_HEALTH_SECOND_HOP_CONTENT_TYPE_INVALID",
+  SECOND_HOP_BODY_READ_OR_DECODE_FAILED: "APPS_HEALTH_SECOND_HOP_BODY_READ_OR_DECODE_FAILED",
+  SECOND_HOP_JSON_PARSE_FAILED: "APPS_HEALTH_SECOND_HOP_JSON_PARSE_FAILED",
   INTEGRITY_FAILURE: "APPS_HEALTH_INTEGRITY_FAILURE",
 });
 const APPS_HEALTH_UNAVAILABLE_OUTCOME_CODES = new Set([
   APPS_HEALTH_OUTCOME_CODES.FIRST_HOP_TIMEOUT,
   APPS_HEALTH_OUTCOME_CODES.FIRST_HOP_UNAVAILABLE,
   APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_TIMEOUT,
-  APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_UNAVAILABLE,
+  APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_FETCH_FAILED,
+  APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_REDIRECT_UNEXPECTED,
+  APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_HTTP_NON_2XX,
+  APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_CONTENT_TYPE_INVALID,
+  APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_BODY_READ_OR_DECODE_FAILED,
+  APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_JSON_PARSE_FAILED,
 ]);
 const APPS_SCRIPT_ORIGIN = "https://script.google.com";
 const APPS_SCRIPT_RESPONSE_ORIGIN = "https://script.googleusercontent.com";
@@ -1260,21 +1270,24 @@ async function fetchAppsScriptHealth(env, now, fetchImpl, providedTimeoutSignal 
     response = await fetchImpl(responseUrl.toString(), {
       method: "GET",
       headers: Object.freeze({ Accept: "application/json" }),
-      redirect: "error",
+      redirect: "manual",
       signal: timeoutSignal,
     });
   } catch {
     throw appsHealthUnavailableError(timeoutSignal.aborted
       ? APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_TIMEOUT
-      : APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_UNAVAILABLE);
+      : APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_FETCH_FAILED);
+  }
+  if (Number(response?.status) >= 300 && Number(response?.status) < 400) {
+    throw appsHealthUnavailableError(APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_REDIRECT_UNEXPECTED);
   }
   if (!response?.ok) {
-    throw appsHealthUnavailableError(APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_UNAVAILABLE);
+    throw appsHealthUnavailableError(APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_HTTP_NON_2XX);
   }
   const responseContentType = String(response.headers?.get("content-type") || "");
   if (responseContentType.length > 128 ||
       !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(responseContentType)) {
-    throw appsHealthUnavailableError(APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_UNAVAILABLE);
+    throw appsHealthUnavailableError(APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_CONTENT_TYPE_INVALID);
   }
 
   let responseText;
@@ -1283,13 +1296,13 @@ async function fetchAppsScriptHealth(env, now, fetchImpl, providedTimeoutSignal 
   } catch {
     throw appsHealthUnavailableError(timeoutSignal.aborted
       ? APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_TIMEOUT
-      : APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_UNAVAILABLE);
+      : APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_BODY_READ_OR_DECODE_FAILED);
   }
   let payload;
   try {
     payload = JSON.parse(responseText);
   } catch {
-    throw appsHealthUnavailableError(APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_UNAVAILABLE);
+    throw appsHealthUnavailableError(APPS_HEALTH_OUTCOME_CODES.SECOND_HOP_JSON_PARSE_FAILED);
   }
   return verifyAppsScriptHealthPayload(payload, config, now, requestTimestamp, requestNonce);
 }

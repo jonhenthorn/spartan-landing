@@ -52,6 +52,11 @@ function scriptedFetch({
   corruptSignature = false,
   firstError = null,
   finalError = null,
+  finalStatus = 200,
+  contentType = "application/json;charset=utf-8",
+  rawBody = null,
+  finalLocation = null,
+  finalResponseFactory = null,
 } = {}) {
   let requestFields;
   let callCount = 0;
@@ -73,8 +78,9 @@ function scriptedFetch({
     assert.equal(url, FIXTURE_REDIRECT);
     assert.equal(options.method, "GET");
     assert.equal(options.body, undefined);
-    assert.equal(options.redirect, "error");
+    assert.equal(options.redirect, "manual");
     if (finalError) throw finalError;
+    if (finalResponseFactory) return finalResponseFactory();
 
     const complete = inspectionState === "COMPLETE";
     const payload = {
@@ -106,10 +112,10 @@ function scriptedFetch({
     payload.response_signature = corruptSignature
       ? "0".repeat(64)
       : await opsTest.hmacSha256Hex(canonical, FIXTURE_SECRET);
-    return new Response(JSON.stringify(payload), {
-      status: 200,
-      headers: { "Content-Type": "application/json;charset=utf-8" },
-    });
+    const responseBody = rawBody === null ? JSON.stringify(payload) : rawBody;
+    const headers = { "Content-Type": contentType };
+    if (finalLocation !== null) headers.Location = finalLocation;
+    return new Response(responseBody, { status: finalStatus, headers });
   };
 }
 
@@ -237,8 +243,20 @@ assert.doesNotMatch(JSON.stringify(unavailable), /private-user|private-url|priva
 for (const [label, fetchImpl, failureStageCode] of [
   ["first-hop unavailable", scriptedFetch({ firstError: new Error("private first-hop detail") }),
     "APPS_HEALTH_FIRST_HOP_UNAVAILABLE"],
-  ["second-hop unavailable", scriptedFetch({ finalError: new Error("private second-hop detail") }),
-    "APPS_HEALTH_SECOND_HOP_UNAVAILABLE"],
+  ["second-hop fetch failed", scriptedFetch({ finalError: new Error("private second-hop detail") }),
+    "APPS_HEALTH_SECOND_HOP_FETCH_FAILED"],
+  ["second-hop redirect", scriptedFetch({
+    finalStatus: 302,
+    finalLocation: "https://private.example/redirect?token=private-detail",
+  }), "APPS_HEALTH_SECOND_HOP_REDIRECT_UNEXPECTED"],
+  ["second-hop HTTP", scriptedFetch({ finalStatus: 503 }),
+    "APPS_HEALTH_SECOND_HOP_HTTP_NON_2XX"],
+  ["second-hop content type", scriptedFetch({ contentType: "text/html; private=detail" }),
+    "APPS_HEALTH_SECOND_HOP_CONTENT_TYPE_INVALID"],
+  ["second-hop body", scriptedFetch({ rawBody: Uint8Array.of(0xc3, 0x28) }),
+    "APPS_HEALTH_SECOND_HOP_BODY_READ_OR_DECODE_FAILED"],
+  ["second-hop JSON", scriptedFetch({ rawBody: "private-invalid-json-detail" }),
+    "APPS_HEALTH_SECOND_HOP_JSON_PARSE_FAILED"],
 ]) {
   const diagnosticFailure = await runAppsHealthProbe({
     expectation: "healthy",
@@ -254,7 +272,7 @@ for (const [label, fetchImpl, failureStageCode] of [
     diagnosticFailure.result_code,
     diagnosticFailure.failure_stage_code,
   ], [false, true, "OPS_APPS_HEALTH_UNAVAILABLE", failureStageCode], label);
-  assert.doesNotMatch(JSON.stringify(diagnosticFailure), /private|detail/);
+  assert.doesNotMatch(JSON.stringify(diagnosticFailure), /private|detail|text\/html|503/);
 }
 
 const withImmediateDiagnosticTimeout = async (fetchImpl) => {
@@ -346,7 +364,12 @@ assert.deepEqual([...probeTest.SAFE_FAILURE_STAGE_CODES], [
   "APPS_HEALTH_FIRST_HOP_TIMEOUT",
   "APPS_HEALTH_FIRST_HOP_UNAVAILABLE",
   "APPS_HEALTH_SECOND_HOP_TIMEOUT",
-  "APPS_HEALTH_SECOND_HOP_UNAVAILABLE",
+  "APPS_HEALTH_SECOND_HOP_FETCH_FAILED",
+  "APPS_HEALTH_SECOND_HOP_REDIRECT_UNEXPECTED",
+  "APPS_HEALTH_SECOND_HOP_HTTP_NON_2XX",
+  "APPS_HEALTH_SECOND_HOP_CONTENT_TYPE_INVALID",
+  "APPS_HEALTH_SECOND_HOP_BODY_READ_OR_DECODE_FAILED",
+  "APPS_HEALTH_SECOND_HOP_JSON_PARSE_FAILED",
 ]);
 
 const source = fs.readFileSync(new URL("./probe-apps-health.mjs", import.meta.url), "utf8");

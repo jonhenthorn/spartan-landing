@@ -113,7 +113,7 @@ Allowed expectations are exact: `disabled`, `failed`, `healthy` and `mismatch`. 
 node scripts/probe-apps-health.mjs --expect=disabled --diagnostic
 ```
 
-Normal probes and scheduled monitoring retain the same five-second transport deadline and exact `<5000 ms` pass policy. Diagnostic mode alone uses one `10000 ms` ceiling, always returns `ok:false` and exits nonzero. A valid signed result from `5000 ms` through `9999 ms` is diagnostic timing evidence only and must never advance a phase; `10000 ms` is outside the diagnostic ceiling. A diagnostic failure may report only one allowlisted fixed `failure_stage_code` for first-/second-hop timeout or unavailability; it never reports a URL, credential, redirect, body or raw provider detail. The original stop, cleanup and fresh-approval requirements remain in force.
+Normal probes and scheduled monitoring retain the same five-second transport deadline and exact `<5000 ms` pass policy. Diagnostic mode alone uses one `10000 ms` ceiling, always returns `ok:false` and exits nonzero. A valid signed result from `5000 ms` through `9999 ms` is diagnostic timing evidence only and must never advance a phase; `10000 ms` is outside the diagnostic ceiling. A diagnostic failure may report only one allowlisted fixed `failure_stage_code`: first-hop timeout/unavailable, second-hop timeout, or second-hop fetch failure, unexpected no-follow redirect, non-`2xx`, invalid content type, body read/decode failure or JSON parse failure. It never reports a URL, credential, HTTP status, `Location`, content type, redirect/body value or raw provider detail. The original stop, cleanup and fresh-approval requirements remain in force.
 
 ## Safe Worker-version mechanics
 
