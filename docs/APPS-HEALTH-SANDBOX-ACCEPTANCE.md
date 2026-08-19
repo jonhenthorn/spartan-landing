@@ -2,9 +2,9 @@
 
 Last reviewed: August 19, 2026
 
-Status: **the August 18 run and all August 19 follow-ups stopped under their fail-closed gates; acceptance is not complete.** The optimized Apps code is published as sandbox Version 4 and passed inert no-write intervals. The latest enabled Worker reached the Apps deployment but its first scheduled sample ended `APPS_HEALTH_SECOND_HOP_UNAVAILABLE`; a later local-only diagnostic again showed variable end-to-end latency and stopped before any Worker secret or flag was changed. Cleanup is complete: Apps health is disabled, its property and temporary Keychain material are removed, the operations Worker has no health secrets, all six capabilities are false, and repeated all-off crons wrote nothing. Option B is now approved and locally implemented, but the revised Worker has not been deployed and no new credential or live request has occurred.
+Status: **Option B completed the bounded sandbox acceptance worksheet and final all-off cleanup passed.** The optimized Apps code remains sandbox Version 4. Commit `b87fa08b4e8e1e4fcf2462bc1d82cfdbbe4fea5d` was deployed and produced the required signed disabled, healthy, controlled-failure, configuration-mismatch and recovery evidence under one shared `10000 ms` deadline and the strict raw `<8000 ms` acceptance SLO. Cleanup is complete: Apps health is disabled in environment `sandbox`, its dedicated property and temporary Keychain/clipboard material are removed, operations Worker `12bd4dc9-3ed7-47e0-9c48-0c33d8a5c166` is scheduled-only, schema 4, secretless and all six capabilities false, and the `12:50` UTC cron wrote nothing. Operations D1 contains 34 monitor runs, five incidents, zero active incidents and zero deliveries, backups or restores. The connector and all production/business state remain unchanged.
 
-The exact-semantic optimization removes duplicate/disabled property reads and reuses one workbook-tab enumeration without narrowing the formula or allocated-row formatting checks. It is deployed as sandbox Apps Version 4 and its all-off publication produced no operations or connector write. The live all-off Worker still reflects the prior policy. The locally validated Option B candidate uses one shared `10000 ms` transport deadline and a strict raw `<8000 ms` acceptance SLO; local implementation is not successful signed acceptance.
+The exact-semantic optimization removes duplicate/disabled property reads and reuses one workbook-tab enumeration without narrowing the formula or allocated-row formatting checks. It is deployed as sandbox Apps Version 4 and its all-off publication produced no operations or connector write. The accepted Option B implementation uses one shared `10000 ms` transport deadline and a strict raw `<8000 ms` acceptance SLO with no retry. This closes only the Apps-health sandbox lane; Queue access, alerts, backups/restores and production activation remain unapproved.
 
 ## August 18 execution outcome
 
@@ -33,17 +33,17 @@ The exact-semantic optimization removes duplicate/disabled property reads and re
 - Because the required signed-disabled summary was not reached, the run hard-stopped after that first row. No second scheduled observation was permitted. Cleanup returned every operations flag to false and removed both Worker health secrets.
 - Detailed second-hop outcome splitting was committed as `76510a0` and deployed inertly as operations version `d90fcd45-ac10-4800-b14b-c4bd882df554`. It is scheduled-only, schema 4, bound to the exact runtime D1 databases, secretless and all six flags false; the `06:55` cron plus settling wrote nothing.
 - A fresh local-only diagnostic then returned signed `DISABLED` in `5422 ms` and `1585 ms`. The normal strict probe stopped at `5011 ms`, just outside its five-second gate. That diagnostic stopped before any Worker secret or capability flag was installed or enabled, and it produced no D1 row.
-- Cleanup removed the Apps health property and the temporary Keychain URL/secret items. Final operations version `d90fcd45-ac10-4800-b14b-c4bd882df554` remains the sole 100% deployment with all six flags false and an empty secret list. Operations D1 is frozen at 22 runs, three incidents, one active `APPS_HEALTH_UNAVAILABLE` warning at occurrence one, and zero deliveries, backups or restores; the latest run remains the `06:30` row. Connector aggregates and all production/business state remained unchanged.
+- Cleanup removed the Apps health property and the temporary Keychain URL/secret items. At the close of that diagnostic, operations version `d90fcd45-ac10-4800-b14b-c4bd882df554` was the sole 100% deployment with all six flags false and an empty secret list. Operations D1 then stood at 22 runs, three incidents, one active `APPS_HEALTH_UNAVAILABLE` warning at occurrence one, and zero deliveries, backups or restores; the latest run was the `06:30` row. Connector aggregates and all production/business state remained unchanged.
 - Option B was approved after this cleanup: use one shared ten-second transport deadline with a strict raw `<8000 ms` acceptance SLO. That approval does not itself prove, deploy or accept the source.
 
-## Approved Option B candidate — local only
+## Approved Option B policy and accepted sandbox implementation
 
 - One `10000 ms` signal begins before request signing and is reused for the signed POST, accepted Google redirect, read-only GET, streamed body read, JSON parsing and response-HMAC/configuration verification. There is no retry.
 - Only an authenticated, contract-correct response whose raw monotonic elapsed time is strictly below `8000 ms` may be accepted. Exact `8000 ms` through `9999 ms` becomes fixed `APPS_HEALTH_RESPONSE_SLO_EXCEEDED`, the existing source-unavailable warning/reason, and resolves no Apps incident.
 - A deadline abort retains the applicable first- or second-hop timeout classification. A contract or HMAC failure remains immediate critical integrity failure and takes precedence over SLO timing, including for a slow response.
 - Diagnostic mode remains always non-passing. It may collect signed timing evidence under the same shared transport deadline, but it cannot advance an acceptance phase.
 - Local tests cover raw `7999.9 ms` acceptance, exact `8000 ms` and `9999 ms` SLO failure, streamed-body abort at the transport deadline with one shared signal, slow signed `DISABLED`/`FAILED`/configuration-mismatch responses, slow bad-signature integrity precedence, fixed scheduled D1 evidence and privacy bounds.
-- No Worker, Apps property, credential, D1 row, connector state or production state was changed while implementing this candidate.
+- Commit `b87fa08b4e8e1e4fcf2462bc1d82cfdbbe4fea5d` was first implemented and validated without changing live state, then deployed under the separately approved bounded worksheet. The accepted live evidence and complete cleanup record appear below.
 
 ## Purpose
 
@@ -199,16 +199,16 @@ Rollback exposure first:
 5. Deploy the tracked sandbox configuration so all six capability flags are false. Verify no secret name, route, email/Queue/R2 binding or unexpected variable remains.
 6. Wait through one final cron plus settling minute. Require every count and prior maximum timestamp to remain unchanged.
 
-Passing target (not achieved by any completed run):
+Passing target (achieved by the August 19 Option B run):
 
 - Apps: Version 4, `OPS_HEALTH_ENABLED=false`, environment `sandbox`, no health secret.
-- Operations Worker: schema 4, all six capabilities false, no Apps URL/secret, no Queue token, email or R2 binding, scheduled-only and no public route.
-- D1: preserved fixed monitor/incident evidence; zero active incident, delivery, backup and restore rows. The failed run ended with one open warning incident, so this criterion is **not met**.
-- Production and business state unchanged; the sandbox connector remains disabled, with any credential-exposure remediation and resulting version recorded separately.
+- Operations Worker `12bd4dc9-3ed7-47e0-9c48-0c33d8a5c166`: schema 4, all six capabilities false, no Apps URL/secret, no Queue token, email or R2 binding, scheduled-only and no public route.
+- D1: 34 preserved monitor runs, five incidents, zero active incidents and zero delivery, backup or restore rows. The final `12:50` UTC all-off cron changed no count or prior maximum timestamp.
+- Production and business state unchanged; sandbox connector `0ff5a2ab-2f2c-4872-a624-29d976ab54de` remains disabled and its aggregates are unchanged.
 
 ## Emergency rollback
 
-1. Immediately return to the newest reviewed all-off version. The current verified target is `d90fcd45-ac10-4800-b14b-c4bd882df554`; re-verify it before any future run rather than assuming this identifier remains current.
+1. Immediately return to the newest reviewed all-off version. The current verified target is `12bd4dc9-3ed7-47e0-9c48-0c33d8a5c166`; re-verify it before any future run rather than assuming this identifier remains current.
 2. Verify schema 4, exact runtime D1 IDs, all six false flags, no URL/secret and only the scheduled handler.
 3. Set Apps `OPS_HEALTH_ENABLED=false`, restore environment `sandbox` and remove `OPS_HEALTH_SHARED_SECRET`.
 4. Clear temporary credential material. Rotate the dedicated health secret if it appeared anywhere.
@@ -257,8 +257,30 @@ This execution did **not** pass the worksheet and does not approve another live 
 | Detailed split deployment | Commit `76510a0`; inert Worker `d90fcd45-ac10-4800-b14b-c4bd882df554`; `06:55` no-write proof |
 | Local-only diagnostic | Signed `DISABLED` at `5422 ms` and `1585 ms`; normal strict probe stopped at `5011 ms`; no Worker secret/flag change and no D1 row |
 | Credential cleanup | Apps health property and temporary Keychain URL/secret removed; Worker secret list empty |
-| Current operations boundary | `d90fcd45-ac10-4800-b14b-c4bd882df554`; sole 100%; scheduled-only; schema 4; all six flags false; secretless |
-| Current D1 reconciliation | 22 runs; 3 incidents; 1 active `APPS_HEALTH_UNAVAILABLE` occurrence 1; 0 deliveries/backups/restores; latest row remains `06:30` |
+| Operations boundary at the close of this diagnostic | `d90fcd45-ac10-4800-b14b-c4bd882df554`; sole 100%; scheduled-only; schema 4; all six flags false; secretless |
+| D1 reconciliation at the close of this diagnostic | 22 runs; 3 incidents; 1 active `APPS_HEALTH_UNAVAILABLE` occurrence 1; 0 deliveries/backups/restores; latest row was `06:30` |
 | Connector/production boundary | Connector aggregates unchanged; production and customer/business systems untouched |
 
 Option B is explicitly approved for the revised sandbox run. Preserve every failed-run record, use a fresh dedicated credential, deploy inertly first, and follow every hard-stop and cleanup gate below. The approval does not authorize production, Queue access, alerts, email, backup/restore work or weakening the strict `<8000 ms` acceptance SLO.
+
+## Evidence record — August 19 Option B accepted run
+
+| Evidence | Result |
+|---|---|
+| Approved implementation | Commit `b87fa08b4e8e1e4fcf2462bc1d82cfdbbe4fea5d`; one shared `10000 ms` transport deadline; no retry; strict raw `<8000 ms` acceptance |
+| Inert deployment and no-write proof | `4225524f-5c2d-44ac-b37c-bbeb2721a09d`; all six capabilities false; scheduled interval changed no D1 count or prior timestamp |
+| Credential setup versions | `1a55850c-b1e6-4bd5-a0b1-bca9e6f05053` after the first secret and `d5380123-4c3d-42ed-9efd-e0c322b7e42d` after both intended secret names; capability flags remained false during setup |
+| Normal enabled-test version | `1309eeed-cbb7-4daa-8c41-8eb7f872a616`; only aggregate and Apps monitoring true; every other capability false |
+| Direct disabled results | Signed `DISABLED`, configuration unhealthy as expected, in `2090 ms` and `933 ms` |
+| Scheduled disabled results | Five `FAILED` / `UNAVAILABLE` rows at `11:50`, `11:55`, `12:00`, `12:05` and `12:10` UTC, all below eight seconds; one warning episode progressed from occurrence 1 to 5; zero deliveries |
+| Signed healthy result and recovery | Direct `COMPLETE` / configuration healthy in `3107 ms` and `2432 ms`; `12:15` UTC cron recorded `ALL_CLEAR` and resolved the warning |
+| Signed controlled failure and recovery | Direct signed `FAILED` in `1601 ms`; `12:20` UTC cron recorded `APPS_HEALTH_SIGNED_FAILED`; after restoring sandbox environment, direct healthy returned in `5667 ms` and the `12:25` UTC cron recorded `ALL_CLEAR` |
+| Configuration mismatch and recovery | Mismatch Worker `f52ec4f4-d4c5-4753-a7e2-169928a35998`; direct signed mismatch in `3966 ms`; `12:30` UTC cron recorded `MONITOR_CRITICAL`; normal Worker restored with direct healthy in `4617 ms`; `12:35` UTC cron recorded `ALL_CLEAR` |
+| Source-off proof | `f3df1f27-d217-48a4-9926-0aabb15b0561`; `12:40` and extra `12:45` UTC crons were connector-only `ALL_CLEAR` with no Apps request or Apps-incident change |
+| Worker-secret removal | URL-delete version `cc8350a0-efc7-44b4-93fc-9aaa90dca847`; shared-secret-delete version `2e636c1f-4356-40a6-9e7b-7b5198ae999c`; historical test-only versions with encrypted health bindings must not be redeployed |
+| Apps and temporary-material cleanup | Apps Version 4 health false, environment `sandbox`, dedicated property absent; temporary Keychain items, clipboard value, helper and temporary directory removed |
+| Final all-off deployment and no-write proof | `12bd4dc9-3ed7-47e0-9c48-0c33d8a5c166`; scheduled-only; schema 4; exact runtime D1 bindings; all six capabilities false; secret list empty; `12:50` UTC cron changed no count or prior timestamp |
+| Final D1 reconciliation | 34 monitor runs; 5 incidents; 0 active incidents; 0 deliveries; 0 backups; 0 restores |
+| Connector and production boundary | Connector `0ff5a2ab-2f2c-4872-a624-29d976ab54de` and all aggregates unchanged; production and all customer/business systems unchanged |
+
+This run completes only the bounded Apps-health sandbox lane. It does not authorize Queue access, alerts or email, backups/restores, connector automation or production activation.
