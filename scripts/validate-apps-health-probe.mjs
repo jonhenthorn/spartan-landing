@@ -49,6 +49,7 @@ function clock(start = 0, end = 123) {
 
 function scriptedFetch({
   inspectionState = "COMPLETE",
+  squareJourneyState = "DISABLED",
   corruptSignature = false,
   firstError = null,
   finalError = null,
@@ -101,7 +102,7 @@ function scriptedFetch({
       journey_ledger_state: complete ? "READY" : "NOT_CHECKED",
       worker_json_state: complete ? "NOT_CONFIGURED" : "NOT_CHECKED",
       owner_notification_state: complete ? "DISABLED" : "NOT_CHECKED",
-      square_journey_state: complete ? "DISABLED" : "NOT_CHECKED",
+      square_journey_state: complete ? squareJourneyState : "NOT_CHECKED",
       read_only: true,
       writes_performed: 0,
       checked_at_utc: FIXTURE_NOW.toISOString(),
@@ -118,6 +119,18 @@ function scriptedFetch({
     return new Response(responseBody, { status: finalStatus, headers });
   };
 }
+
+const squareJourneyReady = await runAppsHealthProbe({
+  expectation: "healthy",
+  squareJourney: "ready",
+  environment: baseEnvironment(),
+  fetchImpl: scriptedFetch({ squareJourneyState: "READY" }),
+  now: FIXTURE_NOW,
+  clock: clock(),
+});
+assert.equal(squareJourneyReady.ok, true);
+assert.equal(squareJourneyReady.configuration_healthy, true);
+assert.equal(squareJourneyReady.expected_square_journey_state, "READY");
 
 for (const [expectation, inspectionState, healthy] of [
   ["disabled", "DISABLED", false],
@@ -344,25 +357,41 @@ const invalidExpectation = await runAppsHealthProbe({
 assert.equal(invalidExpectation.result_code, "APPS_HEALTH_PROBE_EXPECTATION_INVALID");
 assert.equal(poisonedFetchCalls, 0);
 
+const invalidSquareJourney = await runAppsHealthProbe({
+  expectation: "healthy",
+  squareJourney: "production",
+  environment: baseEnvironment(),
+  fetchImpl: async () => { poisonedFetchCalls += 1; },
+});
+assert.equal(invalidSquareJourney.result_code, "APPS_HEALTH_PROBE_EXPECTATION_INVALID");
+assert.equal(poisonedFetchCalls, 0);
+
 assert.equal(probeTest.parseExpectation(["--expect=healthy"]), "healthy");
 assert.equal(probeTest.parseExpectation(["--expect=healthy", "extra"]), "");
 assert.equal(probeTest.parseExpectation(["--expect=healthy", "--expect=failed"]), "");
 assert.deepEqual(probeTest.parseProbeArguments(["--expect=healthy"]),
-  { expectation: "healthy", diagnostic: false });
+  { expectation: "healthy", squareJourney: "disabled", diagnostic: false });
 assert.deepEqual(probeTest.parseProbeArguments(["--expect=healthy", "--diagnostic"]),
-  { expectation: "healthy", diagnostic: true });
+  { expectation: "healthy", squareJourney: "disabled", diagnostic: true });
 assert.deepEqual(probeTest.parseProbeArguments(["--diagnostic", "--expect=disabled"]),
-  { expectation: "disabled", diagnostic: true });
+  { expectation: "disabled", squareJourney: "disabled", diagnostic: true });
+assert.deepEqual(probeTest.parseProbeArguments(["--expect=healthy", "--square-journey=ready"]),
+  { expectation: "healthy", squareJourney: "ready", diagnostic: false });
+assert.deepEqual(probeTest.parseProbeArguments(["--square-journey=ready", "--diagnostic", "--expect=healthy"]),
+  { expectation: "healthy", squareJourney: "ready", diagnostic: true });
 for (const invalidArguments of [
   ["--diagnostic"],
   ["--expect=healthy", "--diagnostic", "--diagnostic"],
   ["--expect=healthy", "--diagnostic", "extra"],
   ["--expect=healthy", "--expect=failed", "--diagnostic"],
+  ["--expect=healthy", "--square-journey=production"],
+  ["--expect=healthy", "--square-journey=ready", "--square-journey=disabled"],
 ]) {
   assert.deepEqual(probeTest.parseProbeArguments(invalidArguments),
-    { expectation: "", diagnostic: false });
+    { expectation: "", squareJourney: "", diagnostic: false });
 }
 assert.deepEqual(Object.keys(probeTest.PROBE_EXPECTATIONS), ["disabled", "failed", "healthy", "mismatch"]);
+assert.deepEqual(probeTest.SQUARE_JOURNEY_EXPECTATIONS, { disabled: "DISABLED", ready: "READY" });
 assert.equal(probeTest.SANDBOX_DEFAULTS.OPS_ENVIRONMENT, "sandbox");
 assert.equal(probeTest.PROBE_ACCEPTANCE_SLO_MS, 8000);
 assert.equal(probeTest.PROBE_TRANSPORT_DEADLINE_MS, 10000);

@@ -1,10 +1,9 @@
 #!/usr/bin/env node
 
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import { pathToFileURL } from "node:url";
+
+import { inspectWebhookFixturePackage } from "./prepare-square-sandbox-webhook-fixture.mjs";
 
 const SANDBOX_WEBHOOK_URL =
   "https://spartan-square-connector-sandbox.bixbynutrition.workers.dev/api/square/webhook";
@@ -41,6 +40,7 @@ export function formatWebhookDriverResult(value) {
     "RECOGNIZED_ACKNOWLEDGED",
     "REPLAY_ACKNOWLEDGED",
     "INPUT_REJECTED",
+    "PACKAGE_REJECTED",
     "NETWORK_UNAVAILABLE",
     "RESPONSE_REJECTED",
   ]);
@@ -66,22 +66,34 @@ export function isAllowedSandboxWebhookUrl(value) {
   }
 }
 
-function structurallyValidEvent(event) {
-  return Boolean(
-    event
-    && typeof event === "object"
-    && !Array.isArray(event)
-    && typeof event.event_id === "string"
-    && event.event_id.length >= 8
-    && event.event_id.length <= 200
-    && typeof event.type === "string"
-    && typeof event.merchant_id === "string"
-    && event.data
-    && typeof event.data === "object"
-    && !Array.isArray(event.data)
-    && typeof event.data.id === "string"
-    && event.data.id.length > 0
-  );
+function exactKeys(value, expected) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const actual = Object.keys(value).sort();
+  const sortedExpected = [...expected].sort();
+  return actual.length === sortedExpected.length
+    && actual.every((key, index) => key === sortedExpected[index]);
+}
+
+function validEventType(value) {
+  return typeof value === "string"
+    && /^[a-z][a-z0-9_]{0,31}\.[a-z][a-z0-9_]{0,31}$/.test(value);
+}
+
+function validPrivateId(value, minimum = 8, maximum = 200) {
+  return typeof value === "string"
+    && value.length >= minimum
+    && value.length <= maximum
+    && /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(value);
+}
+
+function exactCanonicalEvent(event) {
+  return exactKeys(event, ["data", "event_id", "merchant_id", "type"])
+    && exactKeys(event.data, ["id", "type"])
+    && event.merchant_id === SANDBOX_MERCHANT_ID
+    && validEventType(event.type)
+    && validPrivateId(event.event_id)
+    && validPrivateId(event.data.id, 1, 200)
+    && event.data.type === event.type.split(".")[0];
 }
 
 function parseWebhookEvent(rawBody) {
@@ -94,9 +106,15 @@ function parseWebhookEvent(rawBody) {
   } catch {
     return null;
   }
-  return structurallyValidEvent(event) && event.merchant_id === SANDBOX_MERCHANT_ID
-    ? event
-    : null;
+  if (!exactCanonicalEvent(event)) return null;
+  const canonicalBody = JSON.stringify({
+    merchant_id: event.merchant_id,
+    type: event.type,
+    event_id: event.event_id,
+    data: { type: event.data.type, id: event.data.id },
+  });
+  if (rawBody !== canonicalBody) return null;
+  return event;
 }
 
 export function webhookBodyMatchesCase(rawBody, caseName) {
@@ -130,34 +148,6 @@ export function squareWebhookSignature(notificationUrl, rawBody, signingKey) {
   return createHmac("sha256", signingKey)
     .update(`${notificationUrl}${rawBody}`, "utf8")
     .digest("base64");
-}
-
-export function readPrivateWebhookFixture(fixturePath) {
-  if (typeof fixturePath !== "string" || !fixturePath || fixturePath.includes("\u0000")) {
-    throw new Error("INPUT_REJECTED");
-  }
-  const resolved = path.resolve(fixturePath);
-  const tempRoot = fs.realpathSync(os.tmpdir());
-  const linkStat = fs.lstatSync(resolved);
-  if (linkStat.isSymbolicLink() || !linkStat.isFile() || (linkStat.mode & 0o077) !== 0) {
-    throw new Error("INPUT_REJECTED");
-  }
-  if (typeof process.getuid === "function" && linkStat.uid !== process.getuid()) {
-    throw new Error("INPUT_REJECTED");
-  }
-  const real = fs.realpathSync(resolved);
-  const realRelative = path.relative(tempRoot, real);
-  if (!realRelative || realRelative.startsWith("..") || path.isAbsolute(realRelative)) {
-    throw new Error("INPUT_REJECTED");
-  }
-  if (linkStat.size === 0 || linkStat.size > MAX_BODY_BYTES) {
-    throw new Error("INPUT_REJECTED");
-  }
-  const bytes = fs.readFileSync(real);
-  if (bytes.byteLength === 0 || bytes.byteLength > MAX_BODY_BYTES) throw new Error("INPUT_REJECTED");
-  const rawBody = bytes.toString("utf8");
-  if (!bytes.equals(Buffer.from(rawBody, "utf8"))) throw new Error("INPUT_REJECTED");
-  return rawBody;
 }
 
 function forgedSignature(validSignature) {
@@ -228,13 +218,50 @@ function exactWebhookResponse(body, expectedCode) {
     && body.error_code === expectedCode;
 }
 
+function sameFileSnapshot(left, right) {
+  if (!left?.bytes || !right?.bytes || !left?.stat || !right?.stat) return false;
+  const statFields = ["dev", "ino", "mode", "nlink", "uid", "gid", "size", "mtimeMs", "ctimeMs"];
+  return left.digest === right.digest
+    && left.bytes.equals(right.bytes)
+    && statFields.every((field) => left.stat[field] === right.stat[field]);
+}
+
+function samePackageSnapshot(reference, observed) {
+  return Boolean(
+    reference
+    && observed
+    && reference.target === observed.target
+    && reference.manifest?.case_name === observed.manifest?.case_name
+    && reference.manifest?.byte_length === observed.manifest?.byte_length
+    && reference.manifest?.artifact_verification?.digest_hex
+      === observed.manifest?.artifact_verification?.digest_hex
+    && reference.manifest?.target_verification?.digest_hex
+      === observed.manifest?.target_verification?.digest_hex
+    && sameFileSnapshot(reference.eventRecord, observed.eventRecord)
+    && sameFileSnapshot(reference.manifestRecord, observed.manifestRecord)
+  );
+}
+
+function decodeExactFixture(record, caseName, approvedDigest) {
+  if (!record?.bytes || record.bytes.byteLength === 0 || record.bytes.byteLength > MAX_BODY_BYTES) return "";
+  let rawBody;
+  try {
+    rawBody = new TextDecoder("utf-8", { fatal: true }).decode(record.bytes);
+  } catch {
+    return "";
+  }
+  return webhookBodyMatchesCase(rawBody, caseName) && approvedTargetMatches(rawBody, approvedDigest)
+    ? rawBody
+    : "";
+}
+
 export async function executeWebhookSandboxCase({
   caseName,
   notificationUrl,
-  rawBody,
-  approvedTargetDigest,
+  packageDirectory,
   signingKey,
   fetchImpl = globalThis.fetch,
+  inspectPackage = inspectWebhookFixturePackage,
   timeoutMs = REQUEST_TIMEOUT_MS,
   clock = () => Date.now(),
 } = {}) {
@@ -242,18 +269,40 @@ export async function executeWebhookSandboxCase({
   if (
     !CASES.has(caseName)
     || !isAllowedSandboxWebhookUrl(notificationUrl)
-    || !webhookBodyMatchesCase(rawBody, caseName)
-    || !approvedTargetMatches(rawBody, approvedTargetDigest)
     || typeof signingKey !== "string"
     || Buffer.byteLength(signingKey, "utf8") < 32
     || Buffer.byteLength(signingKey, "utf8") > 4096
     || typeof fetchImpl !== "function"
+    || typeof inspectPackage !== "function"
     || !Number.isInteger(timeoutMs)
     || timeoutMs < 1000
     || timeoutMs > REQUEST_TIMEOUT_MS
   ) {
     return fixedResult("INPUT_REJECTED", 0, 0, clock() - startedAt);
   }
+
+  let packageSnapshot;
+  let rawBody = "";
+  try {
+    packageSnapshot = await inspectPackage(packageDirectory);
+    const approvedTargetDigest = packageSnapshot?.manifest?.target_verification?.digest_hex;
+    if (packageSnapshot?.manifest?.case_name !== caseName ||
+        packageSnapshot?.manifest?.byte_length !== packageSnapshot?.eventRecord?.bytes?.byteLength) {
+      return fixedResult("PACKAGE_REJECTED", 0, 0, clock() - startedAt);
+    }
+    rawBody = decodeExactFixture(packageSnapshot.eventRecord, caseName, approvedTargetDigest);
+    if (!rawBody) return fixedResult("PACKAGE_REJECTED", 0, 0, clock() - startedAt);
+  } catch {
+    return fixedResult("PACKAGE_REJECTED", 0, 0, clock() - startedAt);
+  }
+
+  const packageStillExact = async () => {
+    try {
+      return samePackageSnapshot(packageSnapshot, await inspectPackage(packageDirectory));
+    } catch {
+      return false;
+    }
+  };
 
   const validSignature = squareWebhookSignature(notificationUrl, rawBody, signingKey);
   let sentBody = rawBody;
@@ -288,21 +337,33 @@ export async function executeWebhookSandboxCase({
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     for (let index = 0; index < requestLimit; index += 1) {
+      if (!await packageStillExact()) {
+        return fixedResult("PACKAGE_REJECTED", lastHttp, attempts, clock() - startedAt);
+      }
       attempts += 1;
-      const response = await sendOnce(
-        fetchImpl,
-        notificationUrl,
-        sentBody,
-        sentSignature,
-        controller.signal,
-      );
+      let response;
+      try {
+        response = await sendOnce(
+          fetchImpl,
+          notificationUrl,
+          sentBody,
+          sentSignature,
+          controller.signal,
+        );
+      } catch {
+        if (!await packageStillExact()) {
+          return fixedResult("PACKAGE_REJECTED", lastHttp, attempts, clock() - startedAt);
+        }
+        return fixedResult("NETWORK_UNAVAILABLE", lastHttp, attempts, clock() - startedAt);
+      }
       lastHttp = response.status;
+      if (!await packageStillExact()) {
+        return fixedResult("PACKAGE_REJECTED", lastHttp, attempts, clock() - startedAt);
+      }
       if (lastHttp !== expectedHttp || !exactWebhookResponse(response.body, expectedCode)) {
         return fixedResult("RESPONSE_REJECTED", lastHttp, attempts, clock() - startedAt);
       }
     }
-  } catch {
-    return fixedResult("NETWORK_UNAVAILABLE", lastHttp, attempts, clock() - startedAt);
   } finally {
     clearTimeout(timer);
   }
@@ -373,16 +434,12 @@ export async function webhookDriverMain(argv = process.argv.slice(2), dependenci
   try {
     const prompt = dependencies.readHiddenLine || readHiddenLine;
     const notificationUrl = await prompt("Sandbox notification URL (hidden): ", 2048);
-    const fixturePath = await prompt("0600 temp webhook fixture path (hidden): ", 4096);
-    const readFixture = dependencies.readFixture || readPrivateWebhookFixture;
-    const rawBody = readFixture(fixturePath);
-    const approvedTargetDigest = await prompt("Approved target SHA-256 digest (hidden): ", 64);
+    const packageDirectory = await prompt("Prepared webhook package directory (hidden): ", 4096);
     signingKey = await prompt("Sandbox webhook signing key (hidden): ", 4096);
     const result = await executeWebhookSandboxCase({
       caseName,
       notificationUrl,
-      rawBody,
-      approvedTargetDigest,
+      packageDirectory,
       signingKey,
       fetchImpl: dependencies.fetchImpl || globalThis.fetch,
       clock: dependencies.clock || (() => Date.now()),

@@ -9,7 +9,7 @@ import {
   computeSandboxFaultTargetDigest,
 } from "../square-worker/src/sandbox-faults.mjs";
 
-const ALLOWED_MODES = new Set(Object.keys(faultTest.MODE_ERROR_CODES));
+const ALLOWED_MODES = new Set(faultTest.ALLOWED_MODES);
 const SECRET_NAMES = Object.freeze([
   "SQUARE_SANDBOX_FAULT_MODE",
   "SQUARE_SANDBOX_FAULT_TARGET_DIGEST",

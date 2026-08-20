@@ -11,6 +11,8 @@ const MODE_ERROR_CODES = Object.freeze({
   SQUARE_GROUP_REMOVE_FAILURE: "SQUARE_SANDBOX_FAULT_GROUP_REMOVE_UNAVAILABLE",
   QUEUE_POST_LEASE_INTERRUPT: "SANDBOX_FAULT_POST_LEASE_INTERRUPT",
 });
+const REDRIVE_ISOLATION_MODE = "QUEUE_REDRIVE_ISOLATION";
+const ALLOWED_MODES = new Set([...Object.keys(MODE_ERROR_CODES), REDRIVE_ISOLATION_MODE]);
 const GROUP_REMOVAL_WAIT_CODE = "SANDBOX_FAULT_APPS_REDEMPTION_NOT_DONE";
 
 const OFFER_MODES = new Set([
@@ -132,7 +134,7 @@ function timingSafeEqual(left, right) {
 }
 
 export async function computeSandboxFaultTargetDigest(mode, selector, secret, runToken) {
-  if (!Object.hasOwn(MODE_ERROR_CODES, mode) || !selectorReady(selector) ||
+  if (!ALLOWED_MODES.has(mode) || !selectorReady(selector) ||
       !secretReady(secret) || !runTokenReady(runToken)) {
     throw new TypeError("SANDBOX_FAULT_DIGEST_INPUT_INVALID");
   }
@@ -149,7 +151,7 @@ export async function computeSandboxFaultSourceDigest(mode, selector, secret, ru
 
 export async function computeSandboxFaultAppsUrlDigest(mode, appsUrl, secret, runToken) {
   const canonical = canonicalAppsUrl(appsUrl);
-  if (!Object.hasOwn(MODE_ERROR_CODES, mode) || !canonical ||
+  if (!ALLOWED_MODES.has(mode) || !canonical ||
       !secretReady(secret) || !runTokenReady(runToken)) {
     throw new TypeError("SANDBOX_FAULT_APPS_URL_DIGEST_INPUT_INVALID");
   }
@@ -203,7 +205,7 @@ async function loadEnabledConfiguration(env) {
   const forbiddenAppsDigest = String(env.SQUARE_SANDBOX_FAULT_FORBIDDEN_APPS_URL_DIGEST || "");
   const sourceDigest = String(env.SQUARE_SANDBOX_FAULT_SOURCE_DIGEST || "");
   const appsUrl = canonicalAppsUrl(env.APPS_SCRIPT_URL);
-  if (!sandboxBoundaryReady(env) || !Object.hasOwn(MODE_ERROR_CODES, configuredMode) ||
+  if (!sandboxBoundaryReady(env) || !ALLOWED_MODES.has(configuredMode) ||
       !/^[a-f0-9]{64}$/.test(targetDigest) || !secretReady(hashSecret) || !runTokenReady(runToken) ||
       !appsUrl || !secretReady(env.APPS_SCRIPT_SHARED_SECRET) ||
       !/^[a-f0-9]{64}$/.test(expectedAppsDigest) || !/^[a-f0-9]{64}$/.test(forbiddenAppsDigest) ||
@@ -239,7 +241,11 @@ async function preflight(env, context = {}) {
     } catch {
       throw new SandboxFaultConfigurationError();
     }
-    if (!timingSafeEqual(targetDigest, expectedTarget) || context.kind !== "fetch") {
+    const admittedFetch = context.kind === "fetch" && (
+      (context.method === "GET" && context.pathname === "/sandbox/owner-offer-test") ||
+      (context.method === "POST" && context.pathname === "/api/square/offer")
+    );
+    if (!timingSafeEqual(targetDigest, expectedTarget) || !admittedFetch) {
       throw new SandboxFaultConfigurationError();
     }
   } else if (context.kind === "fetch") {
@@ -333,6 +339,7 @@ export const sandboxFaultController = Object.freeze({
 });
 
 export const __test = Object.freeze({
+  ALLOWED_MODES: Object.freeze([...ALLOWED_MODES]),
   CONTRACT,
   GROUP_REMOVAL_WAIT_CODE,
   MODE_ERROR_CODES,

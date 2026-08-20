@@ -79,7 +79,16 @@ export function createSandboxWorker(controller) {
   return Object.freeze({
     async fetch(request, env, ctx) {
       try {
-        await controller.preflight(env, { kind: "fetch" });
+        let method = "OTHER";
+        let pathname = "OTHER";
+        try {
+          const url = new URL(request.url);
+          if (request.method === "GET" || request.method === "POST") method = request.method;
+          if (url.pathname === SANDBOX_OWNER_HARNESS_PATH || url.pathname === "/api/square/offer") {
+            pathname = url.pathname;
+          }
+        } catch {}
+        await controller.preflight(env, { kind: "fetch", method, pathname });
       } catch (error) {
         console.error("square_sandbox_fault_preflight_rejected", safeErrorCode(error));
         return errorJson("SANDBOX_FAULT_PREFLIGHT_REJECTED", 503);

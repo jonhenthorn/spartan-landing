@@ -30,6 +30,10 @@ const SAFE_FAILURE_STAGE_CODES = new Set([
 const APPS_HEALTH_RESPONSE_SLO_EXCEEDED = "APPS_HEALTH_RESPONSE_SLO_EXCEEDED";
 const PROBE_ACCEPTANCE_SLO_MS = 8000;
 const PROBE_TRANSPORT_DEADLINE_MS = 10000;
+const SQUARE_JOURNEY_EXPECTATIONS = Object.freeze({
+  disabled: "DISABLED",
+  ready: "READY",
+});
 
 const SANDBOX_DEFAULTS = Object.freeze({
   OPS_ENVIRONMENT: "sandbox",
@@ -44,6 +48,7 @@ const SANDBOX_DEFAULTS = Object.freeze({
 
 export async function runAppsHealthProbe({
   expectation,
+  squareJourney = "disabled",
   diagnostic = false,
   environment = process.env,
   fetchImpl = globalThis.fetch,
@@ -51,7 +56,10 @@ export async function runAppsHealthProbe({
   clock = () => performance.now(),
 } = {}) {
   const expected = PROBE_EXPECTATIONS[expectation];
-  if (!expected) return fixedFailure("APPS_HEALTH_PROBE_EXPECTATION_INVALID", 0);
+  const expectedSquareJourneyState = SQUARE_JOURNEY_EXPECTATIONS[squareJourney];
+  if (!expected || !expectedSquareJourneyState) {
+    return fixedFailure("APPS_HEALTH_PROBE_EXPECTATION_INVALID", 0);
+  }
 
   const probeEnvironment = Object.freeze({
     ...SANDBOX_DEFAULTS,
@@ -60,6 +68,7 @@ export async function runAppsHealthProbe({
     OPS_EXPECT_APPS_WORKER_JSON_STATE: String(
       environment.OPS_EXPECT_APPS_WORKER_JSON_STATE || SANDBOX_DEFAULTS.OPS_EXPECT_APPS_WORKER_JSON_STATE,
     ),
+    OPS_EXPECT_APPS_SQUARE_JOURNEY_STATE: expectedSquareJourneyState,
   });
 
   const started = clock();
@@ -97,6 +106,7 @@ export async function runAppsHealthProbe({
       probe_code: "APPS_HEALTH_SANDBOX_PROBE",
       environment_code: "sandbox",
       expected_result: expectation,
+      expected_square_journey_state: expectedSquareJourneyState,
       inspection_state: result.inspectionState,
       configuration_healthy: result.configurationHealthy,
       elapsed_ms: displayedElapsedMilliseconds(elapsedMs),
@@ -116,6 +126,7 @@ export async function runAppsHealthProbe({
     probe_code: "APPS_HEALTH_SANDBOX_PROBE",
     environment_code: "sandbox",
     expected_result: expectation,
+    expected_square_journey_state: expectedSquareJourneyState,
     inspection_state: result.inspectionState,
     configuration_healthy: result.configurationHealthy,
     elapsed_ms: displayedElapsedMilliseconds(elapsedMs),
@@ -157,13 +168,19 @@ function displayedElapsedMilliseconds(elapsedMs) {
 
 function parseProbeArguments(argv) {
   const exact = argv.filter((value) => value.startsWith("--expect="));
+  const squareJourney = argv.filter((value) => value.startsWith("--square-journey="));
   const diagnosticCount = argv.filter((value) => value === "--diagnostic").length;
-  const expectedLength = diagnosticCount === 1 ? 2 : 1;
-  if (argv.length !== expectedLength || exact.length !== 1 || diagnosticCount > 1) {
-    return Object.freeze({ expectation: "", diagnostic: false });
+  const expectedLength = 1 + diagnosticCount + squareJourney.length;
+  const squareJourneyValue = squareJourney.length === 0
+    ? "disabled"
+    : squareJourney[0].slice("--square-journey=".length);
+  if (argv.length !== expectedLength || exact.length !== 1 || diagnosticCount > 1 || squareJourney.length > 1 ||
+      !Object.hasOwn(SQUARE_JOURNEY_EXPECTATIONS, squareJourneyValue)) {
+    return Object.freeze({ expectation: "", squareJourney: "", diagnostic: false });
   }
   return Object.freeze({
     expectation: exact[0].slice("--expect=".length),
+    squareJourney: squareJourneyValue,
     diagnostic: diagnosticCount === 1,
   });
 }
@@ -184,6 +201,7 @@ if (import.meta.url === invokedPath) await main();
 
 export const __test = Object.freeze({
   PROBE_EXPECTATIONS,
+  SQUARE_JOURNEY_EXPECTATIONS,
   PROBE_ACCEPTANCE_SLO_MS,
   PROBE_TRANSPORT_DEADLINE_MS,
   SAFE_FAILURE_STAGE_CODES,

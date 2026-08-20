@@ -235,6 +235,18 @@ check("the preparation helper is offline, hidden-input-only, and bounded-output"
   assert.match(output, /SQUARE_SANDBOX_FAULT_HASH_SECRET=\[HIDDEN_INPUT_NOT_PRINTED\]/);
   assert.doesNotMatch(output, /SQUARE_SANDBOX_FAULT_SOURCE_DIGEST=/);
 
+  const isolationPrepared = await prepareFaultConfiguration({
+    mode: "QUEUE_REDRIVE_ISOLATION",
+    selector: "synthetic-event-redrive-prepared-001",
+    hashSecret: HASH_SECRET,
+    sandboxAppsUrl: sandboxUrl,
+    forbiddenAppsUrl: FORBIDDEN_APPS_URL,
+    randomBytesImpl: () => Buffer.alloc(32, 6),
+  });
+  const isolationOutput = formatPreparedFaultConfiguration(isolationPrepared);
+  assert.match(isolationOutput, /^SQUARE_SANDBOX_FAULT_MODE=QUEUE_REDRIVE_ISOLATION$/m);
+  assert.doesNotMatch(isolationOutput, /SQUARE_SANDBOX_FAULT_SOURCE_DIGEST=/);
+
   const groupSelector = "out_remove_synthetic-prepared-group-001";
   const sourceSelector = "synthetic-source-webhook-private-marker-001";
   const groupPrepared = await prepareFaultConfiguration({
@@ -455,9 +467,122 @@ check("the wrapped sandbox Worker interrupts one exact post-lease Queue item", a
   assert.equal(productionEnv.DB.attempts, 0);
 });
 
+check("armed offer faults admit only the owner harness GET and exact offer POST before the base Worker", async () => {
+  const env = await arm(baseSandboxEnv(), "SQUARE_SEARCH_OUTAGE", "synthetic-case-offer-001");
+  Object.assign(env, {
+    SQUARE_SANDBOX_TEST_HARNESS_ENABLED: "true",
+    TURNSTILE_SITE_KEY: "sandbox-public-site-key-validation-1234",
+    TURNSTILE_EXPECTED_ACTION: "square_offer_sandbox",
+  });
+  assert.equal(await sandboxFaultController.preflight(env, {
+    kind: "fetch", method: "GET", pathname: "/sandbox/owner-offer-test",
+  }), true);
+  assert.equal(await sandboxFaultController.preflight(env, {
+    kind: "fetch", method: "POST", pathname: "/api/square/offer",
+  }), true);
+
+  const rejected = [
+    ["GET", "/api/square/offer"],
+    ["POST", "/sandbox/owner-offer-test"],
+    ["POST", "/api/square/webhook"],
+    ["GET", "/api/square/pass"],
+    ["GET", "/api/square/config"],
+    ["GET", "/other"],
+  ];
+  const logs = await captureConsole(async () => {
+    for (const [method, pathname] of rejected) {
+      const response = await sandboxWorker.fetch(new Request(`https://sandbox-validation.workers.dev${pathname}`, {
+        method,
+      }), env, {});
+      assert.equal(response.status, 503);
+      assert.deepEqual(await response.json(), { ok: false, error_code: "SANDBOX_FAULT_PREFLIGHT_REJECTED" });
+    }
+  });
+  assert.equal(logs.length, rejected.length);
+  assert.equal(env.DB.attempts, 0);
+
+  const harness = await sandboxWorker.fetch(
+    new Request("https://sandbox-validation.workers.dev/sandbox/owner-offer-test"), env, {},
+  );
+  assert.equal(harness.status, 200);
+  const offer = await sandboxWorker.fetch(new Request("https://sandbox-validation.workers.dev/api/square/offer", {
+    method: "POST",
+    headers: { Origin: "https://sandbox-validation.workers.dev" },
+  }), env, {});
+  assert.equal(offer.status, 503);
+  assert.deepEqual(await offer.json(), { ok: false, error_code: "OFFER_DISABLED" });
+  assert.equal(env.DB.attempts, 0);
+});
+
+check("redrive isolation is non-injecting and admits only one exact Queue target while blocking fetch and scheduled work", async () => {
+  class RedriveProbeD1 extends FaultLedgerD1 {
+    constructor() {
+      super();
+      this.baseAttempts = 0;
+    }
+
+    prepare(sql) {
+      if (sql.includes("/*op:sandbox_fault_consume*/")) return super.prepare(sql);
+      this.baseAttempts += 1;
+      throw new Error("base Queue path reached");
+    }
+  }
+
+  const selector = "synthetic-event-redrive-isolation-001";
+  const db = new RedriveProbeD1();
+  const env = await arm(baseSandboxEnv(db), "QUEUE_REDRIVE_ISOLATION", selector);
+  env.SQUARE_CONSUMER_ENABLED = "true";
+  assert.equal(await sandboxFaultController.preflight(env, {
+    kind: "queue", items: [{ kind: "square_webhook", selector }],
+  }), true);
+  await assert.rejects(() => sandboxFaultController.preflight(env, {
+    kind: "queue", items: [{ kind: "square_webhook", selector: "synthetic-event-unrelated-001" }],
+  }), /SANDBOX_FAULT_PREFLIGHT_REJECTED/);
+  await assert.rejects(() => sandboxFaultController.preflight(env, { kind: "scheduled" }),
+    /SANDBOX_FAULT_PREFLIGHT_REJECTED/);
+  assert.equal(await sandboxFaultController.maybeInject({
+    env, mode: "QUEUE_REDRIVE_ISOLATION", selector,
+  }), false);
+  assert.equal(db.attempts, 0, "isolation never consumes or injects a one-shot");
+
+  const fetchLogs = await captureConsole(async () => {
+    const response = await sandboxWorker.fetch(
+      new Request("https://sandbox-validation.workers.dev/api/square/config"), env, {},
+    );
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), { ok: false, error_code: "SANDBOX_FAULT_PREFLIGHT_REJECTED" });
+  });
+  assert.equal(fetchLogs.length, 1);
+  let waits = 0;
+  await assert.rejects(() => sandboxWorker.scheduled({}, env, { waitUntil: () => { waits += 1; } }),
+    /SANDBOX_FAULT_PREFLIGHT_REJECTED/);
+  assert.equal(waits, 0);
+
+  let acked = 0;
+  let retried = 0;
+  await captureConsole(() => sandboxWorker.queue({ messages: [{
+    body: { kind: "square_webhook", event_id: selector },
+    attempts: 1,
+    ack: () => { acked += 1; },
+    retry: () => { retried += 1; },
+  }] }, env, {}));
+  assert.equal(db.baseAttempts, 1, "the exact target alone reaches the base Queue handler");
+  assert.equal(acked, 0);
+  assert.equal(retried, 1);
+
+  await assert.rejects(() => sandboxWorker.queue({ messages: [{
+    body: { kind: "square_webhook", event_id: "synthetic-event-unrelated-001" },
+    ack: () => { acked += 1; },
+    retry: () => { retried += 1; },
+  }] }, env, {}), /SANDBOX_FAULT_PREFLIGHT_REJECTED/);
+  assert.equal(db.baseAttempts, 1, "an unrelated target is stopped before the base Queue handler");
+});
+
 check("armed invocation separation and exact Queue targeting fail closed", async () => {
   const offer = await arm(baseSandboxEnv(), "SQUARE_SEARCH_OUTAGE", "synthetic-case-offer-001");
-  assert.equal(await sandboxFaultController.preflight(offer, { kind: "fetch" }), true);
+  assert.equal(await sandboxFaultController.preflight(offer, {
+    kind: "fetch", method: "POST", pathname: "/api/square/offer",
+  }), true);
   await assert.rejects(
     () => sandboxFaultController.preflight(offer, {
       kind: "queue", items: [{ kind: "square_webhook", selector: "synthetic-event-other-001" }],
