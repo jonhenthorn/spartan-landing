@@ -26,13 +26,20 @@ const FILES = Object.freeze([EVENT_FILE, MANIFEST_FILE]);
 const SANDBOX_MERCHANT_ID = "ML8W3CSGD2B71";
 const MAX_BODY_BYTES = 256 * 1024;
 const MAX_MANIFEST_BYTES = 8 * 1024;
-const CASES = new Set(["forged", "altered", "signed-unrecognized", "signed-recognized", "replay"]);
+const O01_REFUND_CASE = "o01-refund";
+const O01_PAYMENT_CASE = "o01-payment";
+const CASES = new Set([
+  "forged", "altered", "signed-unrecognized", "signed-recognized", "replay",
+  O01_REFUND_CASE, O01_PAYMENT_CASE,
+]);
 const RECOGNIZED_TYPES = new Set([
   "payment.created",
   "payment.updated",
   "refund.created",
   "refund.updated",
 ]);
+const REPLAY_EVENT_TYPE = "refund.updated";
+const REPLAY_OBJECT_ID_PATTERN = /^SANDBOX_REFUND_CONFIRMED_ABSENT_[A-Z0-9]{8,64}$/;
 
 class FixtureError extends Error {
   constructor(code = "INPUT_REJECTED") {
@@ -61,8 +68,19 @@ function validPrivateId(value, minimum = 8, maximum = 200) {
     /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(value);
 }
 
+function validReplayEventId(value) {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{7,159}$/.test(value);
+}
+
+function validReplayObjectId(value) {
+  return typeof value === "string" && REPLAY_OBJECT_ID_PATTERN.test(value);
+}
+
 function eventTypeMatchesCase(caseName, eventType) {
   if (!CASES.has(caseName) || !validEventType(eventType)) return false;
+  if (caseName === "replay") return eventType === REPLAY_EVENT_TYPE;
+  if (caseName === O01_REFUND_CASE) return eventType === "refund.updated";
+  if (caseName === O01_PAYMENT_CASE) return eventType === "payment.updated";
   return caseName === "signed-unrecognized"
     ? !RECOGNIZED_TYPES.has(eventType)
     : RECOGNIZED_TYPES.has(eventType);
@@ -87,6 +105,11 @@ export function independentWebhookTargetDigest({ eventType, eventId, objectId } 
 export function buildExactWebhookFixture({ caseName, eventType, eventId, objectId } = {}) {
   if (!eventTypeMatchesCase(caseName, eventType) || !validPrivateId(eventId) || !validPrivateId(objectId, 1, 200)) {
     fail();
+  }
+  if (caseName === "replay" && (!validReplayEventId(eventId) || !validReplayObjectId(objectId))) fail();
+  if ([O01_REFUND_CASE, O01_PAYMENT_CASE].includes(caseName)) {
+    const objectMaximum = caseName === O01_REFUND_CASE ? 149 : 192;
+    if (!validReplayEventId(eventId) || !validPrivateId(objectId, 8, objectMaximum)) fail();
   }
   const dataType = eventType.split(".")[0];
   const body = JSON.stringify({
@@ -157,12 +180,17 @@ function parseExactFixture(bytes, caseName) {
   if (!exactKeys(value, ["data", "event_id", "merchant_id", "type"]) ||
       !exactKeys(value.data, ["id", "type"]) || value.merchant_id !== SANDBOX_MERCHANT_ID ||
       value.data.type !== String(value.type || "").split(".")[0]) fail("PACKAGE_REJECTED");
-  const exact = buildExactWebhookFixture({
-    caseName,
-    eventType: value.type,
-    eventId: value.event_id,
-    objectId: value.data.id,
-  });
+  let exact;
+  try {
+    exact = buildExactWebhookFixture({
+      caseName,
+      eventType: value.type,
+      eventId: value.event_id,
+      objectId: value.data.id,
+    });
+  } catch {
+    fail("PACKAGE_REJECTED");
+  }
   if (!bytes.equals(Buffer.from(exact, "utf8"))) fail("PACKAGE_REJECTED");
   return { eventType: value.type, eventId: value.event_id, objectId: value.data.id };
 }
@@ -446,7 +474,13 @@ export const __test = Object.freeze({
   EVENT_FILE,
   MANIFEST_FILE,
   PACKAGE_PREFIX,
+  O01_PAYMENT_CASE,
+  O01_REFUND_CASE,
+  REPLAY_EVENT_TYPE,
+  REPLAY_OBJECT_ID_PATTERN,
+  validReplayObjectId,
   SANDBOX_MERCHANT_ID,
+  validReplayEventId,
 });
 
 const invokedPath = process.argv[1] ? pathToFileURL(process.argv[1]).href : "";

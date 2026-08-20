@@ -59,6 +59,29 @@ function json(payload, status = 200, headers = {}) {
 
 function makeMock({ merchantId = PROVIDER_FIXTURE_BOUNDARIES.merchantId, f03Conflict = false,
   f03Propagating = false, oversized = false, ambiguousOrderOnce = false,
+  catalogDiscountName = PROVIDER_FIXTURE_BOUNDARIES.discountName,
+  linkedGroupIds = [PROVIDER_FIXTURE_BOUNDARIES.eligibleGroupId],
+  orderDiscountName = PROVIDER_FIXTURE_BOUNDARIES.discountName,
+  qualifyingOrderTotalFallback = false,
+  unlinkedOrderDiscounts = [], omitUnlinkedOrderDiscounts = false, unlinkedAppliedDiscounts,
+  unlinkedOrderCustomerId, unlinkedPaymentCustomerId, unlinkedCatalogObjectId,
+  unlinkedQuantity = "1",
+  unlinkedOrderTotalMoney = { amount: 100, currency: "USD" },
+  unlinkedLineTotalMoney = { amount: 100, currency: "USD" },
+  unlinkedBasePriceMoney = { amount: 100, currency: "USD" },
+  unlinkedPaymentMoney = { amount: 100, currency: "USD" },
+  omitUnlinkedOrderTotal = false, omitUnlinkedLineTotal = false, omitUnlinkedBasePrice = false,
+  unlinkedOrderCreatedAt = "2026-08-19T19:59:50.123456789Z",
+  unlinkedOrderOpenUpdatedAt = "2026-08-19T19:59:51Z",
+  unlinkedOrderCompletedUpdatedAt = "2026-08-19T19:59:54.999999999Z",
+  unlinkedPaymentCreatedAt = "2026-08-19T19:59:52.123456Z",
+  unlinkedPaymentUpdatedAt = "2026-08-19T19:59:53Z",
+  orderId = "",
+  paymentId = "PAYMENT_PRIVATE_1",
+  paymentTimestamp = "2026-08-19T19:59:55.123456789Z",
+  refundId = "REFUND_PRIVATE_1",
+  refundTimestamp = "2026-08-19T19:59:56Z",
+  returnedRedeemedGroupId = PROVIDER_FIXTURE_BOUNDARIES.redeemedGroupId,
   authorizationMerchantId = PROVIDER_FIXTURE_BOUNDARIES.merchantId,
   authorizationScopes = null, authorizationExpiresAt = EXPIRES_AT,
   authorizationClientId = CLIENT_ID, expectedToken = TOKEN } = {}) {
@@ -86,7 +109,7 @@ function makeMock({ merchantId = PROVIDER_FIXTURE_BOUNDARIES.merchantId, f03Conf
   customers.set(LINKED_CUSTOMER_ID, {
     id: LINKED_CUSTOMER_ID,
     reference_id: LINKED_REFERENCE,
-    group_ids: [PROVIDER_FIXTURE_BOUNDARIES.eligibleGroupId],
+    group_ids: [...linkedGroupIds],
   });
   if (f03Conflict) {
     customers.set("UNEXPECTED_CUSTOMER_PRIVATE", {
@@ -137,6 +160,20 @@ function makeMock({ merchantId = PROVIDER_FIXTURE_BOUNDARIES.merchantId, f03Conf
         currency: "USD",
       } });
     }
+    if (url.pathname.startsWith("/v2/customers/groups/") && init.method === "GET") {
+      assert.equal(body, undefined);
+      const requestedId = decodeURIComponent(url.pathname.split("/").at(-1));
+      assert.ok([
+        PROVIDER_FIXTURE_BOUNDARIES.eligibleGroupId,
+        PROVIDER_FIXTURE_BOUNDARIES.redeemedGroupId,
+      ].includes(requestedId));
+      return json({ group: {
+        id: requestedId === PROVIDER_FIXTURE_BOUNDARIES.redeemedGroupId
+          ? returnedRedeemedGroupId
+          : requestedId,
+        name: requestedId === PROVIDER_FIXTURE_BOUNDARIES.redeemedGroupId ? "Redeemed" : "Eligible",
+      } });
+    }
     if (url.pathname.startsWith("/v2/catalog/object/")) {
       assert.equal(init.method, "GET");
       assert.equal(url.search, "?include_related_objects=false");
@@ -147,7 +184,11 @@ function makeMock({ merchantId = PROVIDER_FIXTURE_BOUNDARIES.merchantId, f03Conf
           id,
           type: "DISCOUNT",
           present_at_all_locations: true,
-          discount_data: { discount_type: "FIXED_PERCENTAGE", percentage: "50" },
+          discount_data: {
+            discount_type: "FIXED_PERCENTAGE",
+            name: catalogDiscountName,
+            percentage: "50",
+          },
         } });
       }
       assert.ok(PROVIDER_FIXTURE_BOUNDARIES.qualifyingVariationIds.includes(id));
@@ -239,18 +280,20 @@ function makeMock({ merchantId = PROVIDER_FIXTURE_BOUNDARIES.merchantId, f03Conf
       });
       if (mutationResults.has(body.idempotency_key)) return json(mutationResults.get(body.idempotency_key));
       orderSequence += 1;
-      const id = `ORDER_PRIVATE_${orderSequence}`;
+      const id = orderId || `ORDER_PRIVATE_${orderSequence}`;
       const order = qualifying
         ? {
             id,
             state: "OPEN",
             location_id: body.order.location_id,
             customer_id: body.order.customer_id,
-            net_amounts: { total_money: { amount: 500, currency: "USD" } },
+            ...(qualifyingOrderTotalFallback
+              ? { total_money: { amount: 500, currency: "USD" } }
+              : { net_amounts: { total_money: { amount: 500, currency: "USD" } } }),
             discounts: [{
               uid: "p2-first-drink",
               catalog_object_id: PROVIDER_FIXTURE_BOUNDARIES.discountCatalogId,
-              name: "50% Off First Drink - synthetic",
+              name: orderDiscountName,
               type: "FIXED_PERCENTAGE",
               percentage: "50",
               scope: "LINE_ITEM",
@@ -269,10 +312,18 @@ function makeMock({ merchantId = PROVIDER_FIXTURE_BOUNDARIES.merchantId, f03Conf
             id,
             state: "OPEN",
             location_id: body.order.location_id,
-            net_amounts: { total_money: { amount: 100, currency: "USD" } },
-            discounts: [],
-            line_items: [{ name: body.order.line_items[0].name, quantity: "1",
-              base_price_money: { amount: 100, currency: "USD" } }],
+            ...(unlinkedOrderCustomerId === undefined ? {} : { customer_id: unlinkedOrderCustomerId }),
+            ...(omitUnlinkedOrderTotal ? {} : { net_amounts: { total_money: unlinkedOrderTotalMoney } }),
+            ...(omitUnlinkedOrderDiscounts ? {} : { discounts: unlinkedOrderDiscounts }),
+            ...(unlinkedOrderCreatedAt === null ? {} : { created_at: unlinkedOrderCreatedAt }),
+            ...(unlinkedOrderOpenUpdatedAt === null ? {} : { updated_at: unlinkedOrderOpenUpdatedAt }),
+            line_items: [{ name: body.order.line_items[0].name, quantity: unlinkedQuantity,
+              ...(unlinkedCatalogObjectId === undefined ? {} : { catalog_object_id: unlinkedCatalogObjectId }),
+              ...(omitUnlinkedLineTotal ? {} : { total_money: unlinkedLineTotalMoney }),
+              ...(omitUnlinkedBasePrice ? {} : { base_price_money: unlinkedBasePriceMoney }),
+              ...(unlinkedAppliedDiscounts === undefined
+                ? {}
+                : { applied_discounts: unlinkedAppliedDiscounts }) }],
           };
       orders.set(id, order);
       const result = { order };
@@ -305,13 +356,25 @@ function makeMock({ merchantId = PROVIDER_FIXTURE_BOUNDARIES.merchantId, f03Conf
       if (mutationResults.has(body.idempotency_key)) return json(mutationResults.get(body.idempotency_key));
       paymentSequence += 1;
       order.state = "COMPLETED";
+      if (!qualifying) {
+        if (unlinkedOrderCompletedUpdatedAt === null) delete order.updated_at;
+        else order.updated_at = unlinkedOrderCompletedUpdatedAt;
+      }
       const payment = {
-        id: `PAYMENT_PRIVATE_${paymentSequence}`,
+        id: paymentSequence === 1 ? paymentId : `PAYMENT_PRIVATE_${paymentSequence}`,
         status: "COMPLETED",
         location_id: body.location_id,
         order_id: body.order_id,
-        amount_money: body.amount_money,
-        ...(body.customer_id ? { customer_id: body.customer_id } : {}),
+        amount_money: qualifying ? body.amount_money : unlinkedPaymentMoney,
+        ...(qualifying
+          ? (paymentTimestamp === null ? {} : { updated_at: paymentTimestamp })
+          : {
+              ...(unlinkedPaymentCreatedAt === null ? {} : { created_at: unlinkedPaymentCreatedAt }),
+              ...(unlinkedPaymentUpdatedAt === null ? {} : { updated_at: unlinkedPaymentUpdatedAt }),
+            }),
+        ...(qualifying
+          ? (body.customer_id ? { customer_id: body.customer_id } : {})
+          : (unlinkedPaymentCustomerId === undefined ? {} : { customer_id: unlinkedPaymentCustomerId })),
       };
       payments.set(payment.id, payment);
       const result = { payment };
@@ -340,10 +403,11 @@ function makeMock({ merchantId = PROVIDER_FIXTURE_BOUNDARIES.merchantId, f03Conf
       if (mutationResults.has(body.idempotency_key)) return json(mutationResults.get(body.idempotency_key));
       refundSequence += 1;
       const refund = {
-        id: `REFUND_PRIVATE_${refundSequence}`,
+        id: refundSequence === 1 ? refundId : `REFUND_PRIVATE_${refundSequence}`,
         status: "COMPLETED",
         payment_id: body.payment_id,
         amount_money: body.amount_money,
+        ...(refundTimestamp === null ? {} : { updated_at: refundTimestamp }),
       };
       refunds.set(refund.id, refund);
       const result = { refund };
@@ -390,6 +454,8 @@ assert.match(source, /SANDBOX_PROVIDER_FIXTURE_ONLY/);
 assert.match(source, /cnon:card-nonce-ok/);
 assert.match(source, /token\.length > 1024/);
 assert.match(source, /const APPROVED_TEMPORARY_OAUTH_CLIENT_ID = null/);
+assert.equal(PROVIDER_FIXTURE_BOUNDARIES.discountName, "50% Off First Drink — Enter 50%");
+assert.equal(PROVIDER_FIXTURE_BOUNDARIES.redeemedGroupId, "70AGVJZGBK8K7YV33N42SNDTNR");
 
 let sixthCaseFetches = 0;
 const sixthCase = await executeProviderFixture({
@@ -399,6 +465,20 @@ const sixthCase = await executeProviderFixture({
 });
 assert.equal(sixthCase.result, "INPUT_REJECTED");
 assert.equal(sixthCaseFetches, 0);
+
+for (const customerId of ["_LINKED_CUSTOMER_PRIVATE", "-LINKED_CUSTOMER_PRIVATE"]) {
+  let invalidCustomerFetches = 0;
+  const invalidCustomer = await executeProviderFixture({
+    caseName: "O-01", token: TOKEN, runKey: RUN_KEY, customerId, ack: PROVIDER_FIXTURE_ACK,
+  }, {
+    fetchImpl: async () => { invalidCustomerFetches += 1; return json({}); },
+    timeoutFactory: noTimeout,
+    mockValidation: true,
+  });
+  assert.equal(invalidCustomer.result, "INPUT_REJECTED");
+  assert.equal(invalidCustomer.requests, 0);
+  assert.equal(invalidCustomerFetches, 0);
+}
 
 let blockedCoreFetches = 0;
 const blockedCore = await executeProviderFixture({
@@ -491,6 +571,20 @@ for (const [caseName, expectedResult] of expected) {
     assert.equal(Object.hasOwn(orderBody.order, "discounts"), false);
     assert.equal(Object.hasOwn(paymentBody, "customer_id"), false);
     assert.equal(paymentBody.amount_money.amount, 100);
+    const providerOrder = [...run.mock.orders.values()][0];
+    const providerPayment = [...run.mock.payments.values()][0];
+    assert.equal(Object.hasOwn(providerOrder, "customer_id"), false);
+    assert.deepEqual(providerOrder.net_amounts.total_money, { amount: 100, currency: "USD" });
+    assert.deepEqual(providerOrder.line_items[0].total_money, { amount: 100, currency: "USD" });
+    assert.deepEqual(providerOrder.line_items[0].base_price_money, { amount: 100, currency: "USD" });
+    assert.equal(providerOrder.line_items[0].quantity, "1");
+    assert.equal(Object.hasOwn(providerOrder.line_items[0], "catalog_object_id"), false);
+    assert.equal(typeof providerOrder.created_at, "string");
+    assert.equal(typeof providerOrder.updated_at, "string");
+    assert.equal(Object.hasOwn(providerPayment, "customer_id"), false);
+    assert.deepEqual(providerPayment.amount_money, { amount: 100, currency: "USD" });
+    assert.equal(typeof providerPayment.created_at, "string");
+    assert.equal(typeof providerPayment.updated_at, "string");
   }
   const objectCounts = {
     customers: run.mock.customers.size,
@@ -524,10 +618,237 @@ assert.deepEqual(secondMutationBodies, firstMutationBodies);
 assert.equal(idempotentMock.orders.size, 1);
 assert.equal(idempotentMock.payments.size, 1);
 
+const nullOptionalFieldsAccepted = await runCase("Q-01", makeMock({
+  unlinkedOrderCustomerId: null,
+  unlinkedPaymentCustomerId: null,
+  unlinkedCatalogObjectId: null,
+  unlinkedOrderDiscounts: null,
+  unlinkedAppliedDiscounts: null,
+}));
+assert.equal(nullOptionalFieldsAccepted.result.status, "COMPLETE");
+assert.equal(nullOptionalFieldsAccepted.result.result, "UNLINKED_PAYMENT_READY");
+
+const absentDiscountFieldsAccepted = await runCase("Q-01", makeMock({
+  omitUnlinkedOrderDiscounts: true,
+}));
+assert.equal(absentDiscountFieldsAccepted.result.status, "COMPLETE");
+assert.equal(absentDiscountFieldsAccepted.result.result, "UNLINKED_PAYMENT_READY");
+
+const emptyDiscountFieldsAccepted = await runCase("Q-01", makeMock({
+  unlinkedOrderDiscounts: [],
+  unlinkedAppliedDiscounts: [],
+}));
+assert.equal(emptyDiscountFieldsAccepted.result.status, "COMPLETE");
+assert.equal(emptyDiscountFieldsAccepted.result.result, "UNLINKED_PAYMENT_READY");
+
+const maximumUnlinkedClockSkewAccepted = await runCase("Q-01", makeMock({
+  unlinkedOrderCreatedAt: "2026-08-19T20:00:05Z",
+  unlinkedOrderOpenUpdatedAt: "2026-08-19T20:00:05.000000000Z",
+  unlinkedOrderCompletedUpdatedAt: "2026-08-19T20:00:05.000000000Z",
+  unlinkedPaymentCreatedAt: "2026-08-19T20:00:05Z",
+  unlinkedPaymentUpdatedAt: "2026-08-19T20:00:05.000000000Z",
+}));
+assert.equal(maximumUnlinkedClockSkewAccepted.result.status, "COMPLETE");
+assert.equal(maximumUnlinkedClockSkewAccepted.result.result, "UNLINKED_PAYMENT_READY");
+
+for (const discountDrift of [
+  { unlinkedOrderDiscounts: {} },
+  { unlinkedOrderDiscounts: [{ uid: "unexpected-order-discount" }] },
+  { unlinkedAppliedDiscounts: {} },
+  { unlinkedAppliedDiscounts: [{ discount_uid: "unexpected-line-discount" }] },
+]) {
+  const discountRejected = await runCase("Q-01", makeMock(discountDrift));
+  assert.equal(discountRejected.result.status, "FAILED");
+  assert.equal(discountRejected.result.result, "ORDER_BOUNDARY_MISMATCH");
+  assert.equal(discountRejected.result.mutationRequests, 1);
+  assert.equal(discountRejected.mock.orders.size, 1);
+  assert.equal(discountRejected.mock.payments.size, 0);
+}
+
+for (const [drift, result, mutationRequests] of [
+  [{ unlinkedOrderCustomerId: "" }, "ORDER_BOUNDARY_MISMATCH", 1],
+  [{ unlinkedPaymentCustomerId: "" }, "PAYMENT_BOUNDARY_MISMATCH", 2],
+  [{ unlinkedCatalogObjectId: "" }, "ORDER_BOUNDARY_MISMATCH", 1],
+  [{ unlinkedQuantity: 1 }, "ORDER_BOUNDARY_MISMATCH", 1],
+  [{ unlinkedQuantity: "1.0" }, "ORDER_BOUNDARY_MISMATCH", 1],
+  [{ omitUnlinkedOrderTotal: true }, "ORDER_BOUNDARY_MISMATCH", 1],
+  [{ omitUnlinkedLineTotal: true }, "ORDER_BOUNDARY_MISMATCH", 1],
+  [{ omitUnlinkedBasePrice: true }, "ORDER_BOUNDARY_MISMATCH", 1],
+  [{ unlinkedBasePriceMoney: { amount: 101, currency: "USD" } }, "ORDER_BOUNDARY_MISMATCH", 1],
+  [{ unlinkedBasePriceMoney: { amount: 100, currency: "CAD" } }, "ORDER_BOUNDARY_MISMATCH", 1],
+  [{ unlinkedOrderTotalMoney: { amount: "100", currency: "USD" } }, "ORDER_BOUNDARY_MISMATCH", 1],
+  [{ unlinkedLineTotalMoney: { amount: "100", currency: "USD" } }, "ORDER_BOUNDARY_MISMATCH", 1],
+  [{ unlinkedBasePriceMoney: { amount: "100", currency: "USD" } }, "ORDER_BOUNDARY_MISMATCH", 1],
+  [{ unlinkedPaymentMoney: { amount: "100", currency: "USD" } }, "PAYMENT_BOUNDARY_MISMATCH", 2],
+]) {
+  const exactOrderRejected = await runCase("Q-01", makeMock(drift));
+  assert.equal(exactOrderRejected.result.status, "FAILED");
+  assert.equal(exactOrderRejected.result.result, result);
+  assert.equal(exactOrderRejected.result.mutationRequests, mutationRequests);
+}
+
+for (const timestampDrift of [
+  { unlinkedOrderCreatedAt: null },
+  { unlinkedOrderOpenUpdatedAt: null },
+  { unlinkedOrderCreatedAt: "not-a-timestamp" },
+  { unlinkedOrderOpenUpdatedAt: "2026-02-30T19:59:51Z" },
+  { unlinkedOrderOpenUpdatedAt: "2026-08-19T19:59:51-00:00" },
+  { unlinkedOrderOpenUpdatedAt: "2026-08-19T20:00:05.001Z" },
+  { unlinkedOrderOpenUpdatedAt: "2026-08-19T20:00:05.000000001Z" },
+  {
+    unlinkedOrderCreatedAt: "2026-08-19T19:59:52Z",
+    unlinkedOrderOpenUpdatedAt: "2026-08-19T19:59:51Z",
+  },
+  {
+    unlinkedOrderCreatedAt: "2026-08-19T19:59:51.000000001Z",
+    unlinkedOrderOpenUpdatedAt: "2026-08-19T19:59:51.000000000Z",
+  },
+]) {
+  const orderTimestampRejected = await runCase("Q-01", makeMock(timestampDrift));
+  assert.equal(orderTimestampRejected.result.status, "FAILED");
+  assert.equal(orderTimestampRejected.result.result, "ORDER_BOUNDARY_MISMATCH");
+  assert.equal(orderTimestampRejected.result.mutationRequests, 1);
+}
+
+for (const timestampDrift of [
+  { unlinkedOrderCompletedUpdatedAt: null },
+  { unlinkedOrderCompletedUpdatedAt: "not-a-timestamp" },
+  { unlinkedOrderCompletedUpdatedAt: "2026-08-19T20:00:05.001Z" },
+  { unlinkedOrderCompletedUpdatedAt: "2026-08-19T19:59:49Z" },
+]) {
+  const completedOrderTimestampRejected = await runCase("Q-01", makeMock(timestampDrift));
+  assert.equal(completedOrderTimestampRejected.result.status, "FAILED");
+  assert.equal(completedOrderTimestampRejected.result.result, "ORDER_BOUNDARY_MISMATCH");
+  assert.equal(completedOrderTimestampRejected.result.mutationRequests, 2);
+}
+
+for (const timestampDrift of [
+  { unlinkedPaymentCreatedAt: null },
+  { unlinkedPaymentUpdatedAt: null },
+  { unlinkedPaymentCreatedAt: "not-a-timestamp" },
+  { unlinkedPaymentUpdatedAt: "2026-02-30T19:59:53Z" },
+  { unlinkedPaymentUpdatedAt: "2026-08-19T19:59:53-00:00" },
+  { unlinkedPaymentUpdatedAt: "2026-08-19T20:00:05.001Z" },
+  { unlinkedPaymentUpdatedAt: "2026-08-19T20:00:05.000000001Z" },
+  {
+    unlinkedPaymentCreatedAt: "2026-08-19T19:59:54Z",
+    unlinkedPaymentUpdatedAt: "2026-08-19T19:59:53Z",
+  },
+  {
+    unlinkedPaymentCreatedAt: "2026-08-19T19:59:53.000000001Z",
+    unlinkedPaymentUpdatedAt: "2026-08-19T19:59:53.000000000Z",
+  },
+]) {
+  const paymentTimestampRejected = await runCase("Q-01", makeMock(timestampDrift));
+  assert.equal(paymentTimestampRejected.result.status, "FAILED");
+  assert.equal(paymentTimestampRejected.result.result, "PAYMENT_BOUNDARY_MISMATCH");
+  assert.equal(paymentTimestampRejected.result.mutationRequests, 2);
+}
+
 const wrongMerchant = await runCase("Q-02", makeMock({ merchantId: "WRONG_MERCHANT_PRIVATE" }));
 assert.equal(wrongMerchant.result.status, "FAILED");
 assert.equal(wrongMerchant.result.result, "MERCHANT_BOUNDARY_MISMATCH");
 assert.equal(wrongMerchant.result.mutationRequests, 0);
+
+for (const catalogMock of [
+  makeMock({ catalogDiscountName: "50% Off First Drink - synthetic" }),
+  makeMock({ catalogDiscountName: "" }),
+]) {
+  const catalogRejected = await runCase("O-01", catalogMock);
+  assert.equal(catalogRejected.result.status, "FAILED");
+  assert.equal(catalogRejected.result.result, "CATALOG_BOUNDARY_MISMATCH");
+  assert.equal(catalogRejected.result.mutationRequests, 0);
+}
+
+const orderNameRejected = await runCase("O-01", makeMock({
+  orderDiscountName: "50% Off First Drink - synthetic",
+}));
+assert.equal(orderNameRejected.result.status, "FAILED");
+assert.equal(orderNameRejected.result.result, "ORDER_BOUNDARY_MISMATCH");
+assert.equal(orderNameRejected.result.mutationRequests, 1);
+
+const fallbackOrderTotalRejected = await runCase("O-01", makeMock({
+  qualifyingOrderTotalFallback: true,
+}));
+assert.equal(fallbackOrderTotalRejected.result.status, "FAILED");
+assert.equal(fallbackOrderTotalRejected.result.result, "ORDER_BOUNDARY_MISMATCH");
+assert.equal(fallbackOrderTotalRejected.result.mutationRequests, 1);
+
+const alreadyRedeemedRejected = await runCase("O-01", makeMock({
+  linkedGroupIds: [
+    PROVIDER_FIXTURE_BOUNDARIES.eligibleGroupId,
+    PROVIDER_FIXTURE_BOUNDARIES.redeemedGroupId,
+  ],
+}));
+assert.equal(alreadyRedeemedRejected.result.status, "FAILED");
+assert.equal(alreadyRedeemedRejected.result.result, "CUSTOMER_BOUNDARY_MISMATCH");
+assert.equal(alreadyRedeemedRejected.result.mutationRequests, 0);
+
+const wrongRedeemedGroupRejected = await runCase("O-01", makeMock({
+  returnedRedeemedGroupId: "WRONG_REDEEMED_GROUP_PRIVATE",
+}));
+assert.equal(wrongRedeemedGroupRejected.result.status, "FAILED");
+assert.equal(wrongRedeemedGroupRejected.result.result, "GROUP_BOUNDARY_MISMATCH");
+assert.equal(wrongRedeemedGroupRejected.result.mutationRequests, 0);
+
+const longRefundRejected = await runCase("O-01", makeMock({ refundId: `R${"A".repeat(149)}` }));
+assert.equal(longRefundRejected.result.status, "FAILED");
+assert.equal(longRefundRejected.result.result, "REFUND_BOUNDARY_MISMATCH");
+assert.equal(longRefundRejected.result.mutationRequests, 3);
+
+const nonAlphanumericRefundRejected = await runCase("O-01", makeMock({ refundId: "_REFUND_PRIVATE_1" }));
+assert.equal(nonAlphanumericRefundRejected.result.status, "FAILED");
+assert.equal(nonAlphanumericRefundRejected.result.result, "REFUND_BOUNDARY_MISMATCH");
+
+const maximumRefundAccepted = await runCase("O-01", makeMock({ refundId: `R${"A".repeat(148)}` }));
+assert.equal(maximumRefundAccepted.result.status, "COMPLETE");
+assert.equal(maximumRefundAccepted.result.result, "O01_TRANSACTION_READY");
+
+for (const paymentId of ["_PAYMENT_PRIVATE_1", "-PAYMENT_PRIVATE_1", `P${"A".repeat(192)}`]) {
+  const paymentRejected = await runCase("O-01", makeMock({ paymentId }));
+  assert.equal(paymentRejected.result.status, "FAILED");
+  assert.equal(paymentRejected.result.result, "PAYMENT_BOUNDARY_MISMATCH");
+}
+
+const maximumPaymentAccepted = await runCase("O-01", makeMock({ paymentId: `P${"A".repeat(191)}` }));
+assert.equal(maximumPaymentAccepted.result.status, "COMPLETE");
+assert.equal(maximumPaymentAccepted.result.result, "O01_TRANSACTION_READY");
+
+for (const orderId of ["_ORDER_PRIVATE_1", "-ORDER_PRIVATE_1", `O${"A".repeat(192)}`]) {
+  const orderRejected = await runCase("O-01", makeMock({ orderId }));
+  assert.equal(orderRejected.result.status, "FAILED");
+  assert.equal(orderRejected.result.result, "ORDER_BOUNDARY_MISMATCH");
+}
+
+const maximumOrderAccepted = await runCase("O-01", makeMock({ orderId: `O${"A".repeat(191)}` }));
+assert.equal(maximumOrderAccepted.result.status, "COMPLETE");
+assert.equal(maximumOrderAccepted.result.result, "O01_TRANSACTION_READY");
+
+for (const paymentTimestamp of [null, "not-a-timestamp", "2026-02-30T19:59:55Z", "2026-08-19T20:00:05.001Z"]) {
+  const paymentTimestampRejected = await runCase("O-01", makeMock({ paymentTimestamp }));
+  assert.equal(paymentTimestampRejected.result.status, "FAILED");
+  assert.equal(paymentTimestampRejected.result.result, "PAYMENT_BOUNDARY_MISMATCH");
+}
+
+for (const refundTimestamp of [null, "not-a-timestamp", "2026-02-30T19:59:56Z", "2026-08-19T20:00:05.001Z"]) {
+  const refundTimestampRejected = await runCase("O-01", makeMock({ refundTimestamp }));
+  assert.equal(refundTimestampRejected.result.status, "FAILED");
+  assert.equal(refundTimestampRejected.result.result, "REFUND_BOUNDARY_MISMATCH");
+}
+
+const sixDigitProviderTimestampAccepted = await runCase("O-01", makeMock({
+  paymentTimestamp: "2026-08-19T19:59:55.123456Z",
+  refundTimestamp: "2026-08-19T19:59:56.654321Z",
+}));
+assert.equal(sixDigitProviderTimestampAccepted.result.status, "COMPLETE");
+assert.equal(sixDigitProviderTimestampAccepted.result.result, "O01_TRANSACTION_READY");
+
+const maximumProviderClockSkewAccepted = await runCase("O-01", makeMock({
+  paymentTimestamp: "2026-08-19T20:00:05Z",
+  refundTimestamp: "2026-08-19T20:00:05.000000000Z",
+}));
+assert.equal(maximumProviderClockSkewAccepted.result.status, "COMPLETE");
+assert.equal(maximumProviderClockSkewAccepted.result.result, "O01_TRANSACTION_READY");
 
 for (const authMock of [
   makeMock({ authorizationMerchantId: "WRONG_MERCHANT_PRIVATE" }),
@@ -653,6 +974,42 @@ assert.equal(fs.statSync(packageDirectory).mode & 0o077, 0);
 assert.equal(fs.statSync(`${packageDirectory}/private-record.json`).mode & 0o077, 0);
 cleanupPrivateRecordPackage(packageDirectory);
 assert.equal(fs.existsSync(packageDirectory), false);
+
+{
+  const validO01 = await runCase("O-01");
+  assert.equal(validO01.result.status, "COMPLETE");
+  const handle = createPrivateRecordPackage("O-01");
+  try {
+    const invalidRecord = structuredClone(validO01.result.privateRecord);
+    invalidRecord.selectors.refund_id = `R${"A".repeat(149)}`;
+    invalidRecord.webhook_targets[0].object_id = invalidRecord.selectors.refund_id;
+    assert.throws(
+      () => updatePrivateRecordPackage(handle, invalidRecord),
+      (error) => error?.message === "PRIVATE_RECORD_REJECTED",
+    );
+  } finally {
+    cleanupPrivateRecordPackage(handle.directory);
+  }
+}
+
+for (const [selector, value] of [
+  ["customer_id", "_LINKED_CUSTOMER_PRIVATE"],
+  ["order_id", "-ORDER_PRIVATE_1"],
+]) {
+  const validO01 = await runCase("O-01");
+  assert.equal(validO01.result.status, "COMPLETE");
+  const handle = createPrivateRecordPackage("O-01");
+  try {
+    const invalidRecord = structuredClone(validO01.result.privateRecord);
+    invalidRecord.selectors[selector] = value;
+    assert.throws(
+      () => updatePrivateRecordPackage(handle, invalidRecord),
+      (error) => error?.message === "PRIVATE_RECORD_REJECTED",
+    );
+  } finally {
+    cleanupPrivateRecordPackage(handle.directory);
+  }
+}
 
 function assertPrivateRecordRejected(action) {
   assert.throws(action, (error) => error?.message === "PRIVATE_RECORD_REJECTED");

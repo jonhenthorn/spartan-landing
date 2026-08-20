@@ -15,7 +15,13 @@ const RECOGNIZED_TYPES = new Set([
   "refund.created",
   "refund.updated",
 ]);
-const CASES = new Set(["forged", "altered", "signed-unrecognized", "signed-recognized", "replay"]);
+const REPLAY_EVENT_TYPE = "refund.updated";
+const REPLAY_OBJECT_ID_PATTERN = /^SANDBOX_REFUND_CONFIRMED_ABSENT_[A-Z0-9]{8,64}$/;
+const O01_DRIVER_CASE = "o01";
+const O01_REFUND_CASE = "o01-refund";
+const O01_PAYMENT_CASE = "o01-payment";
+const CASES = new Set(["forged", "altered", "signed-unrecognized", "signed-recognized", "replay", O01_DRIVER_CASE]);
+const BODY_CASES = new Set([...CASES, O01_REFUND_CASE, O01_PAYMENT_CASE]);
 const MAX_BODY_BYTES = 256 * 1024;
 const MAX_RESPONSE_BYTES = 4096;
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -39,6 +45,7 @@ export function formatWebhookDriverResult(value) {
     "UNRECOGNIZED_REJECTED",
     "RECOGNIZED_ACKNOWLEDGED",
     "REPLAY_ACKNOWLEDGED",
+    "O01_SEED_ACKNOWLEDGED",
     "INPUT_REJECTED",
     "PACKAGE_REJECTED",
     "NETWORK_UNAVAILABLE",
@@ -118,9 +125,24 @@ function parseWebhookEvent(rawBody) {
 }
 
 export function webhookBodyMatchesCase(rawBody, caseName) {
-  if (!CASES.has(caseName)) return false;
+  if (!BODY_CASES.has(caseName) || caseName === O01_DRIVER_CASE) return false;
   const event = parseWebhookEvent(rawBody);
   if (!event) return false;
+  if (caseName === "replay") {
+    return event.type === REPLAY_EVENT_TYPE &&
+      /^[A-Za-z0-9][A-Za-z0-9_-]{7,159}$/.test(event.event_id) &&
+      REPLAY_OBJECT_ID_PATTERN.test(event.data.id);
+  }
+  if (caseName === O01_REFUND_CASE) {
+    return event.type === "refund.updated" &&
+      /^[A-Za-z0-9][A-Za-z0-9_-]{7,159}$/.test(event.event_id) &&
+      /^[A-Za-z0-9][A-Za-z0-9_-]{7,148}$/.test(event.data.id);
+  }
+  if (caseName === O01_PAYMENT_CASE) {
+    return event.type === "payment.updated" &&
+      /^[A-Za-z0-9][A-Za-z0-9_-]{7,159}$/.test(event.event_id) &&
+      /^[A-Za-z0-9][A-Za-z0-9_-]{7,191}$/.test(event.data.id);
+  }
   if (caseName === "signed-unrecognized") return !RECOGNIZED_TYPES.has(event.type);
   return RECOGNIZED_TYPES.has(event.type);
 }
@@ -259,6 +281,7 @@ export async function executeWebhookSandboxCase({
   caseName,
   notificationUrl,
   packageDirectory,
+  sourcePackageDirectory = "",
   signingKey,
   fetchImpl = globalThis.fetch,
   inspectPackage = inspectWebhookFixturePackage,
@@ -269,6 +292,10 @@ export async function executeWebhookSandboxCase({
   if (
     !CASES.has(caseName)
     || !isAllowedSandboxWebhookUrl(notificationUrl)
+    || (caseName === O01_DRIVER_CASE
+      ? typeof sourcePackageDirectory !== "string" || sourcePackageDirectory.length === 0 ||
+        sourcePackageDirectory === packageDirectory
+      : sourcePackageDirectory !== "")
     || typeof signingKey !== "string"
     || Buffer.byteLength(signingKey, "utf8") < 32
     || Buffer.byteLength(signingKey, "utf8") > 4096
@@ -281,46 +308,75 @@ export async function executeWebhookSandboxCase({
     return fixedResult("INPUT_REJECTED", 0, 0, clock() - startedAt);
   }
 
-  let packageSnapshot;
-  let rawBody = "";
+  const packageRecords = [];
+  const deliveries = [];
   try {
-    packageSnapshot = await inspectPackage(packageDirectory);
-    const approvedTargetDigest = packageSnapshot?.manifest?.target_verification?.digest_hex;
-    if (packageSnapshot?.manifest?.case_name !== caseName ||
-        packageSnapshot?.manifest?.byte_length !== packageSnapshot?.eventRecord?.bytes?.byteLength) {
-      return fixedResult("PACKAGE_REJECTED", 0, 0, clock() - startedAt);
+    const inspectExact = async (directory, expectedCase) => {
+      const snapshot = await inspectPackage(directory);
+      const approvedTargetDigest = snapshot?.manifest?.target_verification?.digest_hex;
+      if (snapshot?.manifest?.case_name !== expectedCase ||
+          snapshot?.manifest?.byte_length !== snapshot?.eventRecord?.bytes?.byteLength) return null;
+      const rawBody = decodeExactFixture(snapshot.eventRecord, expectedCase, approvedTargetDigest);
+      if (!rawBody) return null;
+      return { directory, expectedCase, rawBody, snapshot };
+    };
+    if (caseName === O01_DRIVER_CASE) {
+      const refund = await inspectExact(packageDirectory, O01_REFUND_CASE);
+      const payment = await inspectExact(sourcePackageDirectory, O01_PAYMENT_CASE);
+      const refundEvent = parseWebhookEvent(refund?.rawBody);
+      const paymentEvent = parseWebhookEvent(payment?.rawBody);
+      if (!refund || !payment || refund.snapshot.target === payment.snapshot.target ||
+          refund.snapshot.manifest.target_verification.digest_hex ===
+            payment.snapshot.manifest.target_verification.digest_hex ||
+          !refundEvent || !paymentEvent || refundEvent.event_id === paymentEvent.event_id ||
+          refundEvent.data.id === paymentEvent.data.id) {
+        return fixedResult("PACKAGE_REJECTED", 0, 0, clock() - startedAt);
+      }
+      packageRecords.push(refund, payment);
+    } else {
+      const single = await inspectExact(packageDirectory, caseName);
+      if (!single) return fixedResult("PACKAGE_REJECTED", 0, 0, clock() - startedAt);
+      packageRecords.push(single);
     }
-    rawBody = decodeExactFixture(packageSnapshot.eventRecord, caseName, approvedTargetDigest);
-    if (!rawBody) return fixedResult("PACKAGE_REJECTED", 0, 0, clock() - startedAt);
   } catch {
     return fixedResult("PACKAGE_REJECTED", 0, 0, clock() - startedAt);
   }
 
   const packageStillExact = async () => {
     try {
-      return samePackageSnapshot(packageSnapshot, await inspectPackage(packageDirectory));
+      for (const record of packageRecords) {
+        if (!samePackageSnapshot(record.snapshot, await inspectPackage(record.directory))) return false;
+      }
+      return true;
     } catch {
       return false;
     }
   };
 
-  const validSignature = squareWebhookSignature(notificationUrl, rawBody, signingKey);
-  let sentBody = rawBody;
-  let sentSignature = validSignature;
   let expectedHttp = 200;
   let expectedCode = "OK";
-  let successResult = caseName === "replay" ? "REPLAY_ACKNOWLEDGED" : "RECOGNIZED_ACKNOWLEDGED";
+  let successResult = caseName === "replay"
+    ? "REPLAY_ACKNOWLEDGED"
+    : caseName === O01_DRIVER_CASE
+      ? "O01_SEED_ACKNOWLEDGED"
+      : "RECOGNIZED_ACKNOWLEDGED";
+  for (const record of packageRecords) {
+    deliveries.push({
+      body: record.rawBody,
+      signature: squareWebhookSignature(notificationUrl, record.rawBody, signingKey),
+    });
+  }
 
   if (caseName === "forged") {
-    sentSignature = forgedSignature(validSignature);
+    deliveries[0].signature = forgedSignature(deliveries[0].signature);
     expectedHttp = 403;
     expectedCode = "INVALID_SIGNATURE";
     successResult = "FORGED_REJECTED";
   } else if (caseName === "altered") {
-    if (Buffer.byteLength(rawBody, "utf8") >= MAX_BODY_BYTES) {
+    if (Buffer.byteLength(deliveries[0].body, "utf8") >= MAX_BODY_BYTES) {
       return fixedResult("INPUT_REJECTED", 0, 0, clock() - startedAt);
     }
-    sentBody = `${rawBody} `;
+    deliveries[0].body = `${deliveries[0].body} `;
     expectedHttp = 403;
     expectedCode = "INVALID_SIGNATURE";
     successResult = "ALTERED_REJECTED";
@@ -330,13 +386,13 @@ export async function executeWebhookSandboxCase({
     successResult = "UNRECOGNIZED_REJECTED";
   }
 
-  const requestLimit = caseName === "replay" ? 2 : 1;
+  if (caseName === "replay") deliveries.push({ ...deliveries[0] });
   let attempts = 0;
   let lastHttp = 0;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    for (let index = 0; index < requestLimit; index += 1) {
+    for (const delivery of deliveries) {
       if (!await packageStillExact()) {
         return fixedResult("PACKAGE_REJECTED", lastHttp, attempts, clock() - startedAt);
       }
@@ -346,8 +402,8 @@ export async function executeWebhookSandboxCase({
         response = await sendOnce(
           fetchImpl,
           notificationUrl,
-          sentBody,
-          sentSignature,
+          delivery.body,
+          delivery.signature,
           controller.signal,
         );
       } catch {
@@ -434,12 +490,21 @@ export async function webhookDriverMain(argv = process.argv.slice(2), dependenci
   try {
     const prompt = dependencies.readHiddenLine || readHiddenLine;
     const notificationUrl = await prompt("Sandbox notification URL (hidden): ", 2048);
-    const packageDirectory = await prompt("Prepared webhook package directory (hidden): ", 4096);
+    const packageDirectory = await prompt(
+      caseName === O01_DRIVER_CASE
+        ? "Prepared O01 refund webhook package directory (hidden): "
+        : "Prepared webhook package directory (hidden): ",
+      4096,
+    );
+    const sourcePackageDirectory = caseName === O01_DRIVER_CASE
+      ? await prompt("Prepared O01 payment webhook package directory (hidden): ", 4096)
+      : "";
     signingKey = await prompt("Sandbox webhook signing key (hidden): ", 4096);
     const result = await executeWebhookSandboxCase({
       caseName,
       notificationUrl,
       packageDirectory,
+      sourcePackageDirectory,
       signingKey,
       fetchImpl: dependencies.fetchImpl || globalThis.fetch,
       clock: dependencies.clock || (() => Date.now()),

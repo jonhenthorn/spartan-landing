@@ -15,6 +15,47 @@ const PRODUCTION_LOCATION_ID = "3MDGSXS33HERT";
 const SANDBOX_OWNER_HARNESS_PATH = "/sandbox/owner-offer-test";
 const encoder = new TextEncoder();
 const SANDBOX_FAULT_CONTROLLER = Symbol("spartan-square-sandbox-fault-controller");
+const SANDBOX_O01_ADMISSION = Symbol("spartan-square-sandbox-o01-admission");
+const SANDBOX_Q01_ADMISSION = Symbol("spartan-square-sandbox-q01-admission");
+const SANDBOX_Q02_ADMISSION = Symbol("spartan-square-sandbox-q02-admission");
+const SANDBOX_P01_ADMISSION = Symbol("spartan-square-sandbox-p01-admission");
+const SANDBOX_P02_ADMISSION = Symbol("spartan-square-sandbox-p02-admission");
+const SANDBOX_O01_QUEUE_PLAN_CONTRACT = "spartan-square-sandbox-o01-queue-plan-v1";
+const SANDBOX_O01_SCHEDULED_PLAN_CONTRACT = "spartan-square-sandbox-o01-scheduled-plan-v1";
+const SANDBOX_O01_ACQUISITION_CONTRACT = "spartan-square-sandbox-o01-acquisition-v1";
+const SANDBOX_O01_EXTERNAL_PREFLIGHT_CONTRACT = "spartan-square-sandbox-o01-external-preflight-v1";
+const SANDBOX_Q01_QUEUE_PLAN_CONTRACT = "spartan-square-sandbox-q01-queue-plan-v1";
+const SANDBOX_Q01_SCHEDULED_PLAN_CONTRACT = "spartan-square-sandbox-q01-scheduled-plan-v1";
+const SANDBOX_Q01_ACQUISITION_CONTRACT = "spartan-square-sandbox-q01-acquisition-v1";
+const SANDBOX_Q01_PROVIDER_PREFLIGHT_CONTRACT = "spartan-square-sandbox-q01-provider-preflight-v1";
+const SANDBOX_Q02_QUEUE_PLAN_CONTRACT = "spartan-square-sandbox-q02-queue-plan-v1";
+const SANDBOX_Q02_ACQUISITION_CONTRACT = "spartan-square-sandbox-q02-acquisition-v1";
+const SANDBOX_P02_BUSINESS_PREFLIGHT_CONTRACT = "spartan-square-sandbox-p02-business-preflight-v1";
+const SANDBOX_P02_ACQUISITION_CONTRACT = "spartan-square-sandbox-p02-acquisition-v1";
+const SANDBOX_P02_PROVIDER_PREFLIGHT_CONTRACT = "spartan-square-sandbox-p02-provider-preflight-v1";
+const SANDBOX_P02_COMPLETE_CONTRACT = "spartan-square-sandbox-p02-complete-v1";
+const SANDBOX_P01_ACQUISITION_CONTRACT = "spartan-square-sandbox-p01-acquisition-v1";
+const SANDBOX_P01_GROUP_PREFLIGHT_CONTRACT = "spartan-square-sandbox-p01-group-preflight-v1";
+const SANDBOX_P01_GROUP_COMMIT_CONTRACT = "spartan-square-sandbox-p01-group-commit-v1";
+const SANDBOX_P01_READY_COMMIT_CONTRACT = "spartan-square-sandbox-p01-ready-commit-v1";
+const SANDBOX_F04_ACQUISITION_CONTRACT = "spartan-square-sandbox-f04-acquisition-v1";
+const SANDBOX_F04_READY_COMMIT_CONTRACT = "spartan-square-sandbox-f04-ready-commit-v1";
+const SANDBOX_O01_DEFER_SECONDS = 60;
+const SANDBOX_Q01_DEFER_SECONDS = 60;
+const SANDBOX_Q01_PROVIDER_MAX_BYTES = 32 * 1024;
+const SANDBOX_Q01_FIXTURE_LINE_NAME = "Project 2 harmless unlinked sandbox fixture";
+const SANDBOX_Q02_FIXTURE_AMOUNT = 100;
+const SANDBOX_Q02_PROVIDER_CLOCK_SKEW_MS = 5_000;
+const SANDBOX_O01_DISCOUNT_NAME = "50% Off First Drink — Enter 50%";
+const SANDBOX_O01_WEBHOOK_RECORD_KEYS = Object.freeze([
+  "attempts", "available_at", "created_at", "event_id", "event_type", "last_error_code",
+  "lease_expires_at", "lease_token", "merchant_id", "object_id", "payload_json", "state", "updated_at",
+]);
+const SANDBOX_O01_OUTBOX_RECORD_KEYS = Object.freeze([
+  "action", "attempts", "available_at", "claim_id", "created_at", "dedupe_key", "last_error_code",
+  "lease_expires_at", "lease_token", "outbox_id", "payload_json", "state", "updated_at",
+]);
+const SANDBOX_O01_SAFE_APPS_RETRY = Symbol("spartan-square-sandbox-o01-safe-apps-retry");
 
 const worker = {
   async fetch(request, env, ctx) {
@@ -81,14 +122,16 @@ export function createSandboxWorker(controller) {
       try {
         let method = "OTHER";
         let pathname = "OTHER";
+        let hasQuery = true;
         try {
           const url = new URL(request.url);
           if (request.method === "GET" || request.method === "POST") method = request.method;
           if (url.pathname === SANDBOX_OWNER_HARNESS_PATH || url.pathname === "/api/square/offer") {
             pathname = url.pathname;
           }
+          hasQuery = url.search !== "";
         } catch {}
-        await controller.preflight(env, { kind: "fetch", method, pathname });
+        await controller.preflight(env, { kind: "fetch", method, pathname, hasQuery });
       } catch (error) {
         console.error("square_sandbox_fault_preflight_rejected", safeErrorCode(error));
         return errorJson("SANDBOX_FAULT_PREFLIGHT_REJECTED", 503);
@@ -100,27 +143,834 @@ export function createSandboxWorker(controller) {
       const items = messages.map((message) => {
         const body = message?.body;
         if (body?.kind === "square_webhook" && typeof body.event_id === "string") {
-          return { kind: "square_webhook", selector: body.event_id };
+          return {
+            kind: "square_webhook",
+            selector: body.event_id,
+            attempts: message?.attempts,
+            body_exact: !Array.isArray(body) &&
+              JSON.stringify(Object.keys(body).sort()) === JSON.stringify(["event_id", "kind"]),
+            q01_recovery_marker: typeof body.q01_recovery_marker === "string"
+              ? body.q01_recovery_marker : "",
+          };
         }
         if (body?.kind === "outbox" && typeof body.outbox_id === "string") {
-          return { kind: "outbox", selector: body.outbox_id };
+          return {
+            kind: "outbox",
+            selector: body.outbox_id,
+            attempts: message?.attempts,
+            body_exact: !Array.isArray(body) &&
+              JSON.stringify(Object.keys(body).sort()) === JSON.stringify(["kind", "outbox_id"]),
+          };
         }
-        return { kind: "invalid", selector: "" };
+        return { kind: "invalid", selector: "", attempts: message?.attempts, body_exact: false };
       });
-      await controller.preflight(env, { kind: "queue", items });
-      return worker.queue(batch, attach(env), ctx);
+      const decision = await controller.preflight(env, { kind: "queue", items });
+      if (decision?.contract === SANDBOX_Q02_QUEUE_PLAN_CONTRACT) {
+        const action = exactSandboxQ02QueuePlan(decision, messages.length);
+        if (action === "ack") {
+          messages[0].ack();
+          return;
+        }
+        return worker.queue(batch, attach(env), ctx);
+      }
+      if (decision?.contract === SANDBOX_Q01_QUEUE_PLAN_CONTRACT) {
+        return runSandboxQ01Queue(controller, decision, messages, items, env, ctx, attach);
+      }
+      if (decision?.contract !== SANDBOX_O01_QUEUE_PLAN_CONTRACT) {
+        if (typeof decision !== "boolean") throw new TypeError("SANDBOX_O01_QUEUE_PLAN_INVALID");
+        return worker.queue(batch, attach(env), ctx);
+      }
+      const plan = exactSandboxO01QueuePlan(decision, messages.length);
+      if (typeof controller.postflight !== "function") throw new TypeError("SANDBOX_O01_POSTFLIGHT_INVALID");
+      for (const index of plan.deferIndexes) {
+        messages[index].retry({ delaySeconds: SANDBOX_O01_DEFER_SECONDS });
+      }
+      let processingStopped = false;
+      for (const index of plan.processIndexes) {
+        const original = messages[index];
+        if (processingStopped) {
+          original.retry({ delaySeconds: SANDBOX_O01_DEFER_SECONDS });
+          continue;
+        }
+        let disposition = null;
+        const proxy = Object.create(original || null);
+        Object.defineProperties(proxy, {
+          body: { enumerable: true, value: original?.body },
+          attempts: { enumerable: true, value: original?.attempts },
+          ack: { enumerable: true, value: () => {
+            if (disposition) throw new TypeError("SANDBOX_O01_DISPOSITION_INVALID");
+            disposition = Object.freeze({ kind: "ack" });
+          } },
+          retry: { enumerable: true, value: (options = {}) => {
+            if (disposition || !options || typeof options !== "object" || Array.isArray(options) ||
+                Object.keys(options).some((key) => key !== "delaySeconds") ||
+                !Number.isInteger(options.delaySeconds) || options.delaySeconds < 0 || options.delaySeconds > 43_200) {
+              throw new TypeError("SANDBOX_O01_DISPOSITION_INVALID");
+            }
+            disposition = Object.freeze({ kind: "retry", options: Object.freeze({ delaySeconds: options.delaySeconds }) });
+          } },
+        });
+        let postflightReady = false;
+        try {
+          await worker.queue({ messages: [proxy] }, attach(env), ctx);
+          if (!disposition) throw new TypeError("SANDBOX_O01_DISPOSITION_MISSING");
+          const postflightDisposition = disposition.kind === "ack"
+            ? Object.freeze({ kind: "ack" })
+            : Object.freeze({ kind: "retry", delay_seconds: disposition.options.delaySeconds });
+          postflightReady = await controller.postflight(env, {
+            kind: "queue",
+            item: items[index],
+            broker_attempts: original?.attempts,
+            disposition: postflightDisposition,
+          }) === true;
+        } catch (error) {
+          console.error("square_sandbox_o01_postflight_rejected", safeErrorCode(error));
+        }
+        if (!postflightReady) {
+          original.retry({ delaySeconds: SANDBOX_O01_DEFER_SECONDS });
+          processingStopped = true;
+        } else if (disposition.kind === "ack") {
+          original.ack();
+        } else {
+          original.retry(disposition.options);
+        }
+      }
     },
     async scheduled(controllerEvent, env, ctx) {
-      await controller.preflight(env, { kind: "scheduled" });
+      const decision = await controller.preflight(env, { kind: "scheduled" });
+      if (decision?.contract === SANDBOX_Q01_SCHEDULED_PLAN_CONTRACT) {
+        if (Object.keys(decision).length !== 1 || typeof controller.runScheduled !== "function") {
+          throw new TypeError("SANDBOX_Q01_SCHEDULED_PLAN_INVALID");
+        }
+        return controller.runScheduled(env);
+      }
+      if (decision?.contract === SANDBOX_O01_SCHEDULED_PLAN_CONTRACT) {
+        if (Object.keys(decision).length !== 1 || typeof controller.runScheduled !== "function") {
+          throw new TypeError("SANDBOX_O01_SCHEDULED_PLAN_INVALID");
+        }
+        return controller.runScheduled(env);
+      }
+      if (typeof decision !== "boolean") throw new TypeError("SANDBOX_O01_SCHEDULED_PLAN_INVALID");
       return worker.scheduled(controllerEvent, attach(env), ctx);
     },
   });
 }
 
-async function maybeSandboxFault(env, mode, selector) {
+function exactSandboxQ02QueuePlan(value, messageCount) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || messageCount !== 1 ||
+      JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(["action", "contract"]) ||
+      value.contract !== SANDBOX_Q02_QUEUE_PLAN_CONTRACT ||
+      !["ack", "process"].includes(value.action)) {
+    throw new TypeError("SANDBOX_Q02_QUEUE_PLAN_INVALID");
+  }
+  return value.action;
+}
+
+function exactSandboxQ01QueuePlan(value, messageCount) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || messageCount !== 1 ||
+      JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(["action", "contract"]) ||
+      value.contract !== SANDBOX_Q01_QUEUE_PLAN_CONTRACT ||
+      !["ack", "defer", "process"].includes(value.action)) {
+    throw new TypeError("SANDBOX_Q01_QUEUE_PLAN_INVALID");
+  }
+  return value.action;
+}
+
+async function runSandboxQ01Queue(controller, decision, messages, items, env, ctx, attach) {
+  const action = exactSandboxQ01QueuePlan(decision, messages.length);
+  const original = messages[0];
+  if (action === "ack") {
+    original.ack();
+    return;
+  }
+  if (action === "defer") {
+    original.retry({ delaySeconds: SANDBOX_Q01_DEFER_SECONDS });
+    return;
+  }
+  if (typeof controller.postflight !== "function" ||
+      typeof controller.completeDisposition !== "function" ||
+      typeof controller.failQ01 !== "function") {
+    throw new TypeError("SANDBOX_Q01_CONTROLLER_INVALID");
+  }
+  let disposition = null;
+  let callbackStarted = false;
+  const proxy = Object.create(original || null);
+  Object.defineProperties(proxy, {
+    body: { enumerable: true, value: original?.body },
+    attempts: { enumerable: true, value: original?.attempts },
+    ack: { enumerable: true, value: () => {
+      if (disposition) throw new TypeError("SANDBOX_Q01_DISPOSITION_INVALID");
+      disposition = Object.freeze({ kind: "ack" });
+    } },
+    retry: { enumerable: true, value: (options = {}) => {
+      if (disposition || !options || typeof options !== "object" || Array.isArray(options) ||
+          JSON.stringify(Object.keys(options).sort()) !== JSON.stringify(["delaySeconds"]) ||
+          !Number.isInteger(options.delaySeconds) || options.delaySeconds < 0 ||
+          options.delaySeconds > 43_200) {
+        throw new TypeError("SANDBOX_Q01_DISPOSITION_INVALID");
+      }
+      disposition = Object.freeze({ kind: "retry", options: Object.freeze({
+        delaySeconds: options.delaySeconds,
+      }) });
+    } },
+  });
+  try {
+    await worker.queue({ messages: [proxy] }, attach(env), ctx);
+    if (!disposition) throw new TypeError("SANDBOX_Q01_DISPOSITION_MISSING");
+    const captured = disposition.kind === "ack"
+      ? Object.freeze({ kind: "ack" })
+      : Object.freeze({ kind: "retry", delay_seconds: disposition.options.delaySeconds });
+    const ready = await controller.postflight(env, {
+      kind: "queue",
+      item: items[0],
+      broker_attempts: original?.attempts,
+      disposition: captured,
+    });
+    if (ready !== true) throw new TypeError("SANDBOX_Q01_POSTFLIGHT_INVALID");
+    callbackStarted = true;
+    if (disposition.kind === "ack") original.ack();
+    else original.retry(disposition.options);
+    const completed = await controller.completeDisposition(env, {
+      kind: "queue",
+      item: items[0],
+      broker_attempts: original?.attempts,
+      disposition: captured,
+    });
+    if (completed !== true) throw new TypeError("SANDBOX_Q01_DISPOSITION_AMBIGUOUS");
+  } catch (error) {
+    console.error("square_sandbox_q01_disposition_rejected", safeErrorCode(error));
+    try {
+      await controller.failQ01(env, {
+        kind: "queue",
+        item: items[0],
+        broker_attempts: original?.attempts,
+        callback_started: callbackStarted,
+      });
+    } catch {}
+    // Once the real broker callback has started, issuing any second disposition
+    // would turn a local callback ambiguity into a blind duplicate action.
+    if (!callbackStarted) original.retry({ delaySeconds: SANDBOX_Q01_DEFER_SECONDS });
+  }
+}
+
+function exactSandboxO01QueuePlan(value, messageCount) {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([
+        "contract", "defer_delay_seconds", "defer_indexes", "process_indexes",
+      ]) || value.contract !== SANDBOX_O01_QUEUE_PLAN_CONTRACT ||
+      value.defer_delay_seconds !== SANDBOX_O01_DEFER_SECONDS ||
+      !Array.isArray(value.process_indexes) || !Array.isArray(value.defer_indexes)) {
+    throw new TypeError("SANDBOX_O01_QUEUE_PLAN_INVALID");
+  }
+  const processIndexes = [...value.process_indexes];
+  const deferIndexes = [...value.defer_indexes];
+  const combined = [...processIndexes, ...deferIndexes];
+  if (processIndexes.length > 1 ||
+      combined.some((index) => !Number.isInteger(index) || index < 0 || index >= messageCount) ||
+      new Set(combined).size !== combined.length || combined.length !== messageCount ||
+      JSON.stringify([...combined].sort((a, b) => a - b)) !==
+        JSON.stringify(Array.from({ length: messageCount }, (_, index) => index)) ||
+      JSON.stringify(deferIndexes) !== JSON.stringify([...deferIndexes].sort((a, b) => a - b))) {
+    throw new TypeError("SANDBOX_O01_QUEUE_PLAN_INVALID");
+  }
+  return Object.freeze({
+    processIndexes: Object.freeze(processIndexes),
+    deferIndexes: Object.freeze(deferIndexes),
+  });
+}
+
+async function maybeSandboxFault(env, mode, selector, admission = null) {
   const controller = env?.[SANDBOX_FAULT_CONTROLLER];
   if (!controller) return false;
-  return controller.maybeInject({ env, mode, selector });
+  return controller.maybeInject({ env, mode, selector, admission });
+}
+
+function sandboxP01ClaimSnapshot(claim) {
+  return JSON.stringify([
+    claim?.claim_id, claim?.submission_id, claim?.coupon_code_hash, claim?.identity_hash ?? null,
+    claim?.square_customer_id ?? null, claim?.reference_id ?? null, claim?.match_method ?? null,
+    claim?.group_membership_status ?? null, claim?.finalize_effective_at ?? null, claim?.status,
+    claim?.apps_ledger_status, claim?.refund_review_required, claim?.created_at, claim?.updated_at,
+    claim?.ready_at ?? null, claim?.redeemed_at ?? null,
+  ]);
+}
+
+function exactSandboxP01Admission(value, claim = null) {
+  const inactive = value && exactObject(value, ["acquired", "action", "contract"]) &&
+    value.acquired === false && value.action === "noop" &&
+    value.contract === SANDBOX_P01_ACQUISITION_CONTRACT;
+  if (inactive) return value;
+  if (!value || !exactObject(value, [
+    "acquired", "action", "claim_snapshot_json", "contract", "stage_key",
+    "stage_updated_at", "stage_value",
+  ]) || value.acquired !== true ||
+      !["provision", "group_recovery", "finalize", "finalize_recovery"].includes(value.action) ||
+      value.contract !== SANDBOX_P01_ACQUISITION_CONTRACT ||
+      !/^sandbox_p01_v1_[a-f0-9]{64}$/.test(value.stage_key) ||
+      typeof value.stage_updated_at !== "string" || !/^P01_[A-Z_]+_V1$/.test(value.stage_value) ||
+      typeof value.claim_snapshot_json !== "string" ||
+      (claim && value.claim_snapshot_json !== sandboxP01ClaimSnapshot(claim))) {
+    throw transient("SANDBOX_P01_ACQUISITION_INVALID");
+  }
+  return value;
+}
+
+async function maybeAcquireSandboxP01(env, claim) {
+  const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+  if (!controller) return null;
+  if (typeof controller.acquireP01 !== "function") throw transient("SANDBOX_P01_ACQUISITION_UNAVAILABLE");
+  const value = await controller.acquireP01(env, { claim });
+  if (value === false) return null;
+  return exactSandboxP01Admission(value, value?.acquired ? claim : null);
+}
+
+function sandboxP01ProviderEvidence(customer, matchMethod) {
+  return Object.freeze({
+    created_at: typeof customer?.created_at === "string" ? customer.created_at : null,
+    customer_id: String(customer?.id || ""),
+    family_name: String(customer?.family_name || ""),
+    given_name: String(customer?.given_name || ""),
+    group_ids: Object.freeze(Array.isArray(customer?.group_ids) ? [...customer.group_ids] : []),
+    match_method: String(matchMethod || ""),
+    phone_number: normalizePhoneSoft(customer?.phone_number),
+    reference_id: String(customer?.reference_id || ""),
+    updated_at: typeof customer?.updated_at === "string" ? customer.updated_at : null,
+  });
+}
+
+function sandboxF04CreatedProviderReady(customer, claim, phone, personName, expectedReference) {
+  const createdAt = sandboxQ01ProviderEpochNanoseconds(customer?.created_at);
+  const updatedAt = sandboxQ01ProviderEpochNanoseconds(customer?.updated_at);
+  const lowerAt = sandboxQ01ProviderEpochNanoseconds(claim?.updated_at);
+  const maximum = (BigInt(Date.now()) + 5_000n) * 1_000_000n;
+  const skew = 5_000_000_000n;
+  return customer?.reference_id === expectedReference &&
+    squareCustomerMatches(customer, phone, personName) &&
+    createdAt !== null && updatedAt !== null && lowerAt !== null &&
+    createdAt <= updatedAt && createdAt + skew >= lowerAt && updatedAt <= maximum;
+}
+
+async function invalidateSandboxP01Provision(env, admission, claim, reason) {
+  const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+  if (!controller || typeof controller.invalidateP01Provision !== "function") {
+    throw transient("SANDBOX_P01_INVALIDATION_UNAVAILABLE");
+  }
+  const invalidated = await controller.invalidateP01Provision(env, { admission, claim, reason });
+  if (invalidated !== true) throw transient("SANDBOX_P01_INVALIDATION_UNAVAILABLE");
+  throw transient("SANDBOX_P01_PROVIDER_REJECTED");
+}
+
+async function invalidateSandboxP01Recovery(env, admission, claim, reason) {
+  const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+  if (!controller || typeof controller.invalidateP01Recovery !== "function") {
+    throw transient("SANDBOX_P01_INVALIDATION_UNAVAILABLE");
+  }
+  const invalidated = await controller.invalidateP01Recovery(env, { admission, claim, reason });
+  if (invalidated !== true) throw transient("SANDBOX_P01_INVALIDATION_UNAVAILABLE");
+  throw transient("SANDBOX_P01_PROVIDER_REJECTED");
+}
+
+function p01DeterministicAppsResponseError(error) {
+  return error instanceof ConnectorError && new Set([
+    "APPS_RESPONSE_TOO_LARGE", "APPS_RESPONSE_INVALID", "APPS_EMAIL_FIELD_FORBIDDEN",
+    "APPS_REQUEST_REJECTED", "APPS_CONTRACT_INVALID",
+  ]).has(error.code);
+}
+
+function sandboxP01UuidV4Ready(value) {
+  return typeof value === "string" &&
+    /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(value);
+}
+
+async function commitSandboxP01Fault(env, admission, claim, provider) {
+  const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+  if (!controller || typeof controller.commitP01Fault !== "function") {
+    throw transient("SANDBOX_P01_FAULT_COMMIT_UNAVAILABLE");
+  }
+  await controller.commitP01Fault(env, { admission, claim, provider });
+  throw transient("SANDBOX_P01_FAULT_COMMIT_UNAVAILABLE");
+}
+
+async function preflightSandboxP01Group(env, admission, claim, provider) {
+  const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+  if (!controller || typeof controller.preP01Group !== "function") {
+    throw transient("SANDBOX_P01_GROUP_FENCE_UNAVAILABLE");
+  }
+  const value = await controller.preP01Group(env, { admission, claim, provider });
+  if (!exactObject(value, ["contract", "group_add_required"]) ||
+      value.contract !== SANDBOX_P01_GROUP_PREFLIGHT_CONTRACT ||
+      typeof value.group_add_required !== "boolean") {
+    throw transient("SANDBOX_P01_GROUP_FENCE_UNAVAILABLE");
+  }
+  return value.group_add_required;
+}
+
+async function commitSandboxP01Group(env, admission, claim, provider) {
+  const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+  if (!controller || typeof controller.commitP01Group !== "function") {
+    throw transient("SANDBOX_P01_GROUP_COMMIT_UNAVAILABLE");
+  }
+  const value = await controller.commitP01Group(env, { admission, claim, provider });
+  if (!exactObject(value, ["admission", "claim_snapshot_json", "contract"]) ||
+      value.contract !== SANDBOX_P01_GROUP_COMMIT_CONTRACT) {
+    throw transient("SANDBOX_P01_GROUP_COMMIT_UNAVAILABLE");
+  }
+  const committedClaim = await dbFirst(env, "claim_by_submission", `
+    SELECT * FROM offer_claims WHERE submission_id = ?1
+  `, [claim.submission_id]);
+  if (!committedClaim || value.claim_snapshot_json !== sandboxP01ClaimSnapshot(committedClaim)) {
+    throw transient("SANDBOX_P01_GROUP_COMMIT_UNAVAILABLE");
+  }
+  return { claim: committedClaim, admission: exactSandboxP01Admission(value.admission, committedClaim) };
+}
+
+async function commitSandboxP01Ready(env, admission, claim, finalizeEvidence, tokenHash) {
+  const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+  if (!controller || typeof controller.commitP01Ready !== "function") {
+    throw transient("SANDBOX_P01_READY_COMMIT_UNAVAILABLE");
+  }
+  const value = await controller.commitP01Ready(env, {
+    admission,
+    claim,
+    finalize_evidence: finalizeEvidence,
+    pass_token_hash: tokenHash,
+  });
+  if (!exactObject(value, ["contract", "max_age_seconds"]) ||
+      value.contract !== SANDBOX_P01_READY_COMMIT_CONTRACT ||
+      !Number.isInteger(value.max_age_seconds) || value.max_age_seconds < 300 ||
+      value.max_age_seconds > 7_776_000) {
+    throw transient("SANDBOX_P01_READY_COMMIT_UNAVAILABLE");
+  }
+  return value.max_age_seconds;
+}
+
+function exactSandboxF04Admission(value, claim = null) {
+  if (!exactObject(value, value?.acquired
+    ? ["acquired", "action", "claim_snapshot_json", "contract", "stage_key", "stage_updated_at", "stage_value"]
+    : ["acquired", "action", "contract"]) ||
+      typeof value.acquired !== "boolean" || value.contract !== SANDBOX_F04_ACQUISITION_CONTRACT) {
+    throw transient("SANDBOX_F04_ACQUISITION_INVALID");
+  }
+  if (!value.acquired) {
+    if (value.action !== "noop") throw transient("SANDBOX_F04_ACQUISITION_INVALID");
+    return value;
+  }
+  const exactStages = {
+    search_fault: "F04_SEARCH_ADMITTED_V1",
+    provider_recovery: "F04_PROVIDER_ADMITTED_V1",
+    finalize_recovery: "F04_RECOVERY_ADMITTED_V1",
+  };
+  if (!Object.hasOwn(exactStages, value.action) || value.stage_value !== exactStages[value.action] ||
+      !/^sandbox_f04_v1_[a-f0-9]{64}$/.test(value.stage_key) ||
+      typeof value.stage_updated_at !== "string" ||
+      typeof value.claim_snapshot_json !== "string" ||
+      (claim && value.claim_snapshot_json !== sandboxP01ClaimSnapshot(claim))) {
+    throw transient("SANDBOX_F04_ACQUISITION_INVALID");
+  }
+  return value;
+}
+
+async function maybeAcquireSandboxF04(env, claim) {
+  const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+  if (!controller) return null;
+  if (typeof controller.acquireF04 !== "function") throw transient("SANDBOX_F04_ACQUISITION_UNAVAILABLE");
+  const value = await controller.acquireF04(env, { claim });
+  if (value === false) return null;
+  return exactSandboxF04Admission(value, value?.acquired ? claim : null);
+}
+
+async function invalidateSandboxF04(env, admission, claim, reason) {
+  const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+  if (!controller || typeof controller.invalidateF04 !== "function") {
+    throw transient("SANDBOX_F04_INVALIDATION_UNAVAILABLE");
+  }
+  const invalidated = await controller.invalidateF04(env, { admission, claim, reason });
+  if (invalidated !== true) throw transient("SANDBOX_F04_INVALIDATION_UNAVAILABLE");
+  throw transient("SANDBOX_F04_CAUSAL_REJECTED");
+}
+
+async function commitSandboxF04SearchFault(env, admission, claim) {
+  const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+  if (!controller || typeof controller.commitF04SearchFault !== "function") {
+    throw transient("SANDBOX_F04_SEARCH_COMMIT_UNAVAILABLE");
+  }
+  await controller.commitF04SearchFault(env, { admission, claim });
+  throw transient("SANDBOX_F04_SEARCH_COMMIT_UNAVAILABLE");
+}
+
+async function commitSandboxF04AppsFault(env, admission, claim, provider) {
+  const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+  if (!controller || typeof controller.commitF04AppsFault !== "function") {
+    throw transient("SANDBOX_F04_APPS_COMMIT_UNAVAILABLE");
+  }
+  await controller.commitF04AppsFault(env, { admission, claim, provider });
+  throw transient("SANDBOX_F04_APPS_COMMIT_UNAVAILABLE");
+}
+
+async function commitSandboxF04Ready(env, admission, claim, finalizeEvidence, tokenHash) {
+  const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+  if (!controller || typeof controller.commitF04Ready !== "function") {
+    throw transient("SANDBOX_F04_READY_COMMIT_UNAVAILABLE");
+  }
+  const value = await controller.commitF04Ready(env, {
+    admission, claim, finalize_evidence: finalizeEvidence, pass_token_hash: tokenHash,
+  });
+  if (!exactObject(value, ["contract", "max_age_seconds"]) ||
+      value.contract !== SANDBOX_F04_READY_COMMIT_CONTRACT ||
+      value.max_age_seconds !== 2_592_000) {
+    throw transient("SANDBOX_F04_READY_COMMIT_UNAVAILABLE");
+  }
+  return value.max_age_seconds;
+}
+
+async function maybeAcquireSandboxO01(env, kind, selector) {
+  const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+  if (!controller || typeof controller.acquire !== "function") return null;
+  const value = await controller.acquire(env, { kind, selector });
+  if (value === false) return null;
+  const keys = value && typeof value === "object" && !Array.isArray(value)
+    ? Object.keys(value).sort()
+    : [];
+  const inactiveKeys = ["acquired", "contract"];
+  const q01InactiveKeys = ["acquired", "active_noop", "contract"];
+  const q02InactiveKeys = ["acquired", "contract"];
+  const q02AcquiredKeys = [
+    "acquired", "attempts", "contract", "kind", "lease_expires_at",
+    "lease_started_at", "lease_token", "record_json", "selector",
+  ];
+  const acquiredKeys = [
+    "acquired", "admitted_at", "attempts", "contract", "kind", "lease_expires_at",
+    "lease_started_at", "lease_token", "record_json", "selector", "stage_key", "stage_value",
+  ];
+  const o01 = value?.contract === SANDBOX_O01_ACQUISITION_CONTRACT;
+  const q01 = value?.contract === SANDBOX_Q01_ACQUISITION_CONTRACT;
+  const q02 = value?.contract === SANDBOX_Q02_ACQUISITION_CONTRACT;
+  if ((!o01 && !q01 && !q02) || typeof value.acquired !== "boolean" ||
+      JSON.stringify(keys) !== JSON.stringify(value.acquired
+        ? (q02 ? q02AcquiredKeys : acquiredKeys)
+        : (q01 ? q01InactiveKeys : q02 ? q02InactiveKeys : inactiveKeys)) ||
+      (q01 && !value.acquired && value.active_noop !== true)) {
+    throw new TypeError("SANDBOX_O01_ACQUISITION_INVALID");
+  }
+  if (!value.acquired) return value;
+  if (value.kind !== kind || value.selector !== selector ||
+      !Number.isInteger(value.attempts) || value.attempts < 1 || value.attempts > 10 ||
+      (!q02 && (typeof value.stage_key !== "string" ||
+        !(o01 ? value.stage_key.startsWith("sandbox_o01_v1_") :
+          value.stage_key.startsWith("sandbox_q01_v1_")))) ||
+      (!q02 && (typeof value.stage_value !== "string" || !value.stage_value.includes("_ADMITTED_"))) ||
+      (!q02 && typeof value.admitted_at !== "string") || typeof value.lease_started_at !== "string" ||
+      typeof value.lease_expires_at !== "string" ||
+      typeof value.record_json !== "string" || value.record_json.length < 2 || value.record_json.length > 32_768 ||
+      typeof value.lease_token !== "string" ||
+      !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(value.lease_token)) {
+    throw new TypeError("SANDBOX_O01_ACQUISITION_INVALID");
+  }
+  return value;
+}
+
+function sandboxO01AcquiredRecord(admission, kind) {
+  let row;
+  try { row = JSON.parse(admission.record_json); } catch { throw new TypeError("SANDBOX_O01_ACQUISITION_INVALID"); }
+  const expectedKeys = kind === "square_webhook"
+    ? SANDBOX_O01_WEBHOOK_RECORD_KEYS : SANDBOX_O01_OUTBOX_RECORD_KEYS;
+  if (!exactObject(row, expectedKeys) || row.state !== "PROCESSING" ||
+      row.attempts !== admission.attempts || row.lease_token !== admission.lease_token ||
+      row.lease_expires_at !== admission.lease_expires_at || row.updated_at !== admission.lease_started_at ||
+      (kind === "square_webhook" ? row.available_at !== null : typeof row.available_at !== "string") ||
+      (kind === "square_webhook" ? row.event_id : row.outbox_id) !== admission.selector) {
+    throw new TypeError("SANDBOX_O01_ACQUISITION_INVALID");
+  }
+  return row;
+}
+
+async function commitSandboxO01Business(env, method, context) {
+  const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+  if (!controller || typeof controller[method] !== "function") {
+    throw transient("SANDBOX_O01_BUSINESS_COMMIT_UNAVAILABLE");
+  }
+  const committed = await controller[method](env, context);
+  if (committed !== true) throw transient("SANDBOX_O01_BUSINESS_COMMIT_UNAVAILABLE");
+}
+
+async function failSandboxO01Business(env, event) {
+  const admission = event?.[SANDBOX_O01_ADMISSION];
+  if (!admission || !["O01_PAYMENT_ATTEMPT_1_ADMITTED_V2", "O01_REFUND_ATTEMPT_2_ADMITTED_V2"]
+    .includes(admission.stage_value)) return false;
+  const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+  if (!controller || typeof controller.failBusiness !== "function") {
+    throw transient("SANDBOX_O01_BUSINESS_AMBIGUOUS");
+  }
+  await controller.failBusiness(env, { admission, event_id: event.event_id });
+  return true;
+}
+
+async function preflightSandboxQ01Provider(env, event) {
+  const admission = event?.[SANDBOX_Q01_ADMISSION];
+  const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+  if (!admission || !controller || typeof controller.preQ01Provider !== "function") {
+    throw transient("SANDBOX_Q01_PROVIDER_FENCE_UNAVAILABLE");
+  }
+  const value = await controller.preQ01Provider(env, {
+    admission,
+    event_id: event.event_id,
+  });
+  if (!exactObject(value, ["contract", "timeout_ms"]) ||
+      value.contract !== SANDBOX_Q01_PROVIDER_PREFLIGHT_CONTRACT ||
+      !Number.isInteger(value.timeout_ms) || value.timeout_ms < 1_000 || value.timeout_ms > 30_000) {
+    throw transient("SANDBOX_Q01_PROVIDER_FENCE_UNAVAILABLE");
+  }
+  return value;
+}
+
+function sandboxP02ReadyClaimSnapshot(claim) {
+  return JSON.stringify([
+    claim?.claim_id, claim?.submission_id, claim?.coupon_code_hash, claim?.identity_hash,
+    claim?.square_customer_id, claim?.reference_id, claim?.match_method,
+    claim?.group_membership_status, claim?.finalize_effective_at, claim?.status,
+    claim?.apps_ledger_status, claim?.refund_review_required, claim?.created_at,
+    claim?.updated_at, claim?.ready_at, claim?.redeemed_at,
+  ]);
+}
+
+async function preflightSandboxP02Business(env, event, claim) {
+  const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+  if (!controller) return null;
+  if (typeof controller.preP02Business !== "function") {
+    throw permanent("SANDBOX_P02_BUSINESS_FENCE_REJECTED");
+  }
+  let value;
+  try {
+    value = await controller.preP02Business(env, { event, claim });
+  } catch {
+    throw permanent("SANDBOX_P02_BUSINESS_FENCE_REJECTED");
+  }
+  if (value === false) return null;
+  const expectedSnapshot = sandboxP02ReadyClaimSnapshot(claim);
+  if (!exactObject(value, ["claim_snapshot_json", "contract"]) ||
+      value.contract !== SANDBOX_P02_BUSINESS_PREFLIGHT_CONTRACT ||
+      value.claim_snapshot_json !== expectedSnapshot ||
+      encoder.encode(value.claim_snapshot_json).byteLength > 32 * 1024) {
+    throw permanent("SANDBOX_P02_BUSINESS_FENCE_REJECTED");
+  }
+  return value.claim_snapshot_json;
+}
+
+function exactSandboxP02Admission(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      typeof value.acquired !== "boolean" || value.contract !== SANDBOX_P02_ACQUISITION_CONTRACT) {
+    throw transient("SANDBOX_P02_ACQUISITION_INVALID");
+  }
+  if (!value.acquired) {
+    if (!exactObject(value, ["acquired", "action", "contract"]) || value.action !== "noop") {
+      throw transient("SANDBOX_P02_ACQUISITION_INVALID");
+    }
+    return value;
+  }
+  if (value.action === "wait_for_apps") {
+    if (!exactObject(value, ["acquired", "action", "contract", "outbox_snapshot_json"]) ||
+        typeof value.outbox_snapshot_json !== "string" ||
+        encoder.encode(value.outbox_snapshot_json).byteLength > 32 * 1024) {
+      throw transient("SANDBOX_P02_ACQUISITION_INVALID");
+    }
+    let row;
+    try { row = JSON.parse(value.outbox_snapshot_json); } catch {
+      throw transient("SANDBOX_P02_ACQUISITION_INVALID");
+    }
+    if (!exactObject(row, SANDBOX_O01_OUTBOX_RECORD_KEYS) || row.action !== "REMOVE_ELIGIBLE_GROUP" ||
+        row.state !== "RETRY" || row.attempts !== 1 ||
+        row.last_error_code !== "SANDBOX_FAULT_APPS_REDEMPTION_NOT_DONE" ||
+        row.lease_token !== null || row.lease_expires_at !== null ||
+        typeof row.updated_at !== "string" || typeof row.available_at !== "string" ||
+        Date.parse(row.available_at) - Date.parse(row.updated_at) !== 30_000) {
+      throw transient("SANDBOX_P02_ACQUISITION_INVALID");
+    }
+    return value;
+  }
+  const keys = [
+    "acquired", "action", "claim_id", "contract", "customer_id", "lease_expires_at",
+    "lease_started_at", "lease_token", "lineage_hash", "outbox_snapshot_json", "reference_id",
+    "source_event_id", "stage_key", "stage_updated_at", "stage_value", "track",
+  ];
+  const stages = {
+    fault_removal: "P02_REMOVAL_ADMITTED_V1",
+    recover_removal: "P02_RECOVERY_ADMITTED_V1",
+  };
+  if (!exactObject(value, keys) || !Object.hasOwn(stages, value.action) ||
+      !/^[a-f0-9]{64}$/.test(String(value.lineage_hash || "")) ||
+      value.stage_value !== `${stages[value.action]}:${value.lineage_hash}` ||
+      !/^sandbox_p02_v1_[a-f0-9]{64}$/.test(String(value.stage_key || "")) ||
+      !["apps_first", "wait_first"].includes(value.track) ||
+      value.stage_updated_at !== value.lease_started_at ||
+      !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(String(value.lease_token || "")) ||
+      typeof value.outbox_snapshot_json !== "string" ||
+      encoder.encode(value.outbox_snapshot_json).byteLength > 32 * 1024) {
+    throw transient("SANDBOX_P02_ACQUISITION_INVALID");
+  }
+  let row;
+  try { row = JSON.parse(value.outbox_snapshot_json); } catch {
+    throw transient("SANDBOX_P02_ACQUISITION_INVALID");
+  }
+  const expectedAttempts = value.action === "fault_removal"
+    ? (value.track === "apps_first" ? 1 : 2)
+    : (value.track === "apps_first" ? 2 : 3);
+  const expectedError = value.action === "fault_removal"
+    ? (value.track === "apps_first" ? null : "SANDBOX_FAULT_APPS_REDEMPTION_NOT_DONE")
+    : "SQUARE_SANDBOX_FAULT_GROUP_REMOVE_UNAVAILABLE";
+  if (!exactObject(row, SANDBOX_O01_OUTBOX_RECORD_KEYS) || row.outbox_id !== `out_remove_${value.claim_id}` ||
+      row.claim_id !== value.claim_id || row.action !== "REMOVE_ELIGIBLE_GROUP" ||
+      row.payload_json !== JSON.stringify({ square_customer_id: value.customer_id }) ||
+      row.state !== "PROCESSING" || row.attempts !== expectedAttempts ||
+      row.last_error_code !== expectedError || row.updated_at !== value.lease_started_at ||
+      row.lease_token !== value.lease_token || row.lease_expires_at !== value.lease_expires_at ||
+      Date.parse(row.lease_expires_at) - Date.parse(row.updated_at) !== 900_000) {
+    throw transient("SANDBOX_P02_ACQUISITION_INVALID");
+  }
+  return value;
+}
+
+async function maybeAcquireSandboxP02(env, item) {
+  const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+  if (!controller) return null;
+  if (typeof controller.acquireP02 !== "function") {
+    throw transient("SANDBOX_P02_ACQUISITION_UNAVAILABLE");
+  }
+  const value = await controller.acquireP02(env, { item });
+  if (value === false) return null;
+  return exactSandboxP02Admission(value);
+}
+
+async function commitSandboxP02Fault(env, admission) {
+  const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+  if (!controller || typeof controller.commitP02Fault !== "function") {
+    throw transient("SANDBOX_P02_FAULT_COMMIT_UNAVAILABLE");
+  }
+  await controller.commitP02Fault(env, { admission });
+  throw transient("SANDBOX_P02_FAULT_COMMIT_UNAVAILABLE");
+}
+
+async function preflightSandboxP02Provider(env, admission) {
+  const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+  if (!controller || typeof controller.preP02Provider !== "function") {
+    throw transient("SANDBOX_P02_PROVIDER_FENCE_UNAVAILABLE");
+  }
+  const value = await controller.preP02Provider(env, { admission });
+  if (!exactObject(value, ["contract", "customer_id", "eligible_group_id", "reference_id", "timeout_ms"]) ||
+      value.contract !== SANDBOX_P02_PROVIDER_PREFLIGHT_CONTRACT ||
+      value.customer_id !== admission.customer_id || value.reference_id !== admission.reference_id ||
+      value.eligible_group_id !== String(env.SQUARE_ELIGIBLE_GROUP_ID || "") ||
+      value.timeout_ms !== 30_000) {
+    throw transient("SANDBOX_P02_PROVIDER_FENCE_UNAVAILABLE");
+  }
+  return value;
+}
+
+function sandboxP02ProviderEvidence(customer) {
+  const groups = customer?.group_ids;
+  return Object.freeze({
+    customer_id: String(customer?.id || ""),
+    group_ids: groups === null || groups === undefined
+      ? Object.freeze([])
+      : (Array.isArray(groups) ? Object.freeze([...groups]) : null),
+    reference_id: String(customer?.reference_id || ""),
+  });
+}
+
+function sandboxP02ProviderEvidenceReady(evidence, fence) {
+  return exactObject(evidence, ["customer_id", "group_ids", "reference_id"]) &&
+    evidence.customer_id === fence.customer_id && evidence.reference_id === fence.reference_id &&
+    Array.isArray(evidence.group_ids) && evidence.group_ids.length <= 100 &&
+    new Set(evidence.group_ids).size === evidence.group_ids.length &&
+    evidence.group_ids.every((value) => typeof value === "string" && /^[A-Za-z0-9_-]{8,160}$/.test(value));
+}
+
+async function invalidateSandboxP02(env, admission, reason) {
+  const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+  if (!controller || typeof controller.invalidateP02 !== "function") {
+    throw transient("SANDBOX_P02_INVALIDATION_UNAVAILABLE");
+  }
+  const invalidated = await controller.invalidateP02(env, { admission, reason });
+  if (invalidated !== true) throw transient("SANDBOX_P02_INVALIDATION_UNAVAILABLE");
+  throw permanent("SANDBOX_P02_CAUSAL_REJECTED");
+}
+
+async function commitSandboxP02Complete(env, admission, provider) {
+  const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+  if (!controller || typeof controller.commitP02Complete !== "function") {
+    throw transient("SANDBOX_P02_COMPLETE_UNAVAILABLE");
+  }
+  const value = await controller.commitP02Complete(env, { admission, provider });
+  if (!exactObject(value, ["contract"]) || value.contract !== SANDBOX_P02_COMPLETE_CONTRACT) {
+    throw transient("SANDBOX_P02_COMPLETE_UNAVAILABLE");
+  }
+}
+
+async function commitSandboxQ01Terminal(env, event, payment, order) {
+  const admission = event?.[SANDBOX_Q01_ADMISSION];
+  const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+  if (!admission || !controller || typeof controller.commitQ01Terminal !== "function") {
+    throw transient("SANDBOX_Q01_TERMINAL_COMMIT_UNAVAILABLE");
+  }
+  const committed = await controller.commitQ01Terminal(env, {
+    admission,
+    event_id: event.event_id,
+    payment,
+    order,
+  });
+  if (committed !== true) throw transient("SANDBOX_Q01_TERMINAL_COMMIT_UNAVAILABLE");
+}
+
+async function failSandboxQ01(env, event, error) {
+  const admission = event?.[SANDBOX_Q01_ADMISSION];
+  if (!admission) return false;
+  const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+  if (!controller || typeof controller.failQ01 !== "function") {
+    throw transient("SANDBOX_Q01_AMBIGUOUS");
+  }
+  await controller.failQ01(env, {
+    kind: "processing",
+    admission,
+    event_id: event.event_id,
+    error_code: safeErrorCode(error),
+  });
+  return true;
+}
+
+async function preflightSandboxO01External(env, item) {
+  const admission = item?.[SANDBOX_O01_ADMISSION];
+  const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+  if (!admission || !controller || typeof controller.preExternal !== "function") {
+    throw transient("SANDBOX_O01_EXTERNAL_FENCE_UNAVAILABLE");
+  }
+  const value = await controller.preExternal(env, { admission, outbox_id: item.outbox_id });
+  if (!exactObject(value, ["contract", "timeout_ms"]) ||
+      value.contract !== SANDBOX_O01_EXTERNAL_PREFLIGHT_CONTRACT ||
+      !Number.isInteger(value.timeout_ms) || value.timeout_ms < 1_000 || value.timeout_ms > 30_000) {
+    throw transient("SANDBOX_O01_EXTERNAL_FENCE_UNAVAILABLE");
+  }
+  return value;
+}
+
+async function commitSandboxO01Outbox(env, item, outcome) {
+  const admission = item?.[SANDBOX_O01_ADMISSION];
+  const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+  if (!admission || !controller || typeof controller.commitOutbox !== "function") {
+    throw transient("SANDBOX_O01_EXTERNAL_COMMIT_UNAVAILABLE");
+  }
+  const committed = await controller.commitOutbox(env, {
+    admission, outbox_id: item.outbox_id, outcome,
+  });
+  if (committed !== true) throw transient("SANDBOX_O01_EXTERNAL_COMMIT_UNAVAILABLE");
+}
+
+async function failSandboxO01Outbox(env, item) {
+  const admission = item?.[SANDBOX_O01_ADMISSION];
+  const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+  if (!admission || !controller || typeof controller.failOutbox !== "function") {
+    throw transient("SANDBOX_O01_EXTERNAL_AMBIGUOUS");
+  }
+  await controller.failOutbox(env, { admission, outbox_id: item.outbox_id });
+  throw transient("SANDBOX_O01_EXTERNAL_AMBIGUOUS");
 }
 
 function sandboxOwnerHarnessRoute(request, env) {
@@ -261,59 +1111,269 @@ async function provisionOffer(input, env) {
     throw new ConnectorError("CLAIM_COUPON_MISMATCH", 409);
   }
 
-  if (claim.status === "READY") return withPass("already_ready", claim, env);
-  if (claim.status === "REDEEMED") return noPass("already_redeemed");
-  if (claim.status === "STAFF_LOOKUP_REQUIRED") return noPass("staff_lookup_required");
-  if (claim.status === "SQUARE_READY") return finalizeSquareReady(claim, input, env);
+  const p01Admission = await maybeAcquireSandboxP01(env, claim);
+  if (p01Admission?.acquired === false) throw transient("SANDBOX_P01_NO_WORK");
+  const f04Admission = await maybeAcquireSandboxF04(env, claim);
+  if (f04Admission?.acquired === false) throw transient("SANDBOX_F04_NO_WORK");
+  if (!p01Admission && !f04Admission) {
+    if (claim.status === "READY") return withPass("already_ready", claim, env);
+    if (claim.status === "REDEEMED") return noPass("already_redeemed");
+    if (claim.status === "STAFF_LOOKUP_REQUIRED") return noPass("staff_lookup_required");
+    if (claim.status === "SQUARE_READY") return finalizeSquareReady(claim, input, env);
+  }
 
-  const lookup = await appsCall("offer_prepare", {
-    submission_id: input.submission_id,
-    coupon_code: input.coupon_code,
-    square_customer_profile_consent: "yes",
-    square_customer_profile_consent_version: PROFILE_CONSENT_VERSION,
-  }, env);
-  assertAppsResponse(lookup, "offer_prepare", input.submission_id);
+  const p01Provision = p01Admission?.action === "provision";
+  const f04Initial = ["search_fault", "provider_recovery"].includes(f04Admission?.action);
+  let lookup;
+  try {
+    lookup = await appsCall("offer_prepare", {
+      submission_id: input.submission_id,
+      coupon_code: input.coupon_code,
+      square_customer_profile_consent: "yes",
+      square_customer_profile_consent_version: PROFILE_CONSENT_VERSION,
+    }, env);
+  } catch (error) {
+    if (p01Provision && p01DeterministicAppsResponseError(error)) {
+      await invalidateSandboxP01Provision(env, p01Admission, claim, "apps_prepare_invalid");
+    }
+    if (p01Admission && !p01Provision && p01DeterministicAppsResponseError(error)) {
+      await invalidateSandboxP01Recovery(env, p01Admission, claim, "apps_prepare_invalid");
+    }
+    if (f04Admission && p01DeterministicAppsResponseError(error)) {
+      await invalidateSandboxF04(env, f04Admission, claim, "apps_prepare_invalid");
+    }
+    throw error;
+  }
+  try {
+    assertAppsResponse(lookup, "offer_prepare", input.submission_id);
+  } catch (error) {
+    if (p01Provision) {
+      await invalidateSandboxP01Provision(env, p01Admission, claim, "apps_prepare_invalid");
+    }
+    if (p01Admission && !p01Provision) {
+      await invalidateSandboxP01Recovery(env, p01Admission, claim, "apps_prepare_invalid");
+    }
+    if (f04Admission) await invalidateSandboxF04(env, f04Admission, claim, "apps_prepare_invalid");
+    throw error;
+  }
 
-  if (lookup.offer_prepare_result === "not_eligible") {
+  if (p01Provision &&
+      (lookup.offer_prepare_result !== "eligible" || lookup.square_customer_id !== "" ||
+       lookup.identity_link_id !== "" || typeof lookup.name !== "string" ||
+       typeof lookup.phone !== "string" || lookup.coupon_code !== input.coupon_code ||
+       !["recorded", "already_recorded"].includes(lookup.profile_consent_result))) {
+    await invalidateSandboxP01Provision(env, p01Admission, claim, "apps_prepare_not_new");
+  }
+  if (p01Admission && !p01Provision) {
+    const eligibleNew = lookup.offer_prepare_result === "eligible" &&
+      lookup.square_customer_id === "" && lookup.identity_link_id === "";
+    const linkedFinalizeRecovery = p01Admission.action === "finalize_recovery" &&
+      lookup.offer_prepare_result === "already_linked" &&
+      lookup.square_customer_id === claim.square_customer_id &&
+      sandboxP01UuidV4Ready(lookup.identity_link_id);
+    if (!(eligibleNew || linkedFinalizeRecovery) || typeof lookup.name !== "string" ||
+        typeof lookup.phone !== "string" || lookup.coupon_code !== input.coupon_code ||
+        !["recorded", "already_recorded"].includes(lookup.profile_consent_result)) {
+      await invalidateSandboxP01Recovery(env, p01Admission, claim, "apps_prepare_invalid");
+    }
+  }
+  if (f04Admission) {
+    const eligibleNew = lookup.offer_prepare_result === "eligible" &&
+      lookup.square_customer_id === "" && lookup.identity_link_id === "";
+    const linkedRecovery = f04Admission.action === "finalize_recovery" &&
+      lookup.offer_prepare_result === "already_linked" &&
+      lookup.square_customer_id === claim.square_customer_id &&
+      sandboxP01UuidV4Ready(lookup.identity_link_id);
+    if (!(eligibleNew || linkedRecovery) || typeof lookup.name !== "string" ||
+        typeof lookup.phone !== "string" || lookup.coupon_code !== input.coupon_code ||
+        !["recorded", "already_recorded"].includes(lookup.profile_consent_result)) {
+      await invalidateSandboxF04(env, f04Admission, claim,
+        f04Initial ? "apps_prepare_not_new" : "apps_prepare_invalid");
+    }
+  }
+  if (!p01Admission && !f04Admission && lookup.offer_prepare_result === "not_eligible") {
     await setClaimStatus(env, claim.claim_id, "REDEEMED");
     return noPass("already_redeemed");
   }
-  if (!(["eligible", "already_linked"].includes(lookup.offer_prepare_result))) {
+  if (!p01Admission && !f04Admission && !(["eligible", "already_linked"].includes(lookup.offer_prepare_result))) {
     throw new ConnectorError("APPS_CONTRACT_INVALID", 502);
   }
   if (typeof lookup.name !== "string" || typeof lookup.phone !== "string") {
     throw new ConnectorError("APPS_CONTRACT_INVALID", 502);
   }
-  rejectEmailFields(lookup);
-  const phone = normalizeUsPhone(lookup.phone);
-  const personName = parseName(lookup.name);
+  let phone;
+  let personName;
+  try {
+    rejectEmailFields(lookup);
+    phone = normalizeUsPhone(lookup.phone);
+    personName = parseName(lookup.name);
+  } catch (error) {
+    if (p01Provision) {
+      await invalidateSandboxP01Provision(env, p01Admission, claim, "apps_prepare_invalid");
+    }
+    if (p01Admission && !p01Provision) {
+      await invalidateSandboxP01Recovery(env, p01Admission, claim, "apps_prepare_invalid");
+    }
+    if (f04Admission) await invalidateSandboxF04(env, f04Admission, claim, "apps_prepare_invalid");
+    throw error;
+  }
   const identityHash = await identityPhoneHash(phone, env);
-  const other = await dbFirst(env, "claim_by_identity", `
-    SELECT * FROM offer_claims WHERE identity_hash = ?1 AND claim_id <> ?2
-  `, [identityHash, claim.claim_id]);
-  if (other) {
-    await setClaimStatus(env, claim.claim_id, "STAFF_LOOKUP_REQUIRED");
-    return noPass("staff_lookup_required");
+  if (claim.identity_hash) {
+    const p01RetryClaimReady = !p01Provision || (
+      claim.status === "PROVISIONING" && claim.apps_ledger_status === "PENDING" &&
+      claim.square_customer_id === null && claim.reference_id === null && claim.match_method === null &&
+      claim.group_membership_status === null && claim.finalize_effective_at === null &&
+      claim.ready_at === null && claim.redeemed_at === null &&
+      Number.isFinite(Date.parse(claim.updated_at)) &&
+      Date.parse(claim.updated_at) <= Date.parse(p01Admission.stage_updated_at)
+    );
+    const f04RetryClaimReady = !f04Admission || (f04Initial
+      ? claim.status === "PROVISIONING" && claim.apps_ledger_status === "PENDING" &&
+        claim.square_customer_id === null && claim.reference_id === null && claim.match_method === null &&
+        claim.group_membership_status === null && claim.finalize_effective_at === null &&
+        claim.ready_at === null && claim.redeemed_at === null
+      : claim.status === "SQUARE_READY" && claim.apps_ledger_status === "PENDING" &&
+        claim.match_method === "created" && claim.group_membership_status === "added" &&
+        claim.ready_at === null && claim.redeemed_at === null);
+    if (!timingSafeEqual(String(claim.identity_hash), identityHash) ||
+        !p01RetryClaimReady || !f04RetryClaimReady) {
+      if (p01Provision) {
+        await invalidateSandboxP01Provision(env, p01Admission, claim, "identity_ambiguous");
+      }
+      if (p01Admission && !p01Provision) {
+        await invalidateSandboxP01Recovery(env, p01Admission, claim, "identity_ambiguous");
+      }
+      if (f04Admission) await invalidateSandboxF04(env, f04Admission, claim, "identity_ambiguous");
+      throw new ConnectorError("CLAIM_IDENTITY_DRIFT", 409);
+    }
+  } else {
+    const other = await dbFirst(env, "claim_by_identity", `
+      SELECT * FROM offer_claims WHERE identity_hash = ?1 AND claim_id <> ?2
+    `, [identityHash, claim.claim_id]);
+    if (other) {
+      if (p01Provision) {
+        await invalidateSandboxP01Provision(env, p01Admission, claim, "identity_ambiguous");
+      }
+      if (p01Admission) throw transient("SANDBOX_P01_IDENTITY_AMBIGUOUS");
+      if (f04Admission) await invalidateSandboxF04(env, f04Admission, claim, "identity_ambiguous");
+      await setClaimStatus(env, claim.claim_id, "STAFF_LOOKUP_REQUIRED");
+      return noPass("staff_lookup_required");
+    }
+
+    const identityAt = p01Admission?.action === "provision"
+      ? p01Admission.stage_updated_at
+      : f04Admission?.action === "search_fault" ? f04Admission.stage_updated_at : now;
+    const identityUpdated = await dbRun(env, "claim_identity", `
+      UPDATE offer_claims
+         SET identity_hash = ?1, status = 'PROVISIONING', updated_at = ?2
+       WHERE claim_id = ?3 AND status IN ('PENDING', 'PROVISIONING')
+         AND identity_hash IS NULL
+         AND json_array(claim_id, submission_id, coupon_code_hash, identity_hash,
+               square_customer_id, reference_id, match_method, group_membership_status,
+               finalize_effective_at, status, apps_ledger_status, refund_review_required,
+               created_at, updated_at, ready_at, redeemed_at) = json(?4)
+         AND NOT EXISTS (SELECT 1 FROM pass_sessions p WHERE p.claim_id = offer_claims.claim_id)
+         AND NOT EXISTS (SELECT 1 FROM purchases p WHERE p.claim_id = offer_claims.claim_id)
+         AND NOT EXISTS (SELECT 1 FROM redemptions r WHERE r.claim_id = offer_claims.claim_id)
+         AND NOT EXISTS (SELECT 1 FROM refund_reviews rr WHERE rr.claim_id = offer_claims.claim_id)
+         AND NOT EXISTS (SELECT 1 FROM square_outbox o WHERE o.claim_id = offer_claims.claim_id)
+    `, [identityHash, identityAt, claim.claim_id, sandboxP01ClaimSnapshot(claim)]);
+    const causalAdmission = p01Admission || f04Admission;
+    if (causalAdmission) {
+      const expectedIdentityClaim = {
+        ...claim, identity_hash: identityHash, status: "PROVISIONING", updated_at: identityAt,
+      };
+      claim = await dbFirst(env, "claim_identity_confirm", `
+        SELECT c.* FROM offer_claims c WHERE c.submission_id = ?1
+          AND NOT EXISTS (SELECT 1 FROM pass_sessions p WHERE p.claim_id = c.claim_id)
+          AND NOT EXISTS (SELECT 1 FROM purchases p WHERE p.claim_id = c.claim_id)
+          AND NOT EXISTS (SELECT 1 FROM redemptions r WHERE r.claim_id = c.claim_id)
+          AND NOT EXISTS (SELECT 1 FROM refund_reviews rr WHERE rr.claim_id = c.claim_id)
+          AND NOT EXISTS (SELECT 1 FROM square_outbox o WHERE o.claim_id = c.claim_id)
+      `, [input.submission_id]);
+      if (!claim || sandboxP01ClaimSnapshot(claim) !== sandboxP01ClaimSnapshot(expectedIdentityClaim)) {
+        if (p01Provision && claim) {
+          await invalidateSandboxP01Provision(env, p01Admission, claim, "identity_ambiguous");
+        }
+        if (f04Admission && claim) {
+          await invalidateSandboxF04(env, f04Admission, claim, "identity_ambiguous");
+        }
+        throw transient(p01Admission ? "SANDBOX_P01_IDENTITY_AMBIGUOUS" : "SANDBOX_F04_IDENTITY_AMBIGUOUS");
+      }
+    } else {
+      claim = { ...claim, identity_hash: identityHash, status: "PROVISIONING", updated_at: now };
+    }
   }
 
-  await dbRun(env, "claim_identity", `
-    UPDATE offer_claims
-       SET identity_hash = ?1, status = 'PROVISIONING', updated_at = ?2
-     WHERE claim_id = ?3 AND status IN ('PENDING', 'PROVISIONING')
-  `, [identityHash, now, claim.claim_id]);
+  if (p01Admission?.action === "finalize_recovery") {
+    return recoverSandboxP01Finalize(claim, input, lookup, phone, personName, p01Admission, env);
+  }
+  if (f04Admission?.action === "finalize_recovery") {
+    return recoverSandboxF04Finalize(claim, input, lookup, phone, personName, f04Admission, env);
+  }
+  if (f04Admission?.action === "search_fault") {
+    await commitSandboxF04SearchFault(env, f04Admission, claim);
+  }
 
   const provisioned = await findOrCreateSquareCustomer({
     claimId: claim.claim_id,
     submissionId: input.submission_id,
     phone,
     name: personName,
-    suppliedCustomerId: lookup.square_customer_id,
+    suppliedCustomerId: p01Admission
+      ? (claim.square_customer_id || lookup.square_customer_id)
+      : f04Admission?.action === "finalize_recovery" ? claim.square_customer_id : lookup.square_customer_id,
   }, env);
   if (provisioned.staffLookupRequired) {
+    if (p01Admission?.action === "provision") {
+      await invalidateSandboxP01Provision(env, p01Admission, claim, "provider_ambiguous");
+    }
+    if (p01Admission?.action === "group_recovery" ||
+        p01Admission?.action === "finalize" || p01Admission?.action === "finalize_recovery") {
+      await invalidateSandboxP01Recovery(env, p01Admission, claim, "provider_ambiguous");
+    }
+    if (p01Admission) throw transient("SANDBOX_P01_PROVIDER_AMBIGUOUS");
+    if (f04Admission) await invalidateSandboxF04(env, f04Admission, claim, "provider_ambiguous");
     await setClaimStatus(env, claim.claim_id, "STAFF_LOOKUP_REQUIRED");
     return noPass("staff_lookup_required");
   }
-  if (!provisioned.created) {
+  if (p01Admission?.action === "group_recovery") {
+    if (provisioned.customer.id !== claim.square_customer_id ||
+        provisioned.customer.reference_id !== claim.reference_id ||
+        !squareCustomerMatches(provisioned.customer, phone, personName)) {
+      await invalidateSandboxP01Recovery(env, p01Admission, claim, "provider_ambiguous");
+    }
+    provisioned.referenceId = claim.reference_id;
+    provisioned.matchMethod = claim.match_method;
+  } else if (p01Admission?.action === "provision") {
+    const expectedReference = await referenceForClaim(claim.claim_id);
+    if (!provisioned.created) {
+      provisioned.customer = await retrieveCustomer(provisioned.customer.id, env);
+    }
+    const observedReference = String(provisioned.customer.reference_id || "");
+    provisioned.referenceId = observedReference;
+    provisioned.matchMethod = observedReference === expectedReference
+      ? "created"
+      : (observedReference ? "existing_spartan_reference" : "unique_phone");
+  } else if (f04Admission?.action === "provider_recovery") {
+    const expectedReference = await referenceForClaim(claim.claim_id);
+    const expectedCustomerId = provisioned.customer?.id;
+    if (typeof expectedCustomerId !== "string" || expectedCustomerId.length === 0) {
+      await invalidateSandboxF04(env, f04Admission, claim, "provider_ambiguous");
+    }
+    if (!provisioned.created) {
+      const retrievedCustomer = await retrieveCustomer(expectedCustomerId, env);
+      if (retrievedCustomer.id !== expectedCustomerId) {
+        await invalidateSandboxF04(env, f04Admission, claim, "provider_ambiguous");
+      }
+      provisioned.customer = retrievedCustomer;
+    }
+    if (!sandboxF04CreatedProviderReady(
+      provisioned.customer, claim, phone, personName, expectedReference,
+    )) await invalidateSandboxF04(env, f04Admission, claim, "provider_ambiguous");
+    provisioned.referenceId = expectedReference;
+    provisioned.matchMethod = "created";
+  } else if (!provisioned.created) {
     try {
       if (await hasPriorLinkedCompletedOrder(provisioned.customer.id, env)) {
         await setClaimStatus(env, claim.claim_id, "STAFF_LOOKUP_REQUIRED");
@@ -337,16 +1397,65 @@ async function provisionOffer(input, env) {
     provisioned.referenceId = referenceResult.referenceId;
     provisioned.matchMethod = referenceResult.wasExisting ? "existing_spartan_reference" : "unique_phone";
   }
-
   const wasMember = Array.isArray(provisioned.customer.group_ids) && provisioned.customer.group_ids.includes(env.SQUARE_ELIGIBLE_GROUP_ID);
+  if (p01Admission?.action === "provision") {
+    const exactCustomer = await retrieveCustomer(provisioned.customer.id, env);
+    const expectedReference = await referenceForClaim(claim.claim_id);
+    if (exactCustomer.id !== provisioned.customer.id ||
+        exactCustomer.reference_id !== expectedReference ||
+        !squareCustomerMatches(exactCustomer, phone, personName)) {
+      await invalidateSandboxP01Provision(env, p01Admission, claim, "provider_ambiguous");
+    }
+    const provider = sandboxP01ProviderEvidence(
+      exactCustomer, provisioned.matchMethod,
+    );
+    await commitSandboxP01Fault(env, p01Admission, claim, provider);
+  }
+  if (p01Admission?.action === "group_recovery") {
+    const beforeProvider = sandboxP01ProviderEvidence(
+      provisioned.customer, claim.match_method,
+    );
+    const addRequired = await preflightSandboxP01Group(
+      env, p01Admission, claim, beforeProvider,
+    );
+    if (addRequired) {
+      await addCustomerToGroup(provisioned.customer.id, env.SQUARE_ELIGIBLE_GROUP_ID, env);
+    }
+    const exactCustomer = await retrieveCustomer(provisioned.customer.id, env);
+    const exactGroups = Array.isArray(exactCustomer.group_ids) ? exactCustomer.group_ids : [];
+    if (exactCustomer.id !== claim.square_customer_id ||
+        exactCustomer.reference_id !== claim.reference_id ||
+        !squareCustomerMatches(exactCustomer, phone, personName) ||
+        !exactGroups.includes(env.SQUARE_ELIGIBLE_GROUP_ID)) {
+      await invalidateSandboxP01Recovery(env, p01Admission, claim, "provider_ambiguous");
+    }
+    const provider = sandboxP01ProviderEvidence(
+      exactCustomer, claim.match_method,
+    );
+    const committed = await commitSandboxP01Group(env, p01Admission, claim, provider);
+    return finalizeSandboxP01Ready(
+      committed.claim, input, lookup, committed.admission, env,
+    );
+  }
   if (!wasMember) {
-    await maybeSandboxFault(env, "SQUARE_GROUP_ADD_FAILURE", input.submission_id);
     await addCustomerToGroup(provisioned.customer.id, env.SQUARE_ELIGIBLE_GROUP_ID, env);
   }
   const verifiedCustomer = await retrieveCustomer(provisioned.customer.id, env);
   const groupIds = Array.isArray(verifiedCustomer.group_ids) ? verifiedCustomer.group_ids : [];
-  if (verifiedCustomer.reference_id !== provisioned.referenceId || normalizeUsPhone(verifiedCustomer.phone_number) !== phone || !groupIds.includes(env.SQUARE_ELIGIBLE_GROUP_ID)) {
+  if ((f04Admission && verifiedCustomer.id !== provisioned.customer.id) ||
+      verifiedCustomer.reference_id !== provisioned.referenceId ||
+      !squareCustomerMatches(verifiedCustomer, phone, personName) ||
+      !groupIds.includes(env.SQUARE_ELIGIBLE_GROUP_ID)) {
+    if (f04Admission) await invalidateSandboxF04(env, f04Admission, claim, "provider_ambiguous");
     throw new ConnectorError("SQUARE_CUSTOMER_VERIFY_FAILED", 502);
+  }
+  if (f04Admission?.action === "provider_recovery") {
+    if (!sandboxF04CreatedProviderReady(
+      verifiedCustomer, claim, phone, personName, provisioned.referenceId,
+    )) await invalidateSandboxF04(env, f04Admission, claim, "provider_ambiguous");
+    await commitSandboxF04AppsFault(
+      env, f04Admission, claim, sandboxP01ProviderEvidence(verifiedCustomer, "created"),
+    );
   }
 
   const finalizeEvidence = {
@@ -366,6 +1475,174 @@ async function provisionOffer(input, env) {
     match_method: finalizeEvidence.matchMethod, group_membership_status: finalizeEvidence.groupMembershipStatus,
     finalize_effective_at: finalizeEvidence.effectiveAt, status: "SQUARE_READY" };
   return finalizeSquareReady(claim, input, env);
+}
+
+async function recoverSandboxP01Finalize(claim, input, lookup, phone, personName, admission, env) {
+  if (!claim.square_customer_id || !validReference(claim.reference_id) ||
+      claim.group_membership_status !== "added" || claim.status !== "SQUARE_READY") {
+    throw transient("SANDBOX_P01_FINALIZE_FENCE_REJECTED");
+  }
+  const customer = await retrieveCustomer(claim.square_customer_id, env);
+  const groups = Array.isArray(customer.group_ids) ? customer.group_ids : [];
+  if (customer.id !== claim.square_customer_id ||
+      !squareCustomerMatches(customer, phone, personName) || customer.reference_id !== claim.reference_id ||
+      !groups.includes(env.SQUARE_ELIGIBLE_GROUP_ID)) {
+    await invalidateSandboxP01Recovery(env, admission, claim, "provider_ambiguous");
+  }
+  return finalizeSandboxP01Ready(claim, input, lookup, admission, env);
+}
+
+async function finalizeSandboxP01Ready(claim, input, lookup, admission, env) {
+  if (!claim.square_customer_id || !validReference(claim.reference_id) ||
+      claim.status !== "SQUARE_READY" || claim.apps_ledger_status !== "PENDING" ||
+      claim.group_membership_status !== "added" ||
+      claim.match_method !== "created" ||
+      !/^\d{4}-\d{2}-\d{2}T/.test(String(claim.finalize_effective_at || ""))) {
+    throw transient("SANDBOX_P01_FINALIZE_FENCE_REJECTED");
+  }
+  let finalizeEvidence;
+  if (admission.action === "finalize_recovery" && lookup.offer_prepare_result === "already_linked") {
+    if (lookup.square_customer_id !== claim.square_customer_id) {
+      await invalidateSandboxP01Recovery(env, admission, claim, "apps_prepare_invalid");
+    }
+    finalizeEvidence = {
+      contact_id: "",
+      coupon_code: input.coupon_code,
+      identity_event_id: "",
+      identity_link_id: lookup.identity_link_id,
+      result: "prepare_already_linked",
+      square_customer_id: claim.square_customer_id,
+      website_submission_id: input.submission_id,
+    };
+  } else {
+    if (lookup.offer_prepare_result !== "eligible") {
+      await invalidateSandboxP01Recovery(env, admission, claim, "apps_prepare_invalid");
+    }
+    let finalized;
+    try {
+      finalized = await appsCall("offer_finalize", {
+        website_submission_id: input.submission_id,
+        coupon_code: input.coupon_code,
+        square_customer_id: claim.square_customer_id,
+        square_group_id: env.SQUARE_ELIGIBLE_GROUP_ID,
+        group_membership_status: "added",
+        match_method: claim.match_method,
+        match_confidence: "high",
+        effective_at_utc: claim.finalize_effective_at,
+      }, env);
+      assertAppsResponse(finalized, "offer_finalize", input.submission_id);
+    } catch (error) {
+      if (p01DeterministicAppsResponseError(error)) {
+        await invalidateSandboxP01Recovery(env, admission, claim, "apps_finalize_invalid");
+      }
+      throw error;
+    }
+    const finalizeIds = [finalized.identity_link_id, finalized.contact_id, finalized.identity_event_id];
+    if (!["linked", "already_linked"].includes(finalized.offer_finalize_result) ||
+        finalized.square_customer_id !== claim.square_customer_id ||
+        finalized.coupon_code !== input.coupon_code ||
+        !finalizeIds.every(sandboxP01UuidV4Ready) || new Set(finalizeIds).size !== 3) {
+      await invalidateSandboxP01Recovery(env, admission, claim, "apps_finalize_invalid");
+    }
+    finalizeEvidence = {
+      contact_id: finalized.contact_id,
+      coupon_code: finalized.coupon_code,
+      identity_event_id: finalized.identity_event_id,
+      identity_link_id: finalized.identity_link_id,
+      result: finalized.offer_finalize_result,
+      square_customer_id: finalized.square_customer_id,
+      website_submission_id: input.submission_id,
+    };
+  }
+  const token = randomToken(32);
+  const tokenHash = await keyedHash(env.PASS_SESSION_SECRET, `pass:${token}`);
+  const maxAge = await commitSandboxP01Ready(
+    env, admission, claim, finalizeEvidence, tokenHash,
+  );
+  return {
+    offerResult: finalizeEvidence.result === "linked" ? "ready" : "already_ready",
+    passAvailable: true,
+    cookie: `${PASS_COOKIE}=${token}; Path=/api/square/pass; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Strict`,
+  };
+}
+
+async function recoverSandboxF04Finalize(claim, input, lookup, phone, personName, admission, env) {
+  if (!claim.square_customer_id || !validReference(claim.reference_id) ||
+      claim.group_membership_status !== "added" || claim.match_method !== "created" ||
+      claim.status !== "SQUARE_READY" || claim.apps_ledger_status !== "PENDING") {
+    await invalidateSandboxF04(env, admission, claim, "provider_ambiguous");
+  }
+  const customer = await retrieveCustomer(claim.square_customer_id, env);
+  const groups = Array.isArray(customer.group_ids) ? customer.group_ids : [];
+  if (customer.id !== claim.square_customer_id || customer.reference_id !== claim.reference_id ||
+      !squareCustomerMatches(customer, phone, personName) ||
+      !groups.includes(env.SQUARE_ELIGIBLE_GROUP_ID)) {
+    await invalidateSandboxF04(env, admission, claim, "provider_ambiguous");
+  }
+  let finalizeEvidence;
+  if (lookup.offer_prepare_result === "already_linked") {
+    if (lookup.square_customer_id !== claim.square_customer_id ||
+        !sandboxP01UuidV4Ready(lookup.identity_link_id)) {
+      await invalidateSandboxF04(env, admission, claim, "apps_prepare_invalid");
+    }
+    finalizeEvidence = {
+      contact_id: "",
+      coupon_code: input.coupon_code,
+      identity_event_id: "",
+      identity_link_id: lookup.identity_link_id,
+      result: "prepare_already_linked",
+      square_customer_id: claim.square_customer_id,
+      website_submission_id: input.submission_id,
+    };
+  } else {
+    if (lookup.offer_prepare_result !== "eligible" || lookup.square_customer_id !== "" ||
+        lookup.identity_link_id !== "") {
+      await invalidateSandboxF04(env, admission, claim, "apps_prepare_invalid");
+    }
+    let finalized;
+    try {
+      finalized = await appsCall("offer_finalize", {
+        website_submission_id: input.submission_id,
+        coupon_code: input.coupon_code,
+        square_customer_id: claim.square_customer_id,
+        square_group_id: env.SQUARE_ELIGIBLE_GROUP_ID,
+        group_membership_status: "added",
+        match_method: "created",
+        match_confidence: "high",
+        effective_at_utc: claim.finalize_effective_at,
+      }, env);
+      assertAppsResponse(finalized, "offer_finalize", input.submission_id);
+    } catch (error) {
+      if (p01DeterministicAppsResponseError(error)) {
+        await invalidateSandboxF04(env, admission, claim, "apps_finalize_invalid");
+      }
+      throw error;
+    }
+    const ids = [finalized.identity_link_id, finalized.contact_id, finalized.identity_event_id];
+    if (!(["linked", "already_linked"].includes(finalized.offer_finalize_result)) ||
+        finalized.square_customer_id !== claim.square_customer_id ||
+        finalized.coupon_code !== input.coupon_code ||
+        !ids.every(sandboxP01UuidV4Ready) || new Set(ids).size !== 3) {
+      await invalidateSandboxF04(env, admission, claim, "apps_finalize_invalid");
+    }
+    finalizeEvidence = {
+      contact_id: finalized.contact_id,
+      coupon_code: finalized.coupon_code,
+      identity_event_id: finalized.identity_event_id,
+      identity_link_id: finalized.identity_link_id,
+      result: finalized.offer_finalize_result,
+      square_customer_id: finalized.square_customer_id,
+      website_submission_id: input.submission_id,
+    };
+  }
+  const token = randomToken(32);
+  const tokenHash = await keyedHash(env.PASS_SESSION_SECRET, `pass:${token}`);
+  const maxAge = await commitSandboxF04Ready(env, admission, claim, finalizeEvidence, tokenHash);
+  return {
+    offerResult: finalizeEvidence.result === "linked" ? "ready" : "already_ready",
+    passAvailable: true,
+    cookie: `${PASS_COOKIE}=${token}; Path=/api/square/pass; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Strict`,
+  };
 }
 
 async function finalizeSquareReady(claim, input, env) {
@@ -508,8 +1785,8 @@ async function addCustomerToGroup(customerId, groupId, env) {
   await squareRequest("PUT", `/v2/customers/${encodeURIComponent(customerId)}/groups/${encodeURIComponent(groupId)}`, {}, env);
 }
 
-async function retrieveCustomer(customerId, env) {
-  const response = await squareRequest("GET", `/v2/customers/${encodeURIComponent(customerId)}`, null, env);
+async function retrieveCustomer(customerId, env, transport = null) {
+  const response = await squareRequest("GET", `/v2/customers/${encodeURIComponent(customerId)}`, null, env, transport);
   if (!response.customer?.id) throw new ConnectorError("SQUARE_CUSTOMER_NOT_FOUND", 502);
   return response.customer;
 }
@@ -624,35 +1901,64 @@ async function processWebhookEvent(eventId, env) {
     SELECT * FROM webhook_events WHERE event_id = ?1
   `, [eventId]);
   if (!event || ["PROCESSED", "IGNORED", "REJECTED"].includes(event.state)) return;
-  const leaseStartedAt = new Date().toISOString();
-  const leaseToken = crypto.randomUUID();
-  const leaseExpiresAt = new Date(Date.now() + processingLeaseSeconds(env) * 1000).toISOString();
-  const acquired = await dbRun(env, "webhook_processing", `
-    UPDATE webhook_events
-       SET state = 'PROCESSING', attempts = attempts + 1, updated_at = ?1,
-           available_at = NULL, lease_token = ?2, lease_expires_at = ?3
-     WHERE event_id = ?4
-       AND (
-         state = 'ENQUEUED'
-         OR state = 'PENDING'
-         OR (state = 'RETRY' AND (available_at IS NULL OR available_at <= ?1))
-         OR (state = 'PROCESSING' AND (lease_expires_at IS NULL OR lease_expires_at <= ?1))
-       )
-  `, [leaseStartedAt, leaseToken, leaseExpiresAt, eventId]);
-  if (dbChanges(acquired) !== 1) return;
+  const sandboxAcquisition = await maybeAcquireSandboxO01(env, "square_webhook", eventId);
+  let leaseStartedAt;
+  let leaseToken;
+  let leaseExpiresAt;
+  if (sandboxAcquisition) {
+    if (!sandboxAcquisition.acquired) return;
+    ({ lease_started_at: leaseStartedAt, lease_token: leaseToken,
+      lease_expires_at: leaseExpiresAt } = sandboxAcquisition);
+    Object.assign(event, sandboxO01AcquiredRecord(sandboxAcquisition, "square_webhook"));
+    Object.defineProperty(event, sandboxAcquisition.contract === SANDBOX_Q01_ACQUISITION_CONTRACT
+      ? SANDBOX_Q01_ADMISSION
+      : sandboxAcquisition.contract === SANDBOX_Q02_ACQUISITION_CONTRACT
+        ? SANDBOX_Q02_ADMISSION : SANDBOX_O01_ADMISSION, {
+      configurable: false,
+      enumerable: false,
+      value: sandboxAcquisition,
+      writable: false,
+    });
+  } else {
+    leaseStartedAt = new Date().toISOString();
+    leaseToken = crypto.randomUUID();
+    leaseExpiresAt = new Date(
+      Date.parse(leaseStartedAt) + processingLeaseSeconds(env) * 1000,
+    ).toISOString();
+    const acquired = await dbRun(env, "webhook_processing", `
+      UPDATE webhook_events
+         SET state = 'PROCESSING', attempts = attempts + 1, updated_at = ?1,
+             available_at = NULL, lease_token = ?2, lease_expires_at = ?3
+       WHERE event_id = ?4
+         AND (
+           state = 'ENQUEUED'
+           OR state = 'PENDING'
+           OR (state = 'RETRY' AND (available_at IS NULL OR available_at <= ?1))
+           OR (state = 'PROCESSING' AND (lease_expires_at IS NULL OR lease_expires_at <= ?1))
+         )
+    `, [leaseStartedAt, leaseToken, leaseExpiresAt, eventId]);
+    if (dbChanges(acquired) !== 1) return;
+    event.attempts = Number(event.attempts || 0) + 1;
+  }
   event.state = "PROCESSING";
-  event.attempts = Number(event.attempts || 0) + 1;
+  event.updated_at = leaseStartedAt;
   event.lease_token = leaseToken;
   event.lease_expires_at = leaseExpiresAt;
   // This hook intentionally sits outside the normal retry catch. The single
   // sandbox-only interruption leaves the acquired lease intact so scheduled
   // recovery, rather than the current Queue delivery, must reclaim it.
-  await maybeSandboxFault(env, "QUEUE_POST_LEASE_INTERRUPT", eventId);
+  await maybeSandboxFault(env, "QUEUE_POST_LEASE_INTERRUPT", eventId, sandboxAcquisition);
   try {
     if (event.event_type === "payment.created" || event.event_type === "payment.updated") await processPaymentEvent(event, env);
     else if (event.event_type === "refund.created" || event.event_type === "refund.updated") await processRefundEvent(event, env);
     else await markWebhook(env, event, "IGNORED", "EVENT_TYPE_NOT_ACTIONABLE");
   } catch (error) {
+    if (await failSandboxQ01(env, event, error)) {
+      throw permanent("SANDBOX_Q01_STOP");
+    }
+    if (await failSandboxO01Business(env, event)) {
+      throw transient("SANDBOX_O01_BUSINESS_AMBIGUOUS");
+    }
     if (isPermanent(error)) {
       await markWebhook(env, event, "REJECTED", safeErrorCode(error));
       return;
@@ -663,6 +1969,14 @@ async function processWebhookEvent(eventId, env) {
 }
 
 async function processPaymentEvent(event, env) {
+  if (event?.[SANDBOX_Q02_ADMISSION]) {
+    await processSandboxQ02Payment(event, env);
+    return;
+  }
+  if (event?.[SANDBOX_Q01_ADMISSION]) {
+    await processSandboxQ01Payment(event, env);
+    return;
+  }
   const paymentResponse = await squareRequest("GET", `/v2/payments/${encodeURIComponent(event.object_id)}`, null, env);
   const payment = paymentResponse.payment;
   if (!payment?.id) throw transient("PAYMENT_FETCH_INVALID");
@@ -701,9 +2015,41 @@ async function processPaymentEvent(event, env) {
     if (waitForLinks) throw transient("CLAIM_NOT_READY");
     throw permanent("TARGET_DISCOUNT_UNLINKED_CUSTOMER");
   }
+  const sandboxP02ClaimSnapshot = await preflightSandboxP02Business(env, event, claim);
   const existingPurchase = await dbFirst(env, "purchase_by_order", `
     SELECT * FROM purchases WHERE square_order_id = ?1
   `, [order.id]);
+  const sandboxAdmission = event?.[SANDBOX_O01_ADMISSION];
+  if (sandboxAdmission) {
+    const existingRedemption = await dbFirst(env, "redemption_by_claim", `
+      SELECT * FROM redemptions WHERE claim_id = ?1
+    `, [claim.claim_id]);
+    const inspection = inspectOrderForOffer(order, env);
+    const orderMoney = order.net_amounts?.total_money;
+    const orderTotal = Number(orderMoney?.amount);
+    const orderCurrency = String(orderMoney?.currency || "");
+    const paymentAmount = Number(payment.amount_money?.amount);
+    const paymentCurrency = String(payment.amount_money?.currency || "");
+    const rawDiscountName = Array.isArray(order.discounts) && order.discounts.length === 1
+      ? order.discounts[0]?.name : undefined;
+    await commitSandboxO01Business(env, "commitPaymentBusiness", {
+      admission: sandboxAdmission,
+      event_id: event.event_id,
+      payment,
+      order,
+      claim,
+      existing_purchase: existingPurchase,
+      existing_redemption: existingRedemption,
+      inspection,
+      raw_discount_name: rawDiscountName,
+      order_total: orderTotal,
+      order_currency: orderCurrency,
+      payment_amount: paymentAmount,
+      payment_currency: paymentCurrency,
+      expected_discount_name: SANDBOX_O01_DISCOUNT_NAME,
+    });
+    return;
+  }
   if (existingPurchase) {
     if (existingPurchase.claim_id !== claim.claim_id) throw permanent("ORDER_ALREADY_LINKED_DIFFERENT_CLAIM");
     await recordAdditionalTender(existingPurchase, payment, event, env);
@@ -745,6 +2091,16 @@ async function processPaymentEvent(event, env) {
   const removeOutboxId = `out_remove_${claim.claim_id}`;
   const appsOutboxId = `out_apps_redeem_${claim.claim_id}`;
   const outboxIds = [removeOutboxId, appsOutboxId];
+  const redemptionValues = [redemptionId, claim.claim_id, payment.id, order.id, inspection.lineItemUid,
+    env.SQUARE_DISCOUNT_CATALOG_ID, inspection.amount, inspection.currency, event.event_id, now, event.lease_token];
+  const p02ClaimPredicate = sandboxP02ClaimSnapshot === null ? "" : `
+           AND json_array(
+             c.claim_id, c.submission_id, c.coupon_code_hash, c.identity_hash,
+             c.square_customer_id, c.reference_id, c.match_method, c.group_membership_status,
+             c.finalize_effective_at, c.status, c.apps_ledger_status, c.refund_review_required,
+             c.created_at, c.updated_at, c.ready_at, c.redeemed_at
+           ) = json(?12)`;
+  if (sandboxP02ClaimSnapshot !== null) redemptionValues.push(sandboxP02ClaimSnapshot);
   const statements = [
     dbStatement(env, "redemption_insert", `
       INSERT INTO redemptions
@@ -752,7 +2108,8 @@ async function processPaymentEvent(event, env) {
          square_discount_catalog_id, applied_discount_amount, currency, event_id, redeemed_at)
       SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10
        WHERE EXISTS (
-         SELECT 1 FROM offer_claims WHERE claim_id = ?2 AND status = 'READY'
+         SELECT 1 FROM offer_claims c WHERE c.claim_id = ?2 AND c.status = 'READY'
+         ${p02ClaimPredicate}
        )
          AND EXISTS (
            SELECT 1 FROM webhook_events
@@ -760,8 +2117,7 @@ async function processPaymentEvent(event, env) {
               AND lease_expires_at > ?10
          )
       ON CONFLICT(claim_id) DO NOTHING
-    `, [redemptionId, claim.claim_id, payment.id, order.id, inspection.lineItemUid,
-      env.SQUARE_DISCOUNT_CATALOG_ID, inspection.amount, inspection.currency, event.event_id, now, event.lease_token]),
+    `, redemptionValues),
     dbStatement(env, "purchase_insert", `
       INSERT INTO purchases
         (purchase_id, claim_id, square_order_id, primary_payment_id, discount_qualification,
@@ -860,6 +2216,7 @@ async function processPaymentEvent(event, env) {
       await markWebhook(env, event, "REJECTED", "CLAIM_ALREADY_REDEEMED_DIFFERENT_ORDER");
       return;
     }
+    if (sandboxP02ClaimSnapshot !== null) throw permanent("SANDBOX_P02_BUSINESS_FENCE_REJECTED");
     throw transient("REDEMPTION_CAS_INDETERMINATE");
   }
   for (const outboxId of outboxIds) {
@@ -867,6 +2224,161 @@ async function processPaymentEvent(event, env) {
     catch { /* The scheduled D1 outbox drain provides delivery recovery. */ }
   }
   // D1 is authoritative; direct enqueue is an optimization. The scheduled drain handles all pending rows.
+}
+
+function sandboxQ02UnlinkedCustomer(value) {
+  return !Object.hasOwn(value, "customer_id") || value.customer_id === null;
+}
+
+function sandboxQ02Money(value) {
+  return value && typeof value === "object" && !Array.isArray(value) &&
+    Number.isInteger(value.amount) && value.amount === SANDBOX_Q02_FIXTURE_AMOUNT && value.currency === "USD"
+    ? value : null;
+}
+
+function sandboxQ02NoDiscounts(value) {
+  return !Object.hasOwn(value, "discounts") || value.discounts === null ||
+    (Array.isArray(value.discounts) && value.discounts.length === 0);
+}
+
+function sandboxQ02ProviderTimelineReady(value, nowMs) {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      !Object.hasOwn(value, "created_at") || !Object.hasOwn(value, "updated_at") ||
+      !Number.isSafeInteger(nowMs) ||
+      !Number.isSafeInteger(nowMs + SANDBOX_Q02_PROVIDER_CLOCK_SKEW_MS)) return false;
+  const createdAt = sandboxQ01ProviderEpochNanoseconds(value.created_at);
+  const updatedAt = sandboxQ01ProviderEpochNanoseconds(value.updated_at);
+  const maximum = BigInt(nowMs + SANDBOX_Q02_PROVIDER_CLOCK_SKEW_MS) * 1_000_000n;
+  return createdAt !== null && updatedAt !== null && createdAt <= updatedAt && updatedAt <= maximum;
+}
+
+function sandboxQ02ProviderReady(event, payment, order, env) {
+  const nowMs = Date.now();
+  const paymentMoney = sandboxQ02Money(payment?.amount_money);
+  const orderMoney = sandboxQ02Money(order?.net_amounts?.total_money);
+  const lines = Array.isArray(order?.line_items) ? order.line_items : [];
+  const line = lines[0];
+  const lineMoney = sandboxQ02Money(line?.total_money);
+  const baseMoney = sandboxQ02Money(line?.base_price_money);
+  const lineDiscountsReady = line && (!Object.hasOwn(line, "applied_discounts") ||
+    line.applied_discounts === null ||
+    (Array.isArray(line.applied_discounts) && line.applied_discounts.length === 0));
+  const catalogReady = line && (!Object.hasOwn(line, "catalog_object_id") || line.catalog_object_id === null);
+  return payment?.id === event.object_id && payment.status === "COMPLETED" &&
+    payment.location_id === env.SQUARE_LOCATION_ID && sandboxQ02UnlinkedCustomer(payment) &&
+    typeof payment.order_id === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{7,191}$/.test(payment.order_id) &&
+    order?.id === payment.order_id && order.state === "COMPLETED" &&
+    order.location_id === env.SQUARE_LOCATION_ID && sandboxQ02UnlinkedCustomer(order) &&
+    sandboxQ02NoDiscounts(order) && lines.length === 1 && lineDiscountsReady && catalogReady &&
+    line.name === SANDBOX_Q01_FIXTURE_LINE_NAME && line.quantity === "1" &&
+    sandboxQ02ProviderTimelineReady(payment, nowMs) &&
+    sandboxQ02ProviderTimelineReady(order, nowMs) &&
+    paymentMoney && orderMoney && lineMoney && baseMoney &&
+    paymentMoney.amount === orderMoney.amount && orderMoney.amount === lineMoney.amount &&
+    lineMoney.amount === baseMoney.amount;
+}
+
+async function processSandboxQ02Payment(event, env) {
+  const paymentResponse = await squareRequest(
+    "GET", `/v2/payments/${encodeURIComponent(event.object_id)}`, null, env,
+  );
+  const payment = paymentResponse.payment;
+  if (!payment?.order_id || payment.id !== event.object_id || payment.status !== "COMPLETED" ||
+      payment.location_id !== env.SQUARE_LOCATION_ID || !sandboxQ02UnlinkedCustomer(payment)) {
+    throw permanent("SANDBOX_Q02_PROVIDER_FENCE_REJECTED");
+  }
+  const orderResponse = await squareRequest(
+    "GET", `/v2/orders/${encodeURIComponent(payment.order_id)}`, null, env,
+  );
+  if (!sandboxQ02ProviderReady(event, payment, orderResponse.order, env)) {
+    throw permanent("SANDBOX_Q02_PROVIDER_FENCE_REJECTED");
+  }
+  await markWebhook(env, event, "IGNORED", "NORMAL_ORDER_WITHOUT_LINKED_CUSTOMER");
+}
+
+function sandboxQ01ProviderIdReady(value) {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{7,191}$/.test(value);
+}
+
+function sandboxQ01ProviderEpochNanoseconds(value) {
+  if (typeof value !== "string" || value.length < 20 || value.length > 30) return null;
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?Z$/);
+  if (!match) return null;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, fraction = ""] = match;
+  const secondIso = `${yearText}-${monthText}-${dayText}T${hourText}:${minuteText}:${secondText}Z`;
+  const epochMilliseconds = Date.parse(secondIso);
+  if (!Number.isFinite(epochMilliseconds)) return null;
+  const date = new Date(epochMilliseconds);
+  if (date.getUTCFullYear() !== Number(yearText) || date.getUTCMonth() + 1 !== Number(monthText) ||
+      date.getUTCDate() !== Number(dayText) || date.getUTCHours() !== Number(hourText) ||
+      date.getUTCMinutes() !== Number(minuteText) || date.getUTCSeconds() !== Number(secondText)) return null;
+  return BigInt(epochMilliseconds) * 1_000_000n +
+    BigInt((fraction + "000000000").slice(0, 9));
+}
+
+function sandboxQ01ProviderTimestampReady(value) {
+  const epochNanoseconds = sandboxQ01ProviderEpochNanoseconds(value);
+  return epochNanoseconds !== null &&
+    epochNanoseconds <= (BigInt(Date.now()) + 5_000n) * 1_000_000n;
+}
+
+function sandboxQ01ProviderTimelineReady(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const hasCreated = value.created_at !== undefined;
+  const hasUpdated = value.updated_at !== undefined;
+  const createdAt = hasCreated ? sandboxQ01ProviderEpochNanoseconds(value.created_at) : null;
+  const updatedAt = hasUpdated ? sandboxQ01ProviderEpochNanoseconds(value.updated_at) : null;
+  if (createdAt === null || updatedAt === null || !sandboxQ01ProviderTimestampReady(value.created_at) ||
+      !sandboxQ01ProviderTimestampReady(value.updated_at)) return false;
+  return createdAt <= updatedAt;
+}
+
+function sandboxQ01PaymentReady(payment, event, env) {
+  return payment && payment.id === event.object_id && payment.status === "COMPLETED" &&
+    payment.location_id === env.SQUARE_LOCATION_ID && payment.customer_id == null &&
+    sandboxQ01ProviderIdReady(payment.order_id) &&
+    Number.isInteger(payment.amount_money?.amount) && payment.amount_money.amount === 100 &&
+    payment.amount_money.currency === "USD" && sandboxQ01ProviderTimelineReady(payment);
+}
+
+function sandboxQ01OrderReady(order, payment, env) {
+  if (!Array.isArray(order?.line_items) ||
+      !(order?.discounts == null || (Array.isArray(order.discounts) && order.discounts.length === 0))) return false;
+  const lines = order.line_items;
+  const total = order?.net_amounts?.total_money;
+  return order && order.id === payment.order_id && order.state === "COMPLETED" &&
+    order.location_id === env.SQUARE_LOCATION_ID && order.customer_id == null &&
+    lines.length === 1 && lines[0]?.quantity === "1" &&
+    (lines[0].applied_discounts == null ||
+      (Array.isArray(lines[0].applied_discounts) && lines[0].applied_discounts.length === 0)) &&
+    lines[0]?.catalog_object_id == null && lines[0]?.name === SANDBOX_Q01_FIXTURE_LINE_NAME &&
+    Number.isInteger(lines[0]?.base_price_money?.amount) && lines[0].base_price_money.amount === 100 &&
+    lines[0]?.base_price_money?.currency === "USD" &&
+    Number.isInteger(lines[0]?.total_money?.amount) && lines[0].total_money.amount === 100 &&
+    lines[0]?.total_money?.currency === "USD" && Number.isInteger(total?.amount) && total.amount === 100 &&
+    total?.currency === "USD" && sandboxQ01ProviderTimelineReady(order);
+}
+
+async function processSandboxQ01Payment(event, env) {
+  const fence = await preflightSandboxQ01Provider(env, event);
+  const abort = new AbortController();
+  const timeoutId = setTimeout(() => abort.abort(), fence.timeout_ms);
+  try {
+    const transport = Object.freeze({ signal: abort.signal, maxResponseBytes: SANDBOX_Q01_PROVIDER_MAX_BYTES });
+    const paymentResponse = await squareRequest(
+      "GET", `/v2/payments/${encodeURIComponent(event.object_id)}`, null, env, transport,
+    );
+    const payment = paymentResponse.payment;
+    if (!sandboxQ01PaymentReady(payment, event, env)) throw permanent("SANDBOX_Q01_PAYMENT_INVALID");
+    const orderResponse = await squareRequest(
+      "GET", `/v2/orders/${encodeURIComponent(payment.order_id)}`, null, env, transport,
+    );
+    const order = orderResponse.order;
+    if (!sandboxQ01OrderReady(order, payment, env)) throw permanent("SANDBOX_Q01_ORDER_INVALID");
+    await commitSandboxQ01Terminal(env, event, payment, order);
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 async function recordOrdinaryPurchase(claim, payment, order, event, env) {
@@ -983,6 +2495,19 @@ async function processRefundEvent(event, env) {
       originalPayment.order_id !== purchase.square_order_id || originalPayment.location_id !== env.SQUARE_LOCATION_ID ||
       originalPayment.amount_money?.currency !== currency) {
     throw permanent("REFUND_PAYMENT_MISMATCH");
+  }
+  const sandboxAdmission = event?.[SANDBOX_O01_ADMISSION];
+  if (sandboxAdmission) {
+    await commitSandboxO01Business(env, "commitRefundBusiness", {
+      admission: sandboxAdmission,
+      event_id: event.event_id,
+      refund,
+      original_payment: originalPayment,
+      purchase,
+      refund_amount: amount,
+      refund_currency: currency,
+    });
+    return;
   }
   const refundScope = amount >= Number(purchase.net_amount) ? "full" : "partial";
   const now = new Date().toISOString();
@@ -1163,32 +2688,213 @@ async function cleanupExpiredPasses(env) {
   `, [new Date().toISOString()]);
 }
 
+function sandboxO01AppsOutcome(response) {
+  const keys = ["ok", "operation", "event_commit_result", "square_event_type", "order_event_id",
+    "redemption_event_id", "reversal_event_id", "redemption_result", "rows_appended",
+    "connector_contract_version"];
+  if (!exactObject(response, keys)) throw new ConnectorError("APPS_CONTRACT_INVALID", 502);
+  return Object.freeze({
+    kind: "done",
+    event_commit_result: response.event_commit_result,
+    order_event_id: response.order_event_id,
+    redemption_event_id: response.redemption_event_id,
+    reversal_event_id: response.reversal_event_id,
+    redemption_result: response.redemption_result,
+    rows_appended: response.rows_appended,
+  });
+}
+
+async function processSandboxO01Outbox(item, env) {
+  let payload;
+  try { payload = JSON.parse(item.payload_json); } catch { await failSandboxO01Outbox(env, item); }
+  const fence = await preflightSandboxO01External(env, item);
+  const abort = new AbortController();
+  const timeoutId = setTimeout(() => abort.abort(), fence.timeout_ms);
+  let outcome;
+  try {
+    const transport = Object.freeze({ signal: abort.signal, maxResponseBytes: 32 * 1024 });
+    if (item.action === "REMOVE_ELIGIBLE_GROUP") {
+      const response = await squareRequest(
+        "DELETE",
+        `/v2/customers/${encodeURIComponent(payload.square_customer_id)}/groups/${encodeURIComponent(env.SQUARE_ELIGIBLE_GROUP_ID)}`,
+        null,
+        env,
+        transport,
+      );
+      if (!exactObject(response, [])) throw new ConnectorError("SQUARE_RESPONSE_INVALID", 502);
+      outcome = Object.freeze({ kind: "done", square_empty: true });
+    } else if (item.action === "ADD_REDEEMED_GROUP") {
+      const response = await squareRequest(
+        "PUT",
+        `/v2/customers/${encodeURIComponent(payload.square_customer_id)}/groups/${encodeURIComponent(env.SQUARE_REDEEMED_GROUP_ID)}`,
+        {},
+        env,
+        transport,
+      );
+      if (!exactObject(response, [])) throw new ConnectorError("SQUARE_RESPONSE_INVALID", 502);
+      outcome = Object.freeze({ kind: "done", square_empty: true });
+    } else if (["APPS_RECORD_REDEMPTION", "APPS_RECORD_REFUND_REVIEW"].includes(item.action)) {
+      const response = await appsCall("event_commit", payload, env, transport);
+      assertAppsResponse(response, "event_commit", "");
+      validateAppsEventResponse(response, payload);
+      outcome = sandboxO01AppsOutcome(response);
+    } else {
+      throw permanent("OUTBOX_ACTION_INVALID");
+    }
+  } catch (error) {
+    if (error?.[SANDBOX_O01_SAFE_APPS_RETRY] === true) {
+      await commitSandboxO01Outbox(env, item, Object.freeze({
+        kind: "retry", error_code: "APPS_EVENT_COMMIT_FAILED",
+      }));
+      throw error;
+    }
+    await failSandboxO01Outbox(env, item);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+  await commitSandboxO01Outbox(env, item, outcome);
+}
+
+async function withSandboxP02ProviderTimeout(timeoutMs, callback) {
+  const abort = new AbortController();
+  const timeoutId = setTimeout(() => abort.abort(), timeoutMs);
+  try {
+    return await callback(Object.freeze({ signal: abort.signal, maxResponseBytes: 32 * 1024 }));
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function processSandboxP02Recovery(item, admission, env) {
+  let fence;
+  try {
+    fence = await preflightSandboxP02Provider(env, admission);
+  } catch {
+    await invalidateSandboxP02(env, admission, "provider_precheck_failed");
+  }
+  let customer;
+  try {
+    customer = await withSandboxP02ProviderTimeout(
+      fence.timeout_ms, (transport) => retrieveCustomer(fence.customer_id, env, transport),
+    );
+  } catch {
+    await invalidateSandboxP02(env, admission, "provider_precheck_failed");
+  }
+  const before = sandboxP02ProviderEvidence(customer);
+  if (!sandboxP02ProviderEvidenceReady(before, fence)) {
+    await invalidateSandboxP02(env, admission, "provider_drift");
+  }
+  if (!before.group_ids.includes(fence.eligible_group_id)) {
+    await commitSandboxP02Complete(env, admission, before);
+    return;
+  }
+
+  let deleteFailed = false;
+  try {
+    await withSandboxP02ProviderTimeout(fence.timeout_ms, async (transport) => {
+      const response = await squareRequest(
+        "DELETE",
+        `/v2/customers/${encodeURIComponent(fence.customer_id)}/groups/${encodeURIComponent(fence.eligible_group_id)}`,
+        null,
+        env,
+        transport,
+      );
+      if (!exactObject(response, [])) throw new ConnectorError("SQUARE_RESPONSE_INVALID", 502);
+    });
+  } catch {
+    deleteFailed = true;
+  }
+
+  let verifiedCustomer;
+  try {
+    verifiedCustomer = await withSandboxP02ProviderTimeout(
+      fence.timeout_ms, (transport) => retrieveCustomer(fence.customer_id, env, transport),
+    );
+  } catch {
+    await invalidateSandboxP02(env, admission, deleteFailed ? "delete_failed" : "verification_failed");
+  }
+  const verified = sandboxP02ProviderEvidence(verifiedCustomer);
+  if (!sandboxP02ProviderEvidenceReady(verified, fence)) {
+    await invalidateSandboxP02(env, admission, "provider_drift");
+  }
+  if (verified.group_ids.includes(fence.eligible_group_id)) {
+    await invalidateSandboxP02(env, admission, "membership_still_present");
+  }
+  await commitSandboxP02Complete(env, admission, verified);
+}
+
 async function processOutboxItem(outboxId, env) {
   const item = await dbFirst(env, "outbox_get", `
     SELECT * FROM square_outbox WHERE outbox_id = ?1
   `, [outboxId]);
   if (!item || item.state === "DONE" || item.state === "DEAD") return;
-  const leaseStartedAt = new Date().toISOString();
-  const leaseToken = crypto.randomUUID();
-  const leaseExpiresAt = new Date(Date.now() + processingLeaseSeconds(env) * 1000).toISOString();
-  const acquired = await dbRun(env, "outbox_processing", `
-    UPDATE square_outbox
-       SET state = 'PROCESSING', attempts = attempts + 1, updated_at = ?1,
-           lease_token = ?2, lease_expires_at = ?3
-     WHERE outbox_id = ?4
-       AND (
-         state IN ('PENDING', 'RETRY')
-         OR (state = 'PROCESSING' AND (lease_expires_at IS NULL OR lease_expires_at <= ?1))
-       )
-  `, [leaseStartedAt, leaseToken, leaseExpiresAt, outboxId]);
-  if (dbChanges(acquired) !== 1) return;
+  const sandboxP02Acquisition = await maybeAcquireSandboxP02(env, item);
+  if (sandboxP02Acquisition) {
+    if (!sandboxP02Acquisition.acquired) return;
+    if (sandboxP02Acquisition.action === "wait_for_apps") {
+      throw transient("SANDBOX_FAULT_APPS_REDEMPTION_NOT_DONE");
+    }
+    Object.assign(item, JSON.parse(sandboxP02Acquisition.outbox_snapshot_json));
+    Object.defineProperty(item, SANDBOX_P02_ADMISSION, {
+      configurable: false,
+      enumerable: false,
+      value: sandboxP02Acquisition,
+      writable: false,
+    });
+    if (sandboxP02Acquisition.action === "fault_removal") {
+      await commitSandboxP02Fault(env, sandboxP02Acquisition);
+      return;
+    }
+    if (sandboxP02Acquisition.action === "recover_removal") {
+      await processSandboxP02Recovery(item, sandboxP02Acquisition, env);
+      return;
+    }
+    throw permanent("SANDBOX_P02_ACQUISITION_INVALID");
+  }
+  const sandboxAcquisition = await maybeAcquireSandboxO01(env, "outbox", outboxId);
+  let leaseStartedAt;
+  let leaseToken;
+  let leaseExpiresAt;
+  if (sandboxAcquisition) {
+    if (!sandboxAcquisition.acquired) return;
+    ({ lease_started_at: leaseStartedAt, lease_token: leaseToken,
+      lease_expires_at: leaseExpiresAt } = sandboxAcquisition);
+    Object.assign(item, sandboxO01AcquiredRecord(sandboxAcquisition, "outbox"));
+    Object.defineProperty(item, SANDBOX_O01_ADMISSION, {
+      configurable: false,
+      enumerable: false,
+      value: sandboxAcquisition,
+      writable: false,
+    });
+  } else {
+    leaseStartedAt = new Date().toISOString();
+    leaseToken = crypto.randomUUID();
+    leaseExpiresAt = new Date(Date.now() + processingLeaseSeconds(env) * 1000).toISOString();
+    const acquired = await dbRun(env, "outbox_processing", `
+      UPDATE square_outbox
+         SET state = 'PROCESSING', attempts = attempts + 1, updated_at = ?1,
+             lease_token = ?2, lease_expires_at = ?3
+       WHERE outbox_id = ?4
+         AND (
+           state = 'PENDING'
+           OR (state = 'RETRY' AND available_at IS NOT NULL AND available_at <= ?1)
+           OR (state = 'PROCESSING' AND (lease_expires_at IS NULL OR lease_expires_at <= ?1))
+         )
+    `, [leaseStartedAt, leaseToken, leaseExpiresAt, outboxId]);
+    if (dbChanges(acquired) !== 1) return;
+    item.attempts = Number(item.attempts || 0) + 1;
+  }
   item.state = "PROCESSING";
-  item.attempts = Number(item.attempts || 0) + 1;
+  item.updated_at = leaseStartedAt;
   item.lease_token = leaseToken;
   item.lease_expires_at = leaseExpiresAt;
   // See the webhook equivalent above. Exact-target matching plus the atomic
   // one-shot ledger prevents a broader or repeated interruption.
   await maybeSandboxFault(env, "QUEUE_POST_LEASE_INTERRUPT", outboxId);
+  if (sandboxAcquisition?.acquired) {
+    await processSandboxO01Outbox(item, env);
+    return;
+  }
   try {
     let payload;
     try { payload = JSON.parse(item.payload_json); } catch { throw permanent("OUTBOX_PAYLOAD_INVALID"); }
@@ -1324,8 +3030,52 @@ const APPS_OPERATIONS = Object.freeze({
   },
 });
 
-async function appsCall(action, fields, env) {
+function exactTransportOptions(options) {
+  if (options === undefined || options === null) return null;
+  if (!exactObject(options, ["maxResponseBytes", "signal"]) ||
+      !Number.isInteger(options.maxResponseBytes) || options.maxResponseBytes < 2 ||
+      options.maxResponseBytes > 256 * 1024 || !options.signal ||
+      typeof options.signal.aborted !== "boolean" || typeof options.signal.addEventListener !== "function") {
+    throw new ConnectorError("TRANSPORT_OPTIONS_INVALID", 500);
+  }
+  return options;
+}
+
+async function boundedResponseText(response, maximumBytes) {
+  if (!response?.body) return "";
+  if (typeof response.body.getReader !== "function") {
+    throw new ConnectorError("RESPONSE_STREAM_REQUIRED", 502);
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!(value instanceof Uint8Array)) throw new ConnectorError("RESPONSE_STREAM_INVALID", 502);
+      total += value.byteLength;
+      if (total > maximumBytes) {
+        try { await reader.cancel(); } catch {}
+        throw new ConnectorError("RESPONSE_TOO_LARGE", 502);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    try { reader.releaseLock(); } catch {}
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+async function appsCall(action, fields, env, options = null) {
   if (!env.APPS_SCRIPT_URL || !env.APPS_SCRIPT_SHARED_SECRET) throw new ConnectorError("APPS_NOT_CONFIGURED", 503);
+  const transport = exactTransportOptions(options);
   const operation = APPS_OPERATIONS[action];
   if (!operation) throw new ConnectorError("APPS_OPERATION_INVALID", 500);
   const values = {
@@ -1353,13 +3103,22 @@ async function appsCall(action, fields, env) {
       headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
       body,
       redirect: "follow",
+      ...(transport ? { signal: transport.signal } : {}),
     });
   } catch {
     throw transient("APPS_REQUEST_FAILED");
   }
   let text;
-  try { text = await response.text(); } catch { throw transient("APPS_REQUEST_FAILED"); }
-  if (encoder.encode(text).byteLength > 32 * 1024) throw new ConnectorError("APPS_RESPONSE_TOO_LARGE", 502);
+  try { text = transport
+    ? await boundedResponseText(response, transport.maxResponseBytes)
+    : await response.text(); }
+  catch (error) {
+    if (error?.code === "RESPONSE_TOO_LARGE") throw new ConnectorError("APPS_RESPONSE_TOO_LARGE", 502);
+    throw transient("APPS_REQUEST_FAILED");
+  }
+  if (!transport && encoder.encode(text).byteLength > 32 * 1024) {
+    throw new ConnectorError("APPS_RESPONSE_TOO_LARGE", 502);
+  }
   let parsed;
   try { parsed = JSON.parse(text); } catch {
     if (!response.ok) throw transient("APPS_REQUEST_FAILED");
@@ -1377,7 +3136,15 @@ function appsResponseError(action, response) {
     return new ConnectorError("APPS_CONTRACT_INVALID", 502);
   }
   const transientCode = `${action}_failed`;
-  if (response.code === transientCode) return transient(`APPS_${action.toUpperCase()}_FAILED`);
+  if (response.code === transientCode) {
+    const error = transient(`APPS_${action.toUpperCase()}_FAILED`);
+    if (action === "event_commit") {
+      Object.defineProperty(error, SANDBOX_O01_SAFE_APPS_RETRY, {
+        configurable: false, enumerable: false, value: true, writable: false,
+      });
+    }
+    return error;
+  }
   const permanentCodes = new Set(["connector_auth_failed", "square_journey_disabled", "square_journey_not_configured"]);
   if (permanentCodes.has(response.code)) return new ConnectorError("APPS_REQUEST_REJECTED", 502);
   return new ConnectorError("APPS_CONTRACT_INVALID", 502);
@@ -1425,8 +3192,9 @@ function rejectEmailFields(value) {
   }
 }
 
-async function squareRequest(method, path, body, env) {
+async function squareRequest(method, path, body, env, options = null) {
   if (!env.SQUARE_ACCESS_TOKEN) throw new ConnectorError("SQUARE_NOT_CONFIGURED", 503);
+  const transport = exactTransportOptions(options);
   if (env.SQUARE_API_VERSION !== EXPECTED_SQUARE_VERSION) throw new ConnectorError("SQUARE_VERSION_MISMATCH", 503);
   const base = configuredSquareApiBase(env);
   if (!base) throw new ConnectorError("SQUARE_ENVIRONMENT_MISMATCH", 503);
@@ -1436,6 +3204,7 @@ async function squareRequest(method, path, body, env) {
     Accept: "application/json",
   };
   const init = { method, headers };
+  if (transport) init.signal = transport.signal;
   if (body !== null) {
     headers["Content-Type"] = "application/json";
     init.body = JSON.stringify(body);
@@ -1443,7 +3212,14 @@ async function squareRequest(method, path, body, env) {
   let response;
   try { response = await fetch(`${base}${path}`, init); }
   catch { throw transient("SQUARE_NETWORK_ERROR"); }
-  const text = await response.text();
+  let text;
+  try { text = transport
+    ? await boundedResponseText(response, transport.maxResponseBytes)
+    : await response.text(); }
+  catch (error) {
+    if (error?.code === "RESPONSE_TOO_LARGE") throw transient("SQUARE_RESPONSE_TOO_LARGE");
+    throw transient("SQUARE_NETWORK_ERROR");
+  }
   let parsed = {};
   if (text) {
     try { parsed = JSON.parse(text); } catch { throw transient("SQUARE_RESPONSE_INVALID"); }
@@ -1877,6 +3653,42 @@ function escapeHtml(value) {
 }
 
 async function markWebhook(env, event, state, errorCode) {
+  const q02Admission = event?.[SANDBOX_Q02_ADMISSION];
+  if (q02Admission) {
+    const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+    if (!controller || typeof controller.commitQ02Webhook !== "function") {
+      throw transient("SANDBOX_Q02_COMMIT_UNAVAILABLE");
+    }
+    const committed = await controller.commitQ02Webhook(env, {
+      admission: q02Admission,
+      event_id: event.event_id,
+      state,
+      error_code: errorCode,
+      attempts: event.attempts,
+      lease_token: event.lease_token,
+      lease_expires_at: event.lease_expires_at,
+    });
+    if (committed !== true) throw transient("SANDBOX_Q02_COMMIT_UNAVAILABLE");
+    return;
+  }
+  const admission = event?.[SANDBOX_O01_ADMISSION];
+  if (admission) {
+    const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+    if (!controller || typeof controller.commitWebhook !== "function") {
+      throw transient("SANDBOX_O01_COMMIT_UNAVAILABLE");
+    }
+    const committed = await controller.commitWebhook(env, {
+      admission,
+      event_id: event.event_id,
+      state,
+      error_code: errorCode,
+      attempts: event.attempts,
+      lease_token: event.lease_token,
+      lease_expires_at: event.lease_expires_at,
+    });
+    if (committed !== true) throw transient("SANDBOX_O01_COMMIT_UNAVAILABLE");
+    return;
+  }
   const now = new Date().toISOString();
   const availableAt = state === "RETRY"
     ? new Date(Date.parse(now) + retryDelay(Number(event.attempts || 1)) * 1000).toISOString()

@@ -4,23 +4,56 @@ import { randomBytes } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
 import {
-  formatPreparedFaultConfiguration,
-  prepareFaultConfiguration,
-} from "./prepare-square-sandbox-fault.mjs";
+  computeSandboxFaultAppsUrlDigest,
+  computeSandboxFaultSourceDigest,
+  computeSandboxFaultTargetDigest,
+} from "../square-worker/src/sandbox-faults.mjs";
 
 const MODE = "SQUARE_GROUP_REMOVE_FAILURE";
 const CONFIRMATION = "P02_GROUP_REMOVE_SANDBOX_ONLY";
+const SECRET_NAMES = Object.freeze([
+  "SQUARE_SANDBOX_FAULT_MODE",
+  "SQUARE_SANDBOX_FAULT_TARGET_DIGEST",
+  "SQUARE_SANDBOX_FAULT_RUN_TOKEN",
+  "SQUARE_SANDBOX_FAULT_APPS_URL_DIGEST",
+  "SQUARE_SANDBOX_FAULT_FORBIDDEN_APPS_URL_DIGEST",
+  "SQUARE_SANDBOX_FAULT_SOURCE_DIGEST",
+  "SQUARE_SANDBOX_FAULT_HASH_SECRET",
+]);
 
 function reject() {
   throw new Error("INPUT_REJECTED");
 }
 
 export function deriveP02RemovalSelector(claimId) {
-  if (typeof claimId !== "string" || !/^[A-Za-z0-9_-]{8,140}$/.test(claimId) ||
-      /^(?:out_remove_|out_apps_redeem_|out_add_redeemed_)/.test(claimId)) reject();
+  if (typeof claimId !== "string" ||
+      !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(claimId)) reject();
   const selector = `out_remove_${claimId}`;
   if (!/^out_remove_[A-Za-z0-9_-]{8,140}$/.test(selector) || selector.length > 160) reject();
   return selector;
+}
+
+function validPreparedP02(value) {
+  return value && typeof value === "object" && value.status === "PREPARED" && value.mode === MODE &&
+    /^[a-f0-9]{64}$/.test(value.targetDigest) && /^[a-f0-9]{64}$/.test(value.sourceDigest) &&
+    /^[A-Za-z0-9_-]{32,128}$/.test(value.runToken) &&
+    /^[a-f0-9]{64}$/.test(value.appsUrlDigest) &&
+    /^[a-f0-9]{64}$/.test(value.forbiddenAppsUrlDigest) &&
+    value.appsUrlDigest !== value.forbiddenAppsUrlDigest;
+}
+
+export function formatPreparedP02FaultConfiguration(value) {
+  if (!validPreparedP02(value)) return "STATUS=INPUT_REJECTED";
+  return [
+    "STATUS=PREPARED",
+    `${SECRET_NAMES[0]}=${value.mode}`,
+    `${SECRET_NAMES[1]}=${value.targetDigest}`,
+    `${SECRET_NAMES[2]}=${value.runToken}`,
+    `${SECRET_NAMES[3]}=${value.appsUrlDigest}`,
+    `${SECRET_NAMES[4]}=${value.forbiddenAppsUrlDigest}`,
+    `${SECRET_NAMES[5]}=${value.sourceDigest}`,
+    `${SECRET_NAMES[6]}=[HIDDEN_INPUT_NOT_PRINTED]`,
+  ].join("\n");
 }
 
 export async function prepareP02FaultConfiguration({
@@ -33,17 +66,27 @@ export async function prepareP02FaultConfiguration({
   randomBytesImpl = randomBytes,
 } = {}) {
   if (confirmation !== CONFIRMATION ||
-      typeof sourceWebhookEventId !== "string" || !/^[A-Za-z0-9_-]{8,160}$/.test(sourceWebhookEventId)) reject();
+      typeof sourceWebhookEventId !== "string" ||
+      !/^[A-Za-z0-9][A-Za-z0-9_-]{7,159}$/.test(sourceWebhookEventId)) reject();
   const selector = deriveP02RemovalSelector(claimId);
-  return prepareFaultConfiguration({
-    mode: MODE,
-    selector,
-    sourceSelector: sourceWebhookEventId,
-    hashSecret,
-    sandboxAppsUrl,
-    forbiddenAppsUrl,
-    randomBytesImpl,
-  });
+  const runToken = randomBytesImpl(32).toString("base64url");
+  if (!/^[A-Za-z0-9_-]{43}$/.test(runToken)) reject();
+  try {
+    const [targetDigest, sourceDigest, appsUrlDigest, forbiddenAppsUrlDigest] = await Promise.all([
+      computeSandboxFaultTargetDigest(MODE, selector, hashSecret, runToken),
+      computeSandboxFaultSourceDigest(MODE, sourceWebhookEventId, hashSecret, runToken),
+      computeSandboxFaultAppsUrlDigest(MODE, sandboxAppsUrl, hashSecret, runToken),
+      computeSandboxFaultAppsUrlDigest(MODE, forbiddenAppsUrl, hashSecret, runToken),
+    ]);
+    const result = {
+      status: "PREPARED", mode: MODE, targetDigest, runToken,
+      appsUrlDigest, forbiddenAppsUrlDigest, sourceDigest,
+    };
+    if (!validPreparedP02(result)) reject();
+    return result;
+  } catch {
+    reject();
+  }
 }
 
 function restoreTerminal() {
@@ -134,7 +177,7 @@ export async function p02FaultMain(argv = process.argv.slice(2), dependencies = 
       confirmation,
       randomBytesImpl: dependencies.randomBytesImpl || randomBytes,
     });
-    print(formatPreparedFaultConfiguration(result));
+    print(formatPreparedP02FaultConfiguration(result));
     return 0;
   } catch {
     print("STATUS=INPUT_REJECTED");

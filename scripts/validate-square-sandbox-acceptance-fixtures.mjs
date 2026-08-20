@@ -25,6 +25,7 @@ import {
 } from "./prepare-square-sandbox-webhook-fixture.mjs";
 import {
   deriveP02RemovalSelector,
+  formatPreparedP02FaultConfiguration,
   p02FaultMain,
   prepareP02FaultConfiguration,
   __test as p02Test,
@@ -51,6 +52,21 @@ const fixture = Object.freeze({
   objectId: "SANDBOX_PAYMENT_PRIVATE_001",
 });
 const approval = Object.freeze({ ...fixture });
+const replayFixture = Object.freeze({
+  eventType: "refund.updated",
+  eventId: "sandbox-replay-event-001",
+  objectId: "SANDBOX_REFUND_CONFIRMED_ABSENT_00000001",
+});
+const o01RefundFixture = Object.freeze({
+  eventType: "refund.updated",
+  eventId: "sandbox-o01-refund-event-001",
+  objectId: "sandbox-o01-refund-object-001",
+});
+const o01PaymentFixture = Object.freeze({
+  eventType: "payment.updated",
+  eventId: "sandbox-o01-payment-event-001",
+  objectId: "sandbox-o01-payment-object-001",
+});
 const confirmation = "SANDBOX_WEBHOOK_FIXTURE_ONLY";
 const exactBody = buildExactWebhookFixture({ caseName, ...fixture });
 assert.equal(exactBody.endsWith("\n"), false);
@@ -66,8 +82,125 @@ for (const [candidateCase, eventType] of [
   ["signed-recognized", "refund.created"],
   ["replay", "refund.updated"],
 ]) {
-  const body = buildExactWebhookFixture({ ...fixture, caseName: candidateCase, eventType });
-  assert.equal(squareSandboxWebhookTargetDigest(body), independentWebhookTargetDigest({ ...approval, eventType }));
+  const candidate = candidateCase === "replay"
+    ? { ...replayFixture, eventType }
+    : { ...fixture, eventType };
+  const body = buildExactWebhookFixture({ ...candidate, caseName: candidateCase });
+  assert.equal(squareSandboxWebhookTargetDigest(body), independentWebhookTargetDigest(candidate));
+}
+for (const invalidReplay of [
+  { ...replayFixture, eventType: "payment.updated" },
+  { ...replayFixture, eventType: "refund.created" },
+  { ...replayFixture, eventId: `A${"b".repeat(160)}` },
+  { ...replayFixture, eventId: "_sandbox-replay-event-001" },
+  { ...replayFixture, eventId: "-sandbox-replay-event-001" },
+  { ...replayFixture, objectId: "normal-looking-refund-id" },
+  { ...replayFixture, objectId: "SANDBOX_REFUND_CONFIRMED_ABSENT_SHORT" },
+  { ...replayFixture, objectId: "SANDBOX_REFUND_CONFIRMED_ABSENT_lowercase" },
+]) {
+  assert.throws(() => buildExactWebhookFixture({ caseName: "replay", ...invalidReplay }), /INPUT_REJECTED/);
+}
+for (const [o01Case, validFixture, invalidFixtures] of [
+  ["o01-refund", o01RefundFixture, [
+    { ...o01RefundFixture, eventType: "refund.created" },
+    { ...o01RefundFixture, eventType: "payment.updated" },
+    { ...o01RefundFixture, eventId: "_sandbox-o01-refund-event-001" },
+    { ...o01RefundFixture, objectId: `A${"b".repeat(149)}` },
+  ]],
+  ["o01-payment", o01PaymentFixture, [
+    { ...o01PaymentFixture, eventType: "payment.created" },
+    { ...o01PaymentFixture, eventType: "refund.updated" },
+    { ...o01PaymentFixture, eventId: "-sandbox-o01-payment-event-001" },
+    { ...o01PaymentFixture, objectId: `A${"b".repeat(192)}` },
+  ]],
+]) {
+  const body = buildExactWebhookFixture({ caseName: o01Case, ...validFixture });
+  assert.equal(squareSandboxWebhookTargetDigest(body), independentWebhookTargetDigest(validFixture));
+  for (const invalidFixture of invalidFixtures) {
+    assert.throws(() => buildExactWebhookFixture({ caseName: o01Case, ...invalidFixture }), /INPUT_REJECTED/);
+  }
+}
+assert.doesNotThrow(() => buildExactWebhookFixture({
+  caseName: "o01-refund", ...o01RefundFixture, objectId: `A${"b".repeat(148)}`,
+}));
+assert.doesNotThrow(() => buildExactWebhookFixture({
+  caseName: "o01-payment", ...o01PaymentFixture, objectId: `A${"b".repeat(191)}`,
+}));
+
+const o01Packages = [];
+try {
+  for (const [o01Case, o01Fixture] of [
+    ["o01-refund", o01RefundFixture],
+    ["o01-payment", o01PaymentFixture],
+  ]) {
+    const prepared = await createWebhookFixturePackage({
+      caseName: o01Case,
+      fixture: o01Fixture,
+      approval: { ...o01Fixture },
+      confirmation,
+    });
+    o01Packages.push(prepared.directory);
+    const inspected = await inspectWebhookFixturePackage(prepared.directory);
+    assert.equal(inspected.manifest.case_name, o01Case);
+    const manifestText = await readFile(path.join(prepared.directory, "manifest.json"), "utf8");
+    for (const privateValue of Object.values(o01Fixture)) assert.equal(manifestText.includes(privateValue), false);
+  }
+  assert.notEqual(o01Packages[0], o01Packages[1]);
+} finally {
+  for (const directory of o01Packages) {
+    await cleanupWebhookFixturePackage(directory).catch(async () => {
+      for (const name of ["event.json", "manifest.json"]) await unlink(path.join(directory, name)).catch(() => {});
+      await rmdir(directory).catch(() => {});
+    });
+  }
+}
+let replayPackage = "";
+try {
+  replayPackage = (await createWebhookFixturePackage({
+    caseName: "replay",
+    fixture: replayFixture,
+    approval: { ...replayFixture },
+    confirmation,
+  })).directory;
+  await inspectWebhookFixturePackage(replayPackage);
+  const eventPath = path.join(replayPackage, "event.json");
+  const replayBody = JSON.parse(await readFile(eventPath, "utf8"));
+  replayBody.type = "payment.updated";
+  replayBody.data.type = "payment";
+  await writeFile(eventPath, JSON.stringify(replayBody), { encoding: "utf8", mode: 0o600 });
+  await assert.rejects(() => inspectWebhookFixturePackage(replayPackage), /PACKAGE_REJECTED/);
+} finally {
+  if (replayPackage) {
+    for (const name of ["event.json", "manifest.json"]) await unlink(path.join(replayPackage, name)).catch(() => {});
+    await rmdir(replayPackage).catch(() => {});
+  }
+}
+
+let relabeledReplayPackage = "";
+try {
+  const normalObjectFixture = {
+    eventType: "refund.updated",
+    eventId: replayFixture.eventId,
+    objectId: "normal-looking-refund-id",
+  };
+  relabeledReplayPackage = (await createWebhookFixturePackage({
+    caseName: "signed-recognized",
+    fixture: normalObjectFixture,
+    approval: { ...normalObjectFixture },
+    confirmation,
+  })).directory;
+  const manifestPath = path.join(relabeledReplayPackage, "manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  manifest.case_name = "replay";
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  await assert.rejects(() => inspectWebhookFixturePackage(relabeledReplayPackage), /PACKAGE_REJECTED/);
+} finally {
+  if (relabeledReplayPackage) {
+    for (const name of ["event.json", "manifest.json"]) {
+      await unlink(path.join(relabeledReplayPackage, name)).catch(() => {});
+    }
+    await rmdir(relabeledReplayPackage).catch(() => {});
+  }
 }
 
 let promptCount = 0;
@@ -309,14 +442,16 @@ try {
   if (cliPackage) await cleanupWebhookFixturePackage(cliPackage).catch(() => {});
 }
 
-const claimId = "claim-private-acceptance-001";
+const claimId = "11111111-1111-4111-8111-111111111111";
 const sourceWebhookEventId = "source-webhook-private-001";
 const hashSecret = "temporary-p02-hmac-secret-0123456789abcdef";
 const sandboxAppsUrl = "https://script.google.com/macros/s/sandbox_fixture_deployment_identifier_1234567890/exec";
 const forbiddenAppsUrl = "https://script.google.com/macros/s/production_form_deployment_identifier_1234567890/exec";
 const p02Selector = deriveP02RemovalSelector(claimId);
 assert.equal(p02Selector, `out_remove_${claimId}`);
-for (const invalid of ["", "short", `out_remove_${claimId}`, "claim with spaces", "a".repeat(141)]) {
+for (const invalid of ["", "short", `out_remove_${claimId}`, "claim with spaces", "a".repeat(141),
+  "11111111-1111-3111-8111-111111111111", "11111111-1111-4111-7111-111111111111",
+  "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"]) {
   assert.throws(() => deriveP02RemovalSelector(invalid), /INPUT_REJECTED/);
 }
 const deterministicRunToken = (size) => Buffer.alloc(size, 0x31);
@@ -329,17 +464,22 @@ const p02Prepared = await prepareP02FaultConfiguration({
   confirmation: p02Test.CONFIRMATION,
   randomBytesImpl: deterministicRunToken,
 });
-const directPrepared = await prepareFaultConfiguration({
+let genericP02RandomCalls = 0;
+await assert.rejects(() => prepareFaultConfiguration({
   mode: p02Test.MODE,
   selector: p02Selector,
   sourceSelector: sourceWebhookEventId,
   hashSecret,
   sandboxAppsUrl,
   forbiddenAppsUrl,
-  randomBytesImpl: deterministicRunToken,
-});
-assert.deepEqual(p02Prepared, directPrepared);
-const p02Output = formatPreparedFaultConfiguration(p02Prepared);
+  randomBytesImpl: () => {
+    genericP02RandomCalls += 1;
+    return deterministicRunToken(32);
+  },
+}), /INPUT_REJECTED/);
+assert.equal(genericP02RandomCalls, 0);
+assert.equal(formatPreparedFaultConfiguration(p02Prepared), "STATUS=INPUT_REJECTED");
+const p02Output = formatPreparedP02FaultConfiguration(p02Prepared);
 assert.match(p02Output, /^STATUS=PREPARED$/m);
 assert.match(p02Output, /^SQUARE_SANDBOX_FAULT_SOURCE_DIGEST=[a-f0-9]{64}$/m);
 assert.match(p02Output, /^SQUARE_SANDBOX_FAULT_HASH_SECRET=\[HIDDEN_INPUT_NOT_PRINTED\]$/m);
@@ -377,5 +517,15 @@ await assert.rejects(() => prepareP02FaultConfiguration({
   forbiddenAppsUrl,
   confirmation: "WRONG",
 }), /INPUT_REJECTED/);
+for (const invalidSource of ["_source-webhook-private-001", "short", "source webhook private 001"]) {
+  await assert.rejects(() => prepareP02FaultConfiguration({
+    claimId,
+    sourceWebhookEventId: invalidSource,
+    hashSecret,
+    sandboxAppsUrl,
+    forbiddenAppsUrl,
+    confirmation: p02Test.CONFIRMATION,
+  }), /INPUT_REJECTED/);
+}
 
 process.stdout.write("Square sandbox acceptance fixture validation passed: default-inert hidden-input preparation, independent selector approval, exact-byte 0600 package, salted artifact integrity, narrow cleanup and non-disclosing P-02 derivation.\n");

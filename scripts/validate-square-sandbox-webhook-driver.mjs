@@ -3,6 +3,12 @@ import { createHmac } from "node:crypto";
 import { readFile, rmdir, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import sandboxWorker from "../square-worker/src/sandbox.mjs";
+import {
+  computeSandboxFaultAppsUrlDigest,
+  computeSandboxFaultTargetDigest,
+} from "../square-worker/src/sandbox-faults.mjs";
+
 import {
   buildExactWebhookFixture,
   cleanupWebhookFixturePackage,
@@ -33,9 +39,187 @@ const unrecognizedFixture = Object.freeze({
   eventId: "sandbox-event-unrecognized-001",
   objectId: "SYNTHETIC_CUSTOMER_001",
 });
+const replayFixture = Object.freeze({
+  eventType: "refund.updated",
+  eventId: "sandbox-event-replay-001",
+  objectId: "SANDBOX_REFUND_CONFIRMED_ABSENT_00000001",
+});
+const o01RefundFixture = Object.freeze({
+  eventType: "refund.updated",
+  eventId: "sandbox-o01-refund-event-001",
+  objectId: "sandbox-o01-refund-object-001",
+});
+const o01PaymentFixture = Object.freeze({
+  eventType: "payment.updated",
+  eventId: "sandbox-o01-payment-event-001",
+  objectId: "sandbox-o01-payment-object-001",
+});
+
+class ReplayIngressD1 {
+  constructor() {
+    this.webhooks = [];
+    this.operations = [];
+    this.connectorState = [];
+    this.claims = [];
+    this.passes = [];
+    this.purchases = [];
+    this.purchasePayments = [];
+    this.redemptions = [];
+    this.refundReviews = [];
+    this.outbox = [];
+  }
+
+  prepare(sql) {
+    const op = sql.match(/\/\*op:([a-z0-9_]+)\*\//i)?.[1];
+    assert.ok([
+      "sandbox_fault_consume", "webhook_enqueued", "webhook_get", "webhook_insert", "webhook_mark",
+      "webhook_processing",
+    ].includes(op));
+    this.operations.push(op);
+    let values = [];
+    return {
+      bind(...bound) { values = bound; return this; },
+      first: async () => {
+        assert.equal(op, "webhook_get");
+        const row = this.webhooks.find((candidate) => candidate.event_id === values[0]);
+        return row ? { ...row } : null;
+      },
+      run: async () => {
+        if (op === "sandbox_fault_consume") {
+          if (!this.connectorState.some((candidate) => candidate.state_key === values[0])) {
+            this.connectorState.push({ state_key: values[0], state_value: values[1], updated_at: values[2] });
+            return { success: true, meta: { changes: 1 } };
+          }
+          return { success: true, meta: { changes: 0 } };
+        }
+        if (op === "webhook_insert") {
+          if (!this.webhooks.some((candidate) => candidate.event_id === values[0])) {
+            this.webhooks.push({
+              event_id: values[0], event_type: values[1], object_id: values[2], merchant_id: values[3],
+              payload_json: values[4], state: "PENDING", attempts: 0, available_at: null,
+              last_error_code: null, lease_token: null, lease_expires_at: null,
+              created_at: values[5], updated_at: values[5],
+            });
+            return { success: true, meta: { changes: 1 } };
+          }
+          return { success: true, meta: { changes: 0 } };
+        }
+        if (op === "webhook_enqueued") {
+          const row = this.webhooks.find((candidate) => candidate.event_id === values[1]);
+          if (!row || row.state !== values[2] || row.updated_at !== values[3]) {
+            return { success: true, meta: { changes: 0 } };
+          }
+          Object.assign(row, { state: "ENQUEUED", available_at: null, updated_at: values[0] });
+          return { success: true, meta: { changes: 1 } };
+        }
+        if (op === "webhook_processing") {
+          const row = this.webhooks.find((candidate) => candidate.event_id === values[3]);
+          if (!row || !["PENDING", "ENQUEUED"].includes(row.state)) {
+            return { success: true, meta: { changes: 0 } };
+          }
+          Object.assign(row, {
+            state: "PROCESSING", attempts: row.attempts + 1, updated_at: values[0], available_at: null,
+            lease_token: values[1], lease_expires_at: values[2],
+          });
+          return { success: true, meta: { changes: 1 } };
+        }
+        assert.equal(op, "webhook_mark");
+        const row = this.webhooks.find((candidate) => candidate.event_id === values[4]);
+        if (!row || row.state !== "PROCESSING" || row.lease_token !== values[5]) {
+          return { success: true, meta: { changes: 0 } };
+        }
+        Object.assign(row, {
+          state: values[0], last_error_code: values[1], available_at: values[2],
+          payload_json: ["PROCESSED", "IGNORED", "REJECTED"].includes(values[0]) ? "{}" : row.payload_json,
+          updated_at: values[3], lease_token: null, lease_expires_at: null,
+        });
+        return { success: true, meta: { changes: 1 } };
+      },
+      webhooks: this.webhooks,
+    };
+  }
+}
+
+function replaySeedEnvironment(db, queue) {
+  return {
+    DB: db,
+    SQUARE_QUEUE: queue,
+    CONNECTOR_ENVIRONMENT: "sandbox",
+    ALLOWED_ORIGINS: new URL(sandboxUrl).origin,
+    SQUARE_ENVIRONMENT: "sandbox",
+    SQUARE_API_BASE_URL: "https://connect.squareupsandbox.com",
+    SQUARE_API_VERSION: "2026-07-15",
+    SQUARE_LOCATION_ID: "L34NX9YA4PGF6",
+    SQUARE_DISCOUNT_CATALOG_ID: "SANDBOX_DISCOUNT_50",
+    SQUARE_ELIGIBLE_GROUP_ID: "SANDBOX_GROUP_FIRST",
+    SQUARE_REDEEMED_GROUP_ID: "",
+    SQUARE_QUALIFYING_VARIATION_IDS: "SANDBOX_VARIATION_TEA",
+    SQUARE_MERCHANT_ID: "ML8W3CSGD2B71",
+    SQUARE_WEBHOOK_NOTIFICATION_URL: sandboxUrl,
+    TURNSTILE_SITE_KEY: "sandbox-turnstile-site-key",
+    TURNSTILE_EXPECTED_ACTION: "square_offer",
+    SQUARE_OFFER_ENABLED: "false",
+    SQUARE_WEBHOOK_ENABLED: "true",
+    SQUARE_PASS_ENABLED: "false",
+    SQUARE_CONSUMER_ENABLED: "false",
+    SQUARE_RECONCILIATION_ENABLED: "false",
+    SQUARE_SANDBOX_FAULTS_ENABLED: "false",
+    SQUARE_SANDBOX_TEST_HARNESS_ENABLED: "false",
+    SQUARE_CANARY_ONLY: "true",
+    SQUARE_CANARY_SUBMISSION_IDS: "",
+    SQUARE_ACCESS_TOKEN: "sandbox-square-token",
+    SQUARE_WEBHOOK_SIGNATURE_KEY: signingKey,
+    TURNSTILE_SECRET_KEY: "sandbox-turnstile-secret",
+    D1_HASH_SECRET: "sandbox-d1-hash-secret-at-least-thirty-two-bytes",
+    PASS_SESSION_SECRET: "sandbox-pass-secret-at-least-thirty-two-bytes",
+    APPS_SCRIPT_URL: "https://script.google.com/macros/s/sandbox-fixture-identifier-0001/exec",
+    APPS_SCRIPT_SHARED_SECRET: "sandbox-apps-secret-at-least-thirty-two-bytes",
+  };
+}
+
+async function replayIsolationEnvironment(db, queue) {
+  const mode = "QUEUE_REPLAY_ISOLATION";
+  const hashSecret = "replay-isolation-hash-secret-000000000001";
+  const runToken = "replay-isolation-run-token-000000000001";
+  const appsUrl = "https://script.google.com/macros/s/sandbox-fixture-identifier-0001/exec";
+  const forbiddenAppsUrl = "https://script.google.com/macros/s/production-fixture-identifier-0001/exec";
+  return {
+    ...replaySeedEnvironment(db, queue),
+    SQUARE_WEBHOOK_ENABLED: "false",
+    SQUARE_CONSUMER_ENABLED: "true",
+    SQUARE_CANARY_SUBMISSION_IDS: "sandbox-queue-control",
+    SQUARE_SANDBOX_CONTROL_PROFILE: mode,
+    SQUARE_SANDBOX_FAULT_MODE: mode,
+    SQUARE_SANDBOX_FAULT_TARGET_DIGEST: await computeSandboxFaultTargetDigest(
+      mode,
+      replayFixture.eventId,
+      hashSecret,
+      runToken,
+    ),
+    SQUARE_SANDBOX_FAULT_RUN_TOKEN: runToken,
+    SQUARE_SANDBOX_FAULT_APPS_URL_DIGEST: await computeSandboxFaultAppsUrlDigest(
+      mode,
+      appsUrl,
+      hashSecret,
+      runToken,
+    ),
+    SQUARE_SANDBOX_FAULT_FORBIDDEN_APPS_URL_DIGEST: await computeSandboxFaultAppsUrlDigest(
+      mode,
+      forbiddenAppsUrl,
+      hashSecret,
+      runToken,
+    ),
+    SQUARE_SANDBOX_FAULT_HASH_SECRET: hashSecret,
+    APPS_SCRIPT_URL: appsUrl,
+  };
+}
 
 function fixtureFor(caseName) {
-  return caseName === "signed-unrecognized" ? unrecognizedFixture : recognizedFixture;
+  if (caseName === "signed-unrecognized") return unrecognizedFixture;
+  if (caseName === "replay") return replayFixture;
+  if (caseName === "o01-refund") return o01RefundFixture;
+  if (caseName === "o01-payment") return o01PaymentFixture;
+  return recognizedFixture;
 }
 
 async function prepare(caseName) {
@@ -68,8 +252,23 @@ async function withPackage(caseName, action) {
   }
 }
 
+async function withO01Packages(action) {
+  const refund = await prepare("o01-refund");
+  let payment;
+  try {
+    payment = await prepare("o01-payment");
+    return await action({ refund, payment });
+  } finally {
+    if (payment) await cleanupCreatedPackage(payment.directory);
+    await cleanupCreatedPackage(refund.directory);
+  }
+}
+
 const recognized = buildExactWebhookFixture({ caseName: "signed-recognized", ...recognizedFixture });
 const unrecognized = buildExactWebhookFixture({ caseName: "signed-unrecognized", ...unrecognizedFixture });
+const replayBody = buildExactWebhookFixture({ caseName: "replay", ...replayFixture });
+const o01RefundBody = buildExactWebhookFixture({ caseName: "o01-refund", ...o01RefundFixture });
+const o01PaymentBody = buildExactWebhookFixture({ caseName: "o01-payment", ...o01PaymentFixture });
 
 assert.equal(isAllowedSandboxWebhookUrl(sandboxUrl), true);
 for (const rejected of [
@@ -83,11 +282,38 @@ for (const rejected of [
 }
 assert.equal(webhookBodyMatchesCase(recognized, "forged"), true);
 assert.equal(webhookBodyMatchesCase(recognized, "altered"), true);
-assert.equal(webhookBodyMatchesCase(recognized, "replay"), true);
+assert.equal(webhookBodyMatchesCase(recognized, "replay"), false);
+assert.equal(webhookBodyMatchesCase(replayBody, "replay"), true);
 assert.equal(webhookBodyMatchesCase(recognized, "signed-recognized"), true);
 assert.equal(webhookBodyMatchesCase(recognized, "signed-unrecognized"), false);
 assert.equal(webhookBodyMatchesCase(unrecognized, "signed-unrecognized"), true);
+assert.equal(webhookBodyMatchesCase(o01RefundBody, "o01-refund"), true);
+assert.equal(webhookBodyMatchesCase(o01PaymentBody, "o01-payment"), true);
+assert.equal(webhookBodyMatchesCase(o01RefundBody, "o01-payment"), false);
+assert.equal(webhookBodyMatchesCase(o01PaymentBody, "o01-refund"), false);
+assert.equal(webhookBodyMatchesCase(o01RefundBody, "o01"), false,
+  "the two-event driver has no single-body semantic shortcut");
 assert.match(squareSandboxWebhookTargetDigest(recognized), /^[0-9a-f]{64}$/);
+for (const rejectedReplayBody of [
+  buildExactWebhookFixture({
+    caseName: "signed-recognized",
+    ...recognizedFixture,
+    eventType: "refund.created",
+  }),
+  buildExactWebhookFixture({
+    caseName: "signed-recognized",
+    ...recognizedFixture,
+    eventType: "refund.updated",
+    eventId: `A${"b".repeat(160)}`,
+  }),
+  buildExactWebhookFixture({
+    caseName: "signed-recognized",
+    ...recognizedFixture,
+    eventType: "refund.updated",
+    eventId: replayFixture.eventId,
+    objectId: "normal-looking-refund-id",
+  }),
+]) assert.equal(webhookBodyMatchesCase(rejectedReplayBody, "replay"), false);
 
 const parsedRecognized = JSON.parse(recognized);
 for (const sameSelectorButNotExact of [
@@ -134,6 +360,31 @@ const refused = await executeWebhookSandboxCase({
 assert.equal(refused.result, "INPUT_REJECTED");
 assert.equal(refusedCalls, 0);
 assert.equal(refusedInspections, 0);
+
+const normalObjectReplayBody = buildExactWebhookFixture({
+  caseName: "signed-recognized",
+  eventType: "refund.updated",
+  eventId: replayFixture.eventId,
+  objectId: "normal-looking-refund-id",
+});
+let normalObjectReplayFetches = 0;
+const normalObjectReplay = await executeWebhookSandboxCase({
+  caseName: "replay",
+  notificationUrl: sandboxUrl,
+  packageDirectory: "semantic-replay-preflight",
+  signingKey,
+  inspectPackage: async () => ({
+    eventRecord: { bytes: Buffer.from(normalObjectReplayBody, "utf8") },
+    manifest: {
+      case_name: "replay",
+      byte_length: Buffer.byteLength(normalObjectReplayBody, "utf8"),
+      target_verification: { digest_hex: squareSandboxWebhookTargetDigest(normalObjectReplayBody) },
+    },
+  }),
+  fetchImpl: async () => { normalObjectReplayFetches += 1; throw new Error("FETCH_MUST_NOT_RUN"); },
+});
+assert.equal(normalObjectReplay.result, "PACKAGE_REJECTED");
+assert.equal(normalObjectReplayFetches, 0);
 
 let shortKeyCalls = 0;
 const shortKey = await executeWebhookSandboxCase({
@@ -228,6 +479,228 @@ assert.equal(
   replay.calls[0].init.headers["x-square-hmacsha256-signature"],
   replay.calls[1].init.headers["x-square-hmacsha256-signature"],
 );
+
+await withO01Packages(async ({ refund, payment }) => {
+  const calls = [];
+  let inspections = 0;
+  const result = await executeWebhookSandboxCase({
+    caseName: "o01",
+    notificationUrl: sandboxUrl,
+    packageDirectory: refund.directory,
+    sourcePackageDirectory: payment.directory,
+    signingKey,
+    inspectPackage: async (candidate) => {
+      inspections += 1;
+      return inspectWebhookFixturePackage(candidate);
+    },
+    fetchImpl: async (url, init) => {
+      calls.push({ url, init: { ...init, headers: { ...init.headers } } });
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    },
+  });
+  assert.equal(result.status, "COMPLETE");
+  assert.equal(result.result, "O01_SEED_ACKNOWLEDGED");
+  assert.equal(result.requests, 2);
+  assert.equal(calls.length, 2);
+  assert.equal(inspections, 10, "both exact packages are checked initially and around both requests");
+  assert.equal(calls[0].init.body, o01RefundBody, "refund is always sent first");
+  assert.equal(calls[1].init.body, o01PaymentBody, "payment is always sent second");
+  assert.notEqual(calls[0].init.body, calls[1].init.body);
+  assert.equal(calls[0].init.signal, calls[1].init.signal, "one timeout bounds both requests");
+  for (const call of calls) {
+    assert.equal(call.url, sandboxUrl);
+    assert.equal(call.init.redirect, "error");
+    assert.equal(call.init.headers["x-square-hmacsha256-signature"],
+      squareWebhookSignature(sandboxUrl, call.init.body, signingKey));
+  }
+});
+
+await withO01Packages(async ({ refund, payment }) => {
+  const db = new ReplayIngressD1();
+  const queueMessages = [];
+  const env = replaySeedEnvironment(db, {
+    async send(body, options) { queueMessages.push({ body: structuredClone(body), options: { ...options } }); },
+  });
+  const result = await executeWebhookSandboxCase({
+    caseName: "o01",
+    notificationUrl: sandboxUrl,
+    packageDirectory: refund.directory,
+    sourcePackageDirectory: payment.directory,
+    signingKey,
+    fetchImpl: (url, init) => sandboxWorker.fetch(new Request(url, init), env, {}),
+  });
+  assert.equal(result.status, "COMPLETE");
+  assert.equal(result.result, "O01_SEED_ACKNOWLEDGED");
+  assert.equal(result.requests, 2);
+  assert.deepEqual(db.webhooks.map((row) => ({
+    event_id: row.event_id, event_type: row.event_type, object_id: row.object_id,
+    state: row.state, attempts: row.attempts,
+  })), [
+    { event_id: o01RefundFixture.eventId, event_type: "refund.updated",
+      object_id: o01RefundFixture.objectId, state: "ENQUEUED", attempts: 0 },
+    { event_id: o01PaymentFixture.eventId, event_type: "payment.updated",
+      object_id: o01PaymentFixture.objectId, state: "ENQUEUED", attempts: 0 },
+  ]);
+  assert.deepEqual(queueMessages, [
+    { body: { kind: "square_webhook", event_id: o01RefundFixture.eventId },
+      options: { contentType: "json" } },
+    { body: { kind: "square_webhook", event_id: o01PaymentFixture.eventId },
+      options: { contentType: "json" } },
+  ]);
+  assert.equal(db.connectorState.length, 0);
+  assert.equal(db.claims.length + db.purchases.length + db.purchasePayments.length +
+    db.redemptions.length + db.refundReviews.length + db.outbox.length, 0,
+  "consumer-off seed ingress creates no business/controller state");
+});
+
+let incompleteO01Fetches = 0;
+let incompleteO01Inspections = 0;
+const incompleteO01 = await executeWebhookSandboxCase({
+  caseName: "o01",
+  notificationUrl: sandboxUrl,
+  packageDirectory: "refund-only",
+  signingKey,
+  inspectPackage: async () => { incompleteO01Inspections += 1; throw new Error("INSPECT_MUST_NOT_RUN"); },
+  fetchImpl: async () => { incompleteO01Fetches += 1; throw new Error("FETCH_MUST_NOT_RUN"); },
+});
+assert.equal(incompleteO01.result, "INPUT_REJECTED");
+assert.equal(incompleteO01Inspections, 0);
+assert.equal(incompleteO01Fetches, 0);
+
+await withO01Packages(async ({ refund, payment }) => {
+  let fetches = 0;
+  const result = await executeWebhookSandboxCase({
+    caseName: "o01",
+    notificationUrl: sandboxUrl,
+    packageDirectory: refund.directory,
+    sourcePackageDirectory: payment.directory,
+    signingKey,
+    fetchImpl: async () => {
+      fetches += 1;
+      return new Response(JSON.stringify(fetches === 1 ? { ok: true } : { ok: false }), {
+        status: fetches === 1 ? 200 : 500,
+        headers: { "Content-Type": "application/json" },
+      });
+    },
+  });
+  assert.equal(result.status, "FAILED");
+  assert.equal(result.result, "RESPONSE_REJECTED");
+  assert.equal(result.requests, 2);
+  assert.equal(fetches, 2);
+});
+
+await withO01Packages(async ({ refund, payment }) => {
+  const paymentPath = path.join(payment.directory, "event.json");
+  const exactPayment = await readFile(paymentPath, "utf8");
+  let fetches = 0;
+  const result = await executeWebhookSandboxCase({
+    caseName: "o01",
+    notificationUrl: sandboxUrl,
+    packageDirectory: refund.directory,
+    sourcePackageDirectory: payment.directory,
+    signingKey,
+    fetchImpl: async () => {
+      fetches += 1;
+      await writeFile(paymentPath, `${exactPayment} `, { encoding: "utf8", mode: 0o600 });
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    },
+  });
+  assert.equal(result.result, "PACKAGE_REJECTED");
+  assert.equal(result.requests, 1);
+  assert.equal(fetches, 1, "drift in either package after refund ACK prevents payment send");
+  await writeFile(paymentPath, exactPayment, { encoding: "utf8", mode: 0o600 });
+});
+
+await withPackage("replay", async ({ directory }) => {
+  const db = new ReplayIngressD1();
+  const queueMessages = [];
+  const ingressBodies = [];
+  const env = replaySeedEnvironment(db, {
+    async send(body, options) { queueMessages.push({ body: structuredClone(body), options: { ...options } }); },
+  });
+  const composed = await executeWebhookSandboxCase({
+    caseName: "replay",
+    notificationUrl: sandboxUrl,
+    packageDirectory: directory,
+    signingKey,
+    fetchImpl: async (url, init) => {
+      ingressBodies.push(init.body);
+      return sandboxWorker.fetch(new Request(url, init), env, {});
+    },
+  });
+  assert.equal(composed.status, "COMPLETE");
+  assert.equal(composed.result, "REPLAY_ACKNOWLEDGED");
+  assert.equal(composed.requests, 2);
+  assert.equal(ingressBodies.length, 2);
+  assert.equal(ingressBodies[0], ingressBodies[1], "replay ingress bodies must remain byte-identical");
+  assert.equal(db.webhooks.length, 1, "two ACKed replay requests must converge on one durable event row");
+  assert.equal(db.webhooks[0].event_id, replayFixture.eventId);
+  assert.equal(db.webhooks[0].state, "ENQUEUED");
+  assert.equal(db.webhooks[0].attempts, 0);
+  assert.deepEqual(queueMessages, [{
+    body: { kind: "square_webhook", event_id: replayFixture.eventId },
+    options: { contentType: "json" },
+  }], "the sequential second request observes ENQUEUED and cannot call Queue.send again");
+
+  const monitoredBusinessBefore = JSON.stringify({
+    claims: db.claims, passes: db.passes, purchases: db.purchases,
+    purchasePayments: db.purchasePayments, redemptions: db.redemptions,
+    refundReviews: db.refundReviews, outbox: db.outbox,
+  });
+  const isolationEnv = await replayIsolationEnvironment(db, env.SQUARE_QUEUE);
+  let acknowledgements = 0;
+  const retries = [];
+  const providerCalls = [];
+  const priorFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    providerCalls.push({ url: String(url), method: init.method, hasBody: Object.hasOwn(init, "body") });
+    return new Response(JSON.stringify({ errors: [{ code: "NOT_FOUND" }] }), {
+      status: 404,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+  try {
+    await sandboxWorker.queue({ messages: [{
+      body: structuredClone(queueMessages[0].body),
+      attempts: 1,
+      ack() { acknowledgements += 1; },
+      retry(options) { retries.push({ ...options }); },
+    }] }, isolationEnv, {});
+  } finally {
+    globalThis.fetch = priorFetch;
+  }
+  assert.deepEqual(providerCalls, [{
+    url: `https://connect.squareupsandbox.com/v2/refunds/${replayFixture.objectId}`,
+    method: "GET",
+    hasBody: false,
+  }], "the exact isolated replay performs one read-only lookup for the reserved procedural refund ID");
+  assert.equal(acknowledgements, 1);
+  assert.deepEqual(retries, []);
+  assert.equal(db.webhooks.length, 1);
+  assert.equal(db.webhooks[0].state, "REJECTED");
+  assert.equal(db.webhooks[0].last_error_code, "SQUARE_API_ERROR");
+  assert.equal(db.webhooks[0].attempts, 1);
+  assert.equal(db.webhooks[0].payload_json, "{}");
+  assert.equal(db.webhooks[0].available_at, null);
+  assert.equal(db.webhooks[0].lease_token, null);
+  assert.equal(db.webhooks[0].lease_expires_at, null);
+  assert.equal(db.operations.filter((op) => op === "webhook_processing").length, 1);
+  assert.equal(db.operations.filter((op) => op === "webhook_mark").length, 1);
+  assert.equal(db.operations.filter((op) => op.startsWith("sandbox_fault_")).length, 0);
+  assert.deepEqual(db.connectorState, [], "non-injecting replay isolation must not consume a control row");
+  assert.equal(JSON.stringify({
+    claims: db.claims, passes: db.passes, purchases: db.purchases,
+    purchasePayments: db.purchasePayments, redemptions: db.redemptions,
+    refundReviews: db.refundReviews, outbox: db.outbox,
+  }), monitoredBusinessBefore, "absent synthetic refund processing must not create business or outbox state");
+  assert.equal(queueMessages.length, 1, "terminal replay processing must not enqueue business/outbox work");
+});
 
 const signedRecognized = await runCase("signed-recognized", 200, { ok: true });
 assert.equal(signedRecognized.result.status, "COMPLETE");
@@ -405,6 +878,31 @@ await withPackage("forged", async ({ directory }) => {
   assert.equal(fetchCalls, 1);
   assert.equal(output.length, 1);
   assert.match(output[0], /^STATUS=COMPLETE RESULT=FORGED_REJECTED HTTP=403 REQUESTS=1 ELAPSED_MS=\d+$/);
+  for (const privateValue of prompts) assert.equal(output[0].includes(privateValue), false);
+});
+
+await withO01Packages(async ({ refund, payment }) => {
+  const prompts = [sandboxUrl, refund.directory, payment.directory, signingKey];
+  let promptIndex = 0;
+  const bodies = [];
+  const output = [];
+  const exitCode = await webhookDriverMain(["--execute", "o01"], {
+    readHiddenLine: async () => prompts[promptIndex++],
+    fetchImpl: async (_url, init) => {
+      bodies.push(init.body);
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    },
+    print: (line) => output.push(line),
+  });
+  assert.equal(exitCode, 0);
+  assert.equal(promptIndex, 4, "URL, exact refund/payment packages and signing key are hidden inputs");
+  assert.deepEqual(bodies, [o01RefundBody, o01PaymentBody]);
+  assert.equal(output.length, 1);
+  assert.match(output[0],
+    /^STATUS=COMPLETE RESULT=O01_SEED_ACKNOWLEDGED HTTP=200 REQUESTS=2 ELAPSED_MS=\d+$/);
   for (const privateValue of prompts) assert.equal(output[0].includes(privateValue), false);
 });
 

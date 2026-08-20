@@ -1,0 +1,16 @@
+{
+  "name": "spartan-nutrition-site",
+  "private": true,
+  "version": "0.0.0",
+  "packageManager": "npm@10.9.2",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "validate": "node scripts/validate-project.mjs"
+  },
+  "devDependencies": {
+    "miniflare": "5.20260815.0-alpha",
+    "wrangler": "4.124.0"
+  }
+}

@@ -11,7 +11,9 @@ const SQUARE_API_VERSION = "2026-07-15";
 const SQUARE_MERCHANT_ID = "ML8W3CSGD2B71";
 const SQUARE_LOCATION_ID = "L34NX9YA4PGF6";
 const SQUARE_DISCOUNT_CATALOG_ID = "2LUX2NSI5J3NRUQVPTLIYKEK";
+const SQUARE_DISCOUNT_NAME = "50% Off First Drink — Enter 50%";
 const SQUARE_ELIGIBLE_GROUP_ID = "1BQP5N2CYS5BT5KYY39Z53954S";
+const SQUARE_REDEEMED_GROUP_ID = "70AGVJZGBK8K7YV33N42SNDTNR";
 const SQUARE_QUALIFYING_VARIATION_IDS = Object.freeze([
   "74BBBGMDIZEOBYFD2RLJX4F5",
   "JKCNQ4ROWWMZFGQIEABKFGQR",
@@ -21,6 +23,8 @@ const RESERVED_F03_FAMILY_NAME = "Ambiguous";
 const RESERVED_F03_PHONE = "+19185550173";
 const RESERVED_F03_NOTE = "SPARTAN PROJECT 2 F-03 SYNTHETIC - DO NOT CONTACT";
 const SANDBOX_CARD_NONCE = "cnon:card-nonce-ok";
+const UNLINKED_FIXTURE_LINE_NAME = "Project 2 harmless unlinked sandbox fixture";
+const UNLINKED_FIXTURE_AMOUNT = 100;
 const EXECUTION_ACK = "SANDBOX_PROVIDER_FIXTURE_ONLY";
 const CLEANUP_ACK = "REMOVE_LOCAL_PROVIDER_FIXTURE_RECORD";
 const CASES = new Set(["F-03", "O-01", "P-02", "Q-01", "Q-02"]);
@@ -35,6 +39,7 @@ const EXPECTED_SCOPES = Object.freeze({
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const MAX_REQUESTS = 16;
 const TOTAL_TIMEOUT_MS = 30_000;
+const PROVIDER_CLOCK_SKEW_MS = 5_000;
 const PACKAGE_KIND = "spartan-square-sandbox-provider-fixture";
 const PACKAGE_VERSION = 1;
 const PACKAGE_PREFIX = "spartan-square-provider-fixture-";
@@ -54,7 +59,7 @@ const RESULT_CODES = new Set([
   "NETWORK_UNAVAILABLE", "MUTATION_RESULT_AMBIGUOUS", "RESPONSE_REJECTED", "BOUNDARY_REJECTED",
   "CREDENTIAL_GATE_BLOCKED",
   "AUTHORIZATION_BOUNDARY_MISMATCH", "MERCHANT_BOUNDARY_MISMATCH", "LOCATION_BOUNDARY_MISMATCH",
-  "CATALOG_BOUNDARY_MISMATCH", "CUSTOMER_PHONE_CONFLICT", "CUSTOMER_BOUNDARY_MISMATCH",
+  "CATALOG_BOUNDARY_MISMATCH", "GROUP_BOUNDARY_MISMATCH", "CUSTOMER_PHONE_CONFLICT", "CUSTOMER_BOUNDARY_MISMATCH",
   "CUSTOMERS_NOT_DISTINCT", "ORDER_BOUNDARY_MISMATCH", "PAYMENT_BOUNDARY_MISMATCH",
   "REFUND_BOUNDARY_MISMATCH", "REQUEST_LIMIT_REACHED", "PRIVATE_RECORD_REJECTED",
 ]);
@@ -67,7 +72,9 @@ export const PROVIDER_FIXTURE_BOUNDARIES = Object.freeze({
   merchantId: SQUARE_MERCHANT_ID,
   locationId: SQUARE_LOCATION_ID,
   eligibleGroupId: SQUARE_ELIGIBLE_GROUP_ID,
+  redeemedGroupId: SQUARE_REDEEMED_GROUP_ID,
   discountCatalogId: SQUARE_DISCOUNT_CATALOG_ID,
+  discountName: SQUARE_DISCOUNT_NAME,
   qualifyingVariationIds: SQUARE_QUALIFYING_VARIATION_IDS,
 });
 export const PROVIDER_FIXTURE_RESERVED_F03 = Object.freeze({
@@ -112,7 +119,7 @@ function validatePrivateInput(input) {
   if (token.length < 20 || token.length > 1024 || /\s|[\u0000-\u001f\u007f]/.test(token)) fail("INPUT_REJECTED");
   if (runKey.length < 16 || runKey.length > 160 || /[\u0000-\u001f\u007f]/.test(runKey)) fail("INPUT_REJECTED");
   if (QUALIFYING_CASES.has(input.caseName)) {
-    if (!/^[A-Za-z0-9_-]{8,128}$/.test(customerId)) fail("INPUT_REJECTED");
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/.test(customerId)) fail("INPUT_REJECTED");
   } else if (customerId !== "") {
     fail("INPUT_REJECTED");
   }
@@ -268,7 +275,56 @@ function exactObjectId(value, expected) {
 }
 
 function validProviderId(value) {
-  return typeof value === "string" && /^[A-Za-z0-9_-]{8,192}$/.test(value);
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{7,191}$/.test(value);
+}
+
+function validControllerObjectId(value) {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{7,191}$/.test(value);
+}
+
+function validO01RefundId(value) {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{7,148}$/.test(value);
+}
+
+function validProviderTimestamp(value, nowMs) {
+  if (typeof value !== "string" || value.length < 20 || value.length > 30 || !Number.isFinite(nowMs)) return false;
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?Z$/);
+  if (!match) return false;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, fraction = ""] = match;
+  const [year, month, day, hour, minute, second] =
+    [yearText, monthText, dayText, hourText, minuteText, secondText].map(Number);
+  const milliseconds = Number((fraction + "000").slice(0, 3));
+  const parsed = Date.UTC(year, month - 1, day, hour, minute, second, milliseconds);
+  const date = new Date(parsed);
+  return Number.isFinite(parsed) && parsed <= nowMs + PROVIDER_CLOCK_SKEW_MS &&
+    date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day &&
+    date.getUTCHours() === hour && date.getUTCMinutes() === minute && date.getUTCSeconds() === second;
+}
+
+function providerTimestampNanoseconds(value) {
+  if (typeof value !== "string" || value.length < 20 || value.length > 30) return null;
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?Z$/);
+  if (!match) return null;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, fraction = ""] = match;
+  const [year, month, day, hour, minute, second] =
+    [yearText, monthText, dayText, hourText, minuteText, secondText].map(Number);
+  const epochMilliseconds = Date.UTC(year, month - 1, day, hour, minute, second, 0);
+  const date = new Date(epochMilliseconds);
+  if (!Number.isFinite(epochMilliseconds) || date.getUTCFullYear() !== year ||
+      date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day ||
+      date.getUTCHours() !== hour || date.getUTCMinutes() !== minute ||
+      date.getUTCSeconds() !== second) return null;
+  return BigInt(epochMilliseconds) * 1_000_000n + BigInt((fraction + "000000000").slice(0, 9));
+}
+
+function validUnlinkedProviderTimeline(value, nowMs) {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      !Object.hasOwn(value, "created_at") || !Object.hasOwn(value, "updated_at") ||
+      !Number.isSafeInteger(nowMs) || !Number.isSafeInteger(nowMs + PROVIDER_CLOCK_SKEW_MS)) return false;
+  const createdAt = providerTimestampNanoseconds(value.created_at);
+  const updatedAt = providerTimestampNanoseconds(value.updated_at);
+  const maximum = BigInt(nowMs + PROVIDER_CLOCK_SKEW_MS) * 1_000_000n;
+  return createdAt !== null && updatedAt !== null && createdAt <= updatedAt && updatedAt <= maximum;
 }
 
 function catalogAvailableAtLocation(object) {
@@ -312,7 +368,9 @@ async function preflightCatalog(context) {
     `/v2/catalog/object/${SQUARE_DISCOUNT_CATALOG_ID}?include_related_objects=false`)).object;
   if (!exactObjectId(discount?.id, SQUARE_DISCOUNT_CATALOG_ID) || discount.type !== "DISCOUNT" ||
       !catalogAvailableAtLocation(discount) || discount.discount_data?.discount_type !== "FIXED_PERCENTAGE" ||
-      Number(discount.discount_data?.percentage) !== 50) fail("CATALOG_BOUNDARY_MISMATCH");
+      Number(discount.discount_data?.percentage) !== 50 || discount.discount_data?.name !== SQUARE_DISCOUNT_NAME) {
+    fail("CATALOG_BOUNDARY_MISMATCH");
+  }
   const variations = [];
   for (const variationId of SQUARE_QUALIFYING_VARIATION_IDS) {
     const object = (await squareJson(context,
@@ -326,6 +384,16 @@ async function preflightCatalog(context) {
     variations.push(object);
   }
   return variations[0];
+}
+
+async function preflightGroups(context) {
+  for (const groupId of [SQUARE_ELIGIBLE_GROUP_ID, SQUARE_REDEEMED_GROUP_ID]) {
+    const group = (await squareJson(context, `/v2/customers/groups/${groupId}`)).group;
+    if (!exactObjectId(group?.id, groupId) || typeof group.name !== "string" ||
+        group.name.length < 1 || group.name.length > 255) {
+      fail("GROUP_BOUNDARY_MISMATCH");
+    }
+  }
 }
 
 function canonicalName(value) {
@@ -425,12 +493,21 @@ async function prepareF03(context, record, runKey, checkpoint) {
 function assertLinkedCustomer(customer, customerId) {
   const groupIds = Array.isArray(customer?.group_ids) ? customer.group_ids : [];
   if (!exactObjectId(customer?.id, customerId) || !/^SPN1-[A-Za-z0-9_-]{22}$/.test(String(customer.reference_id || "")) ||
-      !groupIds.includes(SQUARE_ELIGIBLE_GROUP_ID)) fail("CUSTOMER_BOUNDARY_MISMATCH");
+      !groupIds.includes(SQUARE_ELIGIBLE_GROUP_ID) || groupIds.includes(SQUARE_REDEEMED_GROUP_ID)) {
+    fail("CUSTOMER_BOUNDARY_MISMATCH");
+  }
 }
 
 function money(value) {
   const amount = Number(value?.amount);
   return Number.isSafeInteger(amount) && amount > 0 && value?.currency === "USD" ? { amount, currency: "USD" } : null;
+}
+
+function exactUnlinkedMoney(value) {
+  return value && typeof value === "object" && !Array.isArray(value) &&
+    Number.isInteger(value.amount) && value.amount === UNLINKED_FIXTURE_AMOUNT && value.currency === "USD"
+    ? { amount: UNLINKED_FIXTURE_AMOUNT, currency: "USD" }
+    : null;
 }
 
 function assertQualifyingOrder(order, customerId) {
@@ -442,7 +519,8 @@ function assertQualifyingOrder(order, customerId) {
   const discount = discounts[0];
   const line = lines[0];
   if (discount.catalog_object_id !== SQUARE_DISCOUNT_CATALOG_ID || discount.type !== "FIXED_PERCENTAGE" ||
-      Number(discount.percentage) !== 50 || discount.scope !== "LINE_ITEM" || !discount.uid ||
+      Number(discount.percentage) !== 50 || discount.name !== SQUARE_DISCOUNT_NAME ||
+      discount.scope !== "LINE_ITEM" || !discount.uid ||
       !SQUARE_QUALIFYING_VARIATION_IDS.includes(line.catalog_object_id) || !/^1(?:\.0+)?$/.test(String(line.quantity || ""))) {
     fail("ORDER_BOUNDARY_MISMATCH");
   }
@@ -450,46 +528,73 @@ function assertQualifyingOrder(order, customerId) {
   if (applied.length !== 1 || applied[0].discount_uid !== discount.uid || !money(applied[0].applied_money)) {
     fail("ORDER_BOUNDARY_MISMATCH");
   }
-  const total = money(order.net_amounts?.total_money || order.total_money);
+  const total = money(order.net_amounts?.total_money);
   if (!total) fail("ORDER_BOUNDARY_MISMATCH");
   return total;
 }
 
-function assertUnlinkedOrder(order) {
-  if (!validProviderId(order?.id) || order.location_id !== SQUARE_LOCATION_ID || order.customer_id ||
-      !["OPEN", "COMPLETED"].includes(order.state)) fail("ORDER_BOUNDARY_MISMATCH");
-  const discounts = Array.isArray(order.discounts) ? order.discounts : [];
-  const lines = Array.isArray(order.line_items) ? order.line_items : [];
-  if (discounts.length !== 0 || lines.length !== 1 || !/^1(?:\.0+)?$/.test(String(lines[0].quantity || "")) ||
-      lines[0].catalog_object_id || lines[0].name !== "Project 2 harmless unlinked sandbox fixture") {
+function assertUnlinkedOrder(order, nowMs) {
+  const customerReady = order && (!Object.hasOwn(order, "customer_id") || order.customer_id === null);
+  if (!validProviderId(order?.id) || order.location_id !== SQUARE_LOCATION_ID || !customerReady ||
+      !["OPEN", "COMPLETED"].includes(order.state) || !validUnlinkedProviderTimeline(order, nowMs)) {
     fail("ORDER_BOUNDARY_MISMATCH");
   }
-  const total = money(order.net_amounts?.total_money || order.total_money);
-  if (!total || total.amount !== 100) fail("ORDER_BOUNDARY_MISMATCH");
+  const lines = Array.isArray(order.line_items) ? order.line_items : [];
+  const discountsReady = !Object.hasOwn(order, "discounts") || order.discounts === null ||
+    (Array.isArray(order.discounts) && order.discounts.length === 0);
+  const line = lines[0];
+  const appliedDiscountsReady = line && (!Object.hasOwn(line, "applied_discounts") ||
+    line.applied_discounts === null ||
+    (Array.isArray(line.applied_discounts) && line.applied_discounts.length === 0));
+  const catalogReady = line && (!Object.hasOwn(line, "catalog_object_id") || line.catalog_object_id === null);
+  const total = exactUnlinkedMoney(order.net_amounts?.total_money);
+  const lineTotal = exactUnlinkedMoney(line?.total_money);
+  const basePrice = exactUnlinkedMoney(line?.base_price_money);
+  if (!discountsReady || lines.length !== 1 || !appliedDiscountsReady ||
+      !catalogReady || line.quantity !== "1" || line.name !== UNLINKED_FIXTURE_LINE_NAME ||
+      !total || !lineTotal || !basePrice) {
+    fail("ORDER_BOUNDARY_MISMATCH");
+  }
   return total;
 }
 
-function assertPayment(payment, order, expectedMoney, customerId = "") {
-  if (!validProviderId(payment?.id) || payment.status !== "COMPLETED" || payment.location_id !== SQUARE_LOCATION_ID ||
-      payment.order_id !== order.id || (customerId ? payment.customer_id !== customerId : Boolean(payment.customer_id))) {
+function assertPayment(payment, order, expectedMoney, customerId = "", nowMs = NaN) {
+  const occurredAt = payment?.updated_at || payment?.created_at;
+  if (!validControllerObjectId(payment?.id) || payment.status !== "COMPLETED" || payment.location_id !== SQUARE_LOCATION_ID ||
+      payment.order_id !== order.id || (customerId ? payment.customer_id !== customerId : Boolean(payment.customer_id)) ||
+      !validProviderTimestamp(occurredAt, nowMs)) {
     fail("PAYMENT_BOUNDARY_MISMATCH");
   }
   const observed = money(payment.amount_money);
   if (!observed || observed.amount !== expectedMoney.amount) fail("PAYMENT_BOUNDARY_MISMATCH");
 }
 
-function assertRefund(refund, payment, expectedMoney) {
-  if (!validProviderId(refund?.id) || refund.payment_id !== payment.id || !["PENDING", "COMPLETED"].includes(refund.status)) {
+function assertUnlinkedPayment(payment, order, nowMs) {
+  const customerReady = payment &&
+    (!Object.hasOwn(payment, "customer_id") || payment.customer_id === null);
+  if (!validControllerObjectId(payment?.id) || payment.status !== "COMPLETED" ||
+      payment.location_id !== SQUARE_LOCATION_ID || payment.order_id !== order.id || !customerReady ||
+      !exactUnlinkedMoney(payment.amount_money) || !validUnlinkedProviderTimeline(payment, nowMs)) {
+    fail("PAYMENT_BOUNDARY_MISMATCH");
+  }
+}
+
+function assertRefund(refund, payment, expectedMoney, nowMs = NaN) {
+  const occurredAt = refund?.updated_at || refund?.created_at;
+  if (!validO01RefundId(refund?.id) || refund.payment_id !== payment.id || !["PENDING", "COMPLETED"].includes(refund.status)) {
     fail("REFUND_BOUNDARY_MISMATCH");
   }
   const observed = money(refund.amount_money);
-  if (!observed || observed.amount !== expectedMoney.amount) fail("REFUND_BOUNDARY_MISMATCH");
+  if (!observed || observed.amount !== expectedMoney.amount || !validProviderTimestamp(occurredAt, nowMs)) {
+    fail("REFUND_BOUNDARY_MISMATCH");
+  }
 }
 
 async function prepareTransaction(context, record, input, checkpoint) {
   let customer = null;
   let selectedVariation = null;
   if (QUALIFYING_CASES.has(input.caseName)) {
+    await preflightGroups(context);
     selectedVariation = await preflightCatalog(context);
     customer = (await squareJson(context, `/v2/customers/${encodeURIComponent(input.customerId)}`)).customer;
     assertLinkedCustomer(customer, input.customerId);
@@ -520,16 +625,18 @@ async function prepareTransaction(context, record, input, checkpoint) {
           location_id: SQUARE_LOCATION_ID,
           reference_id: privateReference(input.caseName, input.runKey, "order", 40),
           line_items: [{
-            name: "Project 2 harmless unlinked sandbox fixture",
+            name: UNLINKED_FIXTURE_LINE_NAME,
             quantity: "1",
-            base_price_money: { amount: 100, currency: "USD" },
+            base_price_money: { amount: UNLINKED_FIXTURE_AMOUNT, currency: "USD" },
           }],
         },
       };
   const order = (await squareJson(context, "/v2/orders", {
     method: "POST", body: orderBody, mutation: true,
   })).order;
-  const orderMoney = qualifying ? assertQualifyingOrder(order, input.customerId) : assertUnlinkedOrder(order);
+  const orderMoney = qualifying
+    ? assertQualifyingOrder(order, input.customerId)
+    : assertUnlinkedOrder(order, Number(context.nowMs()));
   record.selectors.order_id = order.id;
   record.status = "CREATING";
   record.result_code = "ORDER_CREATED";
@@ -549,7 +656,11 @@ async function prepareTransaction(context, record, input, checkpoint) {
   const payment = (await squareJson(context, "/v2/payments", {
     method: "POST", body: paymentBody, mutation: true,
   })).payment;
-  assertPayment(payment, order, orderMoney, qualifying ? input.customerId : "");
+  if (qualifying) {
+    assertPayment(payment, order, orderMoney, input.customerId, Number(context.nowMs()));
+  } else {
+    assertUnlinkedPayment(payment, order, Number(context.nowMs()));
+  }
   record.selectors.payment_id = payment.id;
   record.webhook_targets = [{ event_type: "payment.updated", object_id: payment.id }];
   record.status = "CREATING";
@@ -557,10 +668,16 @@ async function prepareTransaction(context, record, input, checkpoint) {
   await checkpoint(record);
 
   const verifiedOrder = (await squareJson(context, `/v2/orders/${encodeURIComponent(order.id)}`)).order;
-  const verifiedMoney = qualifying ? assertQualifyingOrder(verifiedOrder, input.customerId) : assertUnlinkedOrder(verifiedOrder);
+  const verifiedMoney = qualifying
+    ? assertQualifyingOrder(verifiedOrder, input.customerId)
+    : assertUnlinkedOrder(verifiedOrder, Number(context.nowMs()));
   if (verifiedOrder.state !== "COMPLETED" || verifiedMoney.amount !== orderMoney.amount) fail("ORDER_BOUNDARY_MISMATCH");
   const verifiedPayment = (await squareJson(context, `/v2/payments/${encodeURIComponent(payment.id)}`)).payment;
-  assertPayment(verifiedPayment, verifiedOrder, orderMoney, qualifying ? input.customerId : "");
+  if (qualifying) {
+    assertPayment(verifiedPayment, verifiedOrder, orderMoney, input.customerId, Number(context.nowMs()));
+  } else {
+    assertUnlinkedPayment(verifiedPayment, verifiedOrder, Number(context.nowMs()));
+  }
 
   if (input.caseName === "O-01") {
     let refund = (await squareJson(context, "/v2/refunds", {
@@ -573,9 +690,9 @@ async function prepareTransaction(context, record, input, checkpoint) {
         reason: "Project 2 O-01 synthetic sandbox ordering fixture",
       },
     })).refund;
-    assertRefund(refund, payment, orderMoney);
+    assertRefund(refund, payment, orderMoney, Number(context.nowMs()));
     refund = (await squareJson(context, `/v2/refunds/${encodeURIComponent(refund.id)}`)).refund;
-    assertRefund(refund, payment, orderMoney);
+    assertRefund(refund, payment, orderMoney, Number(context.nowMs()));
     record.selectors.refund_id = refund.id;
     record.webhook_targets = [
       { event_type: "refund.updated", object_id: refund.id },
@@ -739,15 +856,20 @@ function validatePrivateRecordShape(record, basename) {
       (QUALIFYING_CASES.has(record.case)
         ? !validProviderId(record.selectors.customer_id)
         : record.selectors.customer_id !== null) ||
-      !["order_id", "payment_id", "refund_id"].every((key) =>
-        record.selectors[key] === null || validProviderId(record.selectors[key])) ||
+      (record.selectors.order_id !== null && !validProviderId(record.selectors.order_id)) ||
+      (record.selectors.payment_id !== null && !validControllerObjectId(record.selectors.payment_id)) ||
+      (record.selectors.refund_id !== null &&
+        (record.case !== "O-01" || !validO01RefundId(record.selectors.refund_id))) ||
       (record.case !== "O-01" && record.selectors.refund_id !== null)) {
     fail("PRIVATE_RECORD_REJECTED");
   }
 
   if (!Array.isArray(record.webhook_targets) || record.webhook_targets.length > 2 ||
       record.webhook_targets.some((target) => !exactKeys(target, ["event_type", "object_id"]) ||
-        !["payment.updated", "refund.updated"].includes(target.event_type) || !validProviderId(target.object_id))) {
+        !["payment.updated", "refund.updated"].includes(target.event_type) ||
+        (target.event_type === "refund.updated"
+          ? !validO01RefundId(target.object_id)
+          : !validControllerObjectId(target.object_id)))) {
     fail("PRIVATE_RECORD_REJECTED");
   }
   const expectedTargets = record.case === "F-03" ? []

@@ -97,23 +97,14 @@ node scripts/validate-site.mjs
 
 It checks local page and asset references, anchor targets, structured data, JavaScript syntax, our-menu and Mega Tea Kit data/rendering parity, Google Sheet headers, coupon behavior, email-consent behavior and the optional post-coupon discovery contract. It does not replace visual browser testing, live Square availability checks or a real Apps Script deployment test.
 
-When Square connector files change, run the complete dependency-free contract suite:
+When Square connector files change, install the exact reviewed local toolchain and run the canonical complete contract suite:
 
 ```sh
-node scripts/validate-square-connector.mjs
-node scripts/validate-square-sandbox-webhook-driver.mjs
-node scripts/validate-filtered-form-sandbox-driver.mjs
-node scripts/validate-square-dlq-tool.mjs
-node scripts/validate-pos-code128-preflight.mjs
-node scripts/validate-square-sandbox-faults.mjs
-node scripts/validate-square-apps-script.mjs
-node scripts/validate-square-frontend.mjs
-node scripts/validate-square-ops.mjs
-node scripts/validate-apps-health.mjs
-node scripts/validate-apps-health-probe.mjs
-node scripts/validate-form-backend.mjs
-node scripts/validate-site.mjs
+npm ci
+npm run validate
 ```
+
+The checked lockfile pins Wrangler and Miniflare. The validation entrypoint refuses an unreviewed validator inventory or Wrangler dotenv file, checks every tracked `.mjs` file, runs all 17 local validators, packages both Square Worker configurations with dry-run only, and finishes with the whitespace/error diff check. It does not deploy, call a live provider or authorize a sandbox window.
 
 ### Preview before publishing
 
