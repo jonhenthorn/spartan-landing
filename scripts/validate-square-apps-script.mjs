@@ -249,6 +249,18 @@ leadRows.push(rowFrom({
   coupon_redemption_status: "not_recorded",
   tags: "website_coupon,repeat_claim"
 }));
+leadRows.push(rowFrom({
+  timestamp: new Date("2026-08-17T12:02:00.000Z"),
+  name: "Legacy Filtered",
+  phone: "(918) 555-0177",
+  email: "legacy@example.com",
+  record_type: "coupon_claim",
+  submission_method: "legacy_get",
+  submission_id: "website-legacy-0003",
+  coupon_code: "SN-LEGACY01",
+  coupon_redemption_status: "not_recorded",
+  tags: "website_coupon"
+}));
 
 const setup = JSON.parse(JSON.stringify(context.setupJourneyLedgerSheets()));
 assert.equal(setup.ready, true);
@@ -302,6 +314,15 @@ invalidSignature.connector_signature = "0".repeat(64);
 assert.equal(post(invalidSignature).code, "connector_auth_failed");
 assert.equal(leadRows[0].length, 41, "Rejected request must not add headers");
 
+const declinedRows = structuredClone(leadRows);
+const declined = post(sign("offer_prepare", {
+  ...basePrepare,
+  square_customer_profile_consent: "no"
+}));
+assert.equal(declined.ok, false);
+assert.equal(declined.code, "offer_prepare_failed");
+assert.deepEqual(leadRows, declinedRows, "Declined Square consent must perform no lead write");
+
 const prepared = post(sign("offer_prepare", basePrepare));
 assert.equal(prepared.ok, true);
 assert.equal(prepared.offer_prepare_result, "eligible");
@@ -341,6 +362,24 @@ const repeatOnly = post(sign("offer_prepare", {
 }));
 assert.equal(repeatOnly.ok, false);
 assert.equal(repeatOnly.code, "offer_prepare_failed");
+
+const legacyFiltered = post(sign("offer_prepare", {
+  ...basePrepare,
+  submission_id: "website-legacy-0003",
+  coupon_code: "SN-LEGACY01"
+}));
+assert.equal(legacyFiltered.ok, false);
+assert.equal(legacyFiltered.code, "offer_prepare_failed");
+
+const identityRowsBeforeAmbiguous = ledgerSheets.get("Identity Links").__rows.length;
+const eventsBeforeAmbiguous = ledgerSheets.get("Journey Events").__rows.length;
+leadRows.push(structuredClone(originalRow()));
+const ambiguousLeadMatch = post(sign("offer_prepare", basePrepare));
+assert.equal(ambiguousLeadMatch.ok, false);
+assert.equal(ambiguousLeadMatch.code, "offer_prepare_failed");
+assert.equal(ledgerSheets.get("Identity Links").__rows.length, identityRowsBeforeAmbiguous);
+assert.equal(ledgerSheets.get("Journey Events").__rows.length, eventsBeforeAmbiguous);
+leadRows.pop();
 
 const effectiveAt = "2026-08-17T17:30:00.000Z";
 const baseFinalize = {

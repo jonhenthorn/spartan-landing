@@ -1,8 +1,8 @@
 # Spartan Square journey-measurement pilot
 
-Last reviewed: August 17, 2026
+Last reviewed: August 19, 2026
 
-Status: **Project 2 — active.** The empty ledger foundation is live. An owner-controlled QR/customer-attachment and paid-transaction proof is complete, but it was synthetic and not linked to a website submission. The later-purchase and refund-review proofs, genuine website redemption and 30-day baseline remain open.
+Status: **Project 2 — active.** The ledger foundation and isolated sandbox connector are live but disabled. An owner-controlled QR/customer-attachment and paid-transaction proof is complete, and the sandbox connector later proved one qualifying redemption plus a full-refund review without restoring eligibility or issuing another offer. Those proofs were synthetic and not linked to a genuine website submission. A later return purchase, genuine website redemption and 30-day baseline remain open.
 
 ## Outcome
 
@@ -14,7 +14,7 @@ Connect a website first-visit claim to a verified Square redemption and later pu
 - How many customers return within 30 days?
 - Is the workflow accurate and light enough to support referral rewards and lifecycle email?
 
-The pilot uses the current Google Sheet, Square Customer Directory and the existing first-drink discount. It does not add a CRM, loyalty subscription, staff spreadsheet or custom database.
+The manual staff workflow and original ledger baseline use the current Google Sheet, Square Customer Directory and the existing first-drink discount; they add no CRM, loyalty subscription or staff spreadsheet. Project 2 separately includes the live-disabled connector's private D1 delivery ledger, so the earlier “no custom database” description does not apply to the whole technical system.
 
 ## Customer and staff journey
 
@@ -66,6 +66,8 @@ Confirmed in the signed-in Spartan Square account:
 - On August 17, an owner-controlled QR attached the intended labeled test customer before a paid **$3.58** Best Defense transaction. Square recorded a stable customer, payment, order and location link. This proves QR/customer attachment and completed-sale attribution for that test; it does not prove a website claim, genuine coupon redemption or ledger write.
 - The owner changed `50% Off First Drink — Enter 50%` to a fixed 50% discount. A no-charge cart test showed that applying it from one selected Kids Shake line left BCAAs and Protein Coffee at full price. Applying it to a quantity-two Kids Shake line discounted both drinks, so quantity 1 is a mandatory staff check.
 - Scanning/attaching the test customer did not apply the discount, record redemption or remove the customer from the eligible group. QR attachment is identity only; staff action and later reconciliation remain required.
+- An August 19 read-only preflight reconfirmed that the production discount is still fixed at 50%, assigned to `Spartan` and addressed by catalog object ID `5ZXWVO3YGDYFHPZBD5KX6JXI`; its automatic `Discount rules` option was unchecked. The intended manual eligible group is visible in Customer Directory, but its API group ID and the eligible variation allowlist still require exact production verification before deployment.
+- The same preflight found Square Text Message Marketing `Not subscribed`; the separate `Coupon for joining` remains 50%, while `Collect text subscribers on point of sale` offered a `Turn on` action. That checkout collection prompt was therefore off at review time. Reconfirm it immediately before the owner canary.
 
 Still requires hands-on POS/account verification:
 
@@ -73,8 +75,8 @@ Still requires hands-on POS/account verification:
 - Complete eligible-drink variation allowlist, stacking protection, receipt/report behavior and quantity-one compliance in the live POS workflow.
 - Customer, transaction and discount export columns.
 - Customer duplicate rate and the percentage of qualifying transactions with a usable customer ID.
-- One genuine website-linked redemption, a later purchase and a refund-review event.
-- Confirmation that Square's separate 50%-for-text-signup checkout prompt is disabled or cannot create a competing first-visit offer.
+- One genuine website-linked redemption and a later return purchase. The isolated sandbox qualifying-purchase refund-review path is proven; a later-return-purchase refund remains part of the production owner canary.
+- Immediate pre-canary reconfirmation that Square's separate 50%-for-text-signup checkout prompt remains off or cannot create a competing first-visit offer.
 
 For automated preparation, a matched existing Square customer with a known linked completed order at Spartan is routed to staff review and receives no eligibility group or scan pass. A clean Square history search means only that no prior **linked** completed order was found; it cannot prove the person never purchased anonymously. If the history check is unavailable, the connector fails closed to the existing staff/manual path.
 

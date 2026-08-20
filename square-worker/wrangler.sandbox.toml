@@ -1,5 +1,5 @@
 name = "spartan-square-connector-sandbox"
-main = "src/index.mjs"
+main = "src/sandbox.mjs"
 compatibility_date = "2026-08-17"
 workers_dev = true
 
@@ -22,6 +22,7 @@ SQUARE_WEBHOOK_NOTIFICATION_URL = "https://spartan-square-connector-sandbox.bixb
 TURNSTILE_SITE_KEY = "0x4AAAAAAETIBGUWCQZhgbGM"
 TURNSTILE_EXPECTED_ACTION = "square_offer_sandbox"
 SQUARE_SANDBOX_TEST_HARNESS_ENABLED = "false"
+SQUARE_SANDBOX_FAULTS_ENABLED = "false"
 SQUARE_OFFER_ENABLED = "false"
 SQUARE_WEBHOOK_ENABLED = "false"
 SQUARE_PASS_ENABLED = "false"

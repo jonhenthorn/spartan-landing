@@ -363,40 +363,65 @@ function installServiceMocks(env, trace, state) {
       const unsigned = body.slice(0, body.lastIndexOf("&connector_signature="));
       const expected = createHmac("sha256", env.APPS_SCRIPT_SHARED_SECRET).update(unsigned).digest("hex");
       assert.equal(params.get("connector_signature"), expected);
+      if (operation === "offer_prepare" && Number(state.prepareFailures || 0) > 0) {
+        state.prepareFailures -= 1;
+        return jsonResponse({
+          ok: false, code: "offer_prepare_failed", connector_contract_version: __test.PRIVATE_CONTRACT,
+        });
+      }
       if (operation === "offer_prepare") return jsonResponse({
         ok: true, operation, connector_contract_version: __test.PRIVATE_CONTRACT,
         offer_prepare_result: state.prepareResult || "eligible", profile_consent_result: "recorded",
         website_submission_id: params.get("submission_id"), coupon_code: params.get("coupon_code"),
         name: state.prepareName || "Test Customer", phone: "918-555-0123", square_customer_id: state.prepareSquareCustomerId || "", identity_link_id: "",
       });
-      if (operation === "offer_finalize") return jsonResponse({
-        ...(state.finalizeRequests ||= [], state.finalizeRequests.push(Object.fromEntries(params)), {}),
-        ok: true, operation, connector_contract_version: __test.PRIVATE_CONTRACT,
-        offer_finalize_result: "linked", website_submission_id: params.get("website_submission_id"),
-        coupon_code: params.get("coupon_code"), square_customer_id: params.get("square_customer_id"),
-        identity_link_id: "identity_1", contact_id: "contact_1", identity_event_id: "identity_event_1",
-      });
+      if (operation === "offer_finalize") {
+        state.finalizeRequests ||= [];
+        state.finalizeRequests.push(Object.fromEntries(params));
+        if (Number(state.finalizeFailures || 0) > 0) {
+          state.finalizeFailures -= 1;
+          return jsonResponse({
+            ok: false, code: "offer_finalize_failed", connector_contract_version: __test.PRIVATE_CONTRACT,
+          });
+        }
+        return jsonResponse({
+          ok: true, operation, connector_contract_version: __test.PRIVATE_CONTRACT,
+          offer_finalize_result: "linked", website_submission_id: params.get("website_submission_id"),
+          coupon_code: params.get("coupon_code"), square_customer_id: params.get("square_customer_id"),
+          identity_link_id: "identity_1", contact_id: "contact_1", identity_event_id: "identity_event_1",
+        });
+      }
       if (operation === "event_commit" && state.eventCommitErrorCode) return jsonResponse({
         ok: false, code: state.eventCommitErrorCode, connector_contract_version: __test.PRIVATE_CONTRACT,
       });
-      if (operation === "event_commit") return jsonResponse({
-        ok: true, operation, connector_contract_version: __test.PRIVATE_CONTRACT,
-        event_commit_result: "committed", square_event_type: params.get("square_event_type"),
-        order_event_id: "order_event_1", redemption_event_id: "redemption_event_1",
-        reversal_event_id: "", redemption_result: params.get("square_event_type") === "refund_completed"
-          ? "refund_recorded"
-          : (params.get("discount_qualification") === "not_qualified" ? "not_qualified" : "redeemed"),
-        rows_appended: 2, ...(state.eventCommitOverride || {}),
-      });
+      if (operation === "event_commit") {
+        state.eventCommitCalls = Number(state.eventCommitCalls || 0) + 1;
+        return jsonResponse({
+          ok: true, operation, connector_contract_version: __test.PRIVATE_CONTRACT,
+          event_commit_result: "committed", square_event_type: params.get("square_event_type"),
+          order_event_id: "order_event_1", redemption_event_id: "redemption_event_1",
+          reversal_event_id: "", redemption_result: params.get("square_event_type") === "refund_completed"
+            ? "refund_recorded"
+            : (params.get("discount_qualification") === "not_qualified" ? "not_qualified" : "redeemed"),
+          rows_appended: 2, ...(state.eventCommitOverride || {}),
+        });
+      }
       return jsonResponse({ ok: false }, 400);
     }
     const parsed = new URL(url);
     const path = parsed.pathname;
-    if (path === "/v2/customers/search") return jsonResponse({ customers: state.searchCustomers || [] });
+    if (path === "/v2/customers/search") {
+      if (Number(state.customerSearchFailures || 0) > 0) {
+        state.customerSearchFailures -= 1;
+        return jsonResponse({ errors: [{ code: "INTERNAL_SERVER_ERROR" }] }, 503);
+      }
+      return jsonResponse({ customers: state.searchCustomers || (state.customer ? [state.customer] : []) });
+    }
     if (path === "/v2/customers" && init.method === "POST") {
       const body = JSON.parse(init.body);
+      state.squareCreateAttempts = Number(state.squareCreateAttempts || 0) + 1;
       state.squareCreateBody = body;
-      state.customer = { id: "CUSTOMER_1", version: 1, given_name: body.given_name, family_name: body.family_name,
+      state.customer ||= { id: "CUSTOMER_1", version: 1, given_name: body.given_name, family_name: body.family_name,
         phone_number: body.phone_number, reference_id: body.reference_id, group_ids: [] };
       return jsonResponse({ customer: state.customer });
     }
@@ -406,10 +431,20 @@ function installServiceMocks(env, trace, state) {
     }
     const groupMatch = path.match(/^\/v2\/customers\/([^/]+)\/groups\/GROUP_FIRST$/);
     if (groupMatch && init.method === "PUT") {
+      state.groupAddAttempts = Number(state.groupAddAttempts || 0) + 1;
+      if (Number(state.groupAddFailures || 0) > 0) {
+        state.groupAddFailures -= 1;
+        return jsonResponse({ errors: [{ code: "INTERNAL_SERVER_ERROR" }] }, 503);
+      }
       state.groupAdds = (state.groupAdds || 0) + 1;
       state.customer.group_ids = ["GROUP_FIRST"]; return jsonResponse({});
     }
     if (groupMatch && init.method === "DELETE") {
+      state.groupRemoveAttempts = Number(state.groupRemoveAttempts || 0) + 1;
+      if (Number(state.groupRemoveFailures || 0) > 0) {
+        state.groupRemoveFailures -= 1;
+        return jsonResponse({ errors: [{ code: "INTERNAL_SERVER_ERROR" }] }, 503);
+      }
       state.groupRemoves = (state.groupRemoves || 0) + 1;
       if (state.customer) state.customer.group_ids = [];
       return jsonResponse({});
@@ -614,6 +649,7 @@ check("offer rejects cross-origin, extra fields, and missing consent", async () 
   assert.equal((await worker.fetch(request(valid, "https://evil.example"), env, {})).status, 403);
   assert.equal((await worker.fetch(request({ ...valid, email: "forbidden@example.com" }), env, {})).status, 400);
   assert.equal((await worker.fetch(request({ ...valid, square_profile_consent: "no" }), env, {})).status, 400);
+  assert.equal(db.claims.length, 0, "declined consent and malformed requests must create no connector claim");
 });
 
 check("canary defaults fail closed and allow exactly the labeled owner submission", async () => {
@@ -632,12 +668,15 @@ check("canary defaults fail closed and allow exactly the labeled owner submissio
   assert.equal(rejected.status, 404); assert.equal(db.claims.length, 0);
 });
 
-check("existing Square customers require a clean linked-order check before eligibility", async () => {
-  async function scenario({ priorOrders = [], fail = false, alreadyLinked = false, suffix }) {
+check("existing and ambiguous Square customers require a clean linked-order check before eligibility", async () => {
+  async function scenario({ priorOrders = [], fail = false, alreadyLinked = false, ambiguous = false, suffix }) {
     const trace = []; const db = new MockD1(trace); const env = baseEnv(db, { send: async () => {} });
     const customer = { id: `EXISTING_${suffix}`, version: 1, given_name: "Test", family_name: "Customer",
       phone_number: "+19185550123", reference_id: "", group_ids: [] };
-    const state = { customer, searchCustomers: [customer], priorOrders, orderSearchFail: fail,
+    const searchCustomers = ambiguous
+      ? [customer, { ...customer, id: `EXISTING_${suffix}_TWIN` }]
+      : [customer];
+    const state = { customer, searchCustomers, priorOrders, orderSearchFail: fail,
       prepareResult: alreadyLinked ? "already_linked" : "eligible",
       prepareSquareCustomerId: alreadyLinked ? customer.id : "" };
     installServiceMocks(env, trace, state);
@@ -653,8 +692,51 @@ check("existing Square customers require a clean linked-order check before eligi
   assert.equal(linkedPrior.body.offer_result, "staff_lookup_required"); assert.equal(linkedPrior.state.groupAdds || 0, 0); assert.equal(linkedPrior.state.customerUpdates || 0, 0); assert.equal(linkedPrior.body.pass_available, false);
   const failed = await scenario({ fail: true, suffix: "FAIL" });
   assert.equal(failed.body.offer_result, "staff_lookup_required"); assert.equal(failed.state.groupAdds || 0, 0); assert.equal(failed.state.customerUpdates || 0, 0); assert.equal(failed.body.pass_available, false);
+  const ambiguous = await scenario({ ambiguous: true, suffix: "AMBIGUOUS" });
+  assert.equal(ambiguous.body.offer_result, "staff_lookup_required"); assert.equal(ambiguous.state.groupAdds || 0, 0);
+  assert.equal(ambiguous.state.squareCreateAttempts || 0, 0); assert.equal(ambiguous.body.pass_available, false);
   const clean = await scenario({ suffix: "CLEAN" });
   assert.equal(clean.body.offer_result, "ready"); assert.equal(clean.state.groupAdds, 1); assert.equal(clean.body.pass_available, true);
+});
+
+check("offer provider outages and customer/group/ledger partial failures recover idempotently", async () => {
+  const runScenario = async (suffix, state) => {
+    const trace = []; const db = new MockD1(trace); const env = baseEnv(db, { send: async () => {} });
+    installServiceMocks(env, trace, state);
+    const request = () => new Request("https://spartandrink.com/api/square/offer", {
+      method: "POST",
+      headers: { Origin: "https://spartandrink.com", "Sec-Fetch-Site": "same-origin", "Content-Type": "application/json" },
+      body: JSON.stringify({ submission_id: `submission-${suffix}`, coupon_code: `SPN50-${suffix}`,
+        square_profile_consent: "yes", turnstile_token: "turnstile-token-good" }),
+    });
+    const first = await worker.fetch(request(), env, {});
+    const firstBody = await first.json();
+    const second = await worker.fetch(request(), env, {});
+    const secondBody = await second.json();
+    return { db, state, first, firstBody, second, secondBody };
+  };
+
+  const squareOutage = await runScenario("SEARCHOUT", { customerSearchFailures: 1 });
+  assert.equal(squareOutage.first.status, 503); assert.equal(squareOutage.firstBody.error_code, "SQUARE_API_ERROR");
+  assert.equal(squareOutage.second.status, 200); assert.equal(squareOutage.secondBody.offer_result, "ready");
+  assert.equal(squareOutage.db.claims.length, 1); assert.equal(squareOutage.state.squareCreateAttempts, 1);
+  assert.equal(squareOutage.state.groupAdds, 1); assert.equal(squareOutage.state.finalizeRequests.length, 1);
+
+  const groupPartial = await runScenario("GROUPFAIL", { groupAddFailures: 1 });
+  assert.equal(groupPartial.first.status, 503); assert.equal(groupPartial.firstBody.error_code, "SQUARE_API_ERROR");
+  assert.equal(groupPartial.db.claims.length, 1); assert.equal(groupPartial.state.squareCreateAttempts, 1);
+  assert.equal(groupPartial.second.status, 200); assert.equal(groupPartial.secondBody.offer_result, "ready");
+  assert.equal(groupPartial.state.squareCreateAttempts, 1, "recovery must find the first customer instead of creating another");
+  assert.equal(groupPartial.state.groupAddAttempts, 2); assert.equal(groupPartial.state.groupAdds, 1);
+  assert.equal(groupPartial.state.finalizeRequests.length, 1);
+
+  const ledgerPartial = await runScenario("LEDGERFAIL", { finalizeFailures: 1 });
+  assert.equal(ledgerPartial.first.status, 503); assert.equal(ledgerPartial.firstBody.error_code, "APPS_OFFER_FINALIZE_FAILED");
+  assert.equal(ledgerPartial.db.claims.length, 1); assert.equal(ledgerPartial.state.squareCreateAttempts, 1);
+  assert.equal(ledgerPartial.state.groupAdds, 1); assert.equal(ledgerPartial.state.finalizeRequests.length, 2);
+  assert.equal(ledgerPartial.second.status, 200); assert.equal(ledgerPartial.secondBody.offer_result, "ready");
+  assert.equal(ledgerPartial.state.squareCreateAttempts, 1, "SQUARE_READY recovery must not repeat provider provisioning");
+  assert.equal(ledgerPartial.state.groupAddAttempts, 1, "SQUARE_READY recovery must not repeat the group write");
 });
 
 check("offer provisions only name and phone, finalizes Apps first, and issues a strict pass", async () => {
@@ -745,15 +827,33 @@ check("offer provisions only name and phone, finalizes Apps first, and issues a 
   globalThis.__squareTest = { db, env, state, trace, queued };
 });
 
-check("webhook rejects bad signatures and ACKs only after D1 plus Queue", async () => {
+check("webhook rejects forged, altered, and unrecognized events and ACKs only after D1 plus Queue", async () => {
   const { db, env, queued } = globalThis.__squareTest;
   const event = { merchant_id: "MERCHANT_1", type: "payment.updated", event_id: "event-payment-0001", data: { type: "payment", id: "PAYMENT_1" } };
   const raw = JSON.stringify(event);
+  const rowsBeforeNegatives = db.webhooks.length;
+  const queueBeforeNegatives = queued.length;
   const bad = await worker.fetch(new Request(env.SQUARE_WEBHOOK_NOTIFICATION_URL, {
     method: "POST", headers: { "Content-Type": "application/json", "x-square-hmacsha256-signature": "bad" }, body: raw,
   }), env, {});
   assert.equal(bad.status, 403);
   const signature = createHmac("sha256", env.SQUARE_WEBHOOK_SIGNATURE_KEY).update(env.SQUARE_WEBHOOK_NOTIFICATION_URL + raw).digest("base64");
+  const alteredRaw = JSON.stringify({ ...event, event_id: "event-payment-altered" });
+  const altered = await worker.fetch(new Request(env.SQUARE_WEBHOOK_NOTIFICATION_URL, {
+    method: "POST", headers: { "Content-Type": "application/json", "x-square-hmacsha256-signature": signature }, body: alteredRaw,
+  }), env, {});
+  assert.equal(altered.status, 403, "a signature for the original body cannot authorize an altered body");
+  const unrecognizedEvent = { ...event, event_id: "event-customer-0001", type: "customer.created",
+    data: { type: "customer", id: "CUSTOMER_1" } };
+  const unrecognizedRaw = JSON.stringify(unrecognizedEvent);
+  const unrecognizedSignature = createHmac("sha256", env.SQUARE_WEBHOOK_SIGNATURE_KEY)
+    .update(env.SQUARE_WEBHOOK_NOTIFICATION_URL + unrecognizedRaw).digest("base64");
+  const unrecognized = await worker.fetch(new Request(env.SQUARE_WEBHOOK_NOTIFICATION_URL, {
+    method: "POST", headers: { "Content-Type": "application/json", "x-square-hmacsha256-signature": unrecognizedSignature }, body: unrecognizedRaw,
+  }), env, {});
+  assert.equal(unrecognized.status, 400);
+  assert.equal(db.webhooks.length, rowsBeforeNegatives, "negative webhook cases must create no D1 receipt");
+  assert.equal(queued.length, queueBeforeNegatives, "negative webhook cases must enqueue nothing");
   const good = await worker.fetch(new Request(env.SQUARE_WEBHOOK_NOTIFICATION_URL, {
     method: "POST", headers: { "Content-Type": "application/json", "x-square-hmacsha256-signature": signature }, body: raw,
   }), env, {});
@@ -822,6 +922,44 @@ check("consumer validates exact discount and quantity, commits redemption, and c
   assert.deepEqual(__test.inspectOrderForOffer(stacked, env), { ok: false, reason: "ORDER_DISCOUNT_STACKING_NOT_ALLOWED" });
   const nonUsd = structuredClone(state.order); nonUsd.line_items[0].applied_discounts[0].applied_money.currency = "EUR";
   assert.deepEqual(__test.inspectOrderForOffer(nonUsd, env), { ok: false, reason: "ORDER_DISCOUNT_AMOUNT_INVALID" });
+});
+
+check("ledger-committed group-removal failure retries without duplicating Apps evidence", async () => {
+  const db = new MockD1(); const env = baseEnv(db, { send: async () => {} }); const state = { groupRemoveFailures: 1 };
+  const now = new Date().toISOString();
+  db.claims.push({ claim_id: "claim_group_remove", submission_id: "submission-group-remove", coupon_code_hash: "hash",
+    identity_hash: "identity", square_customer_id: "CUSTOMER_GROUP_REMOVE", reference_id: "SPN1-0123456789ABCDEFabcd_-",
+    match_method: "created", group_membership_status: "added", finalize_effective_at: now, status: "READY",
+    apps_ledger_status: "READY", refund_review_required: 0, created_at: now, updated_at: now });
+  db.webhooks.push({ event_id: "event-group-remove", event_type: "payment.updated", object_id: "PAY_GROUP_REMOVE",
+    merchant_id: env.SQUARE_MERCHANT_ID, payload_json: "{}", state: "ENQUEUED", attempts: 0,
+    available_at: null, last_error_code: null, lease_token: null, lease_expires_at: null, created_at: now, updated_at: now });
+  state.customer = { id: "CUSTOMER_GROUP_REMOVE", version: 1, given_name: "Test", family_name: "Customer",
+    phone_number: "+19185550123", reference_id: "SPN1-0123456789ABCDEFabcd_-", group_ids: ["GROUP_FIRST"] };
+  state.payment = { id: "PAY_GROUP_REMOVE", status: "COMPLETED", location_id: env.SQUARE_LOCATION_ID,
+    customer_id: state.customer.id, order_id: "ORDER_GROUP_REMOVE", amount_money: { amount: 500, currency: "USD" },
+    created_at: now, updated_at: now };
+  state.order = { id: "ORDER_GROUP_REMOVE", state: "COMPLETED", location_id: env.SQUARE_LOCATION_ID,
+    customer_id: state.customer.id, discounts: [{ uid: "discount", catalog_object_id: env.SQUARE_DISCOUNT_CATALOG_ID,
+      name: "50% Off First Drink — Enter 50%", type: "FIXED_PERCENTAGE", percentage: "50", scope: "LINE_ITEM" }],
+    line_items: [{ uid: "drink", catalog_object_id: "VAR_TEA", quantity: "1",
+      applied_discounts: [{ discount_uid: "discount", applied_money: { amount: 500, currency: "USD" } }] }] };
+  installServiceMocks(env, [], state);
+
+  await __test.processQueueMessage({ kind: "square_webhook", event_id: "event-group-remove" }, env);
+  const appsItem = db.outbox.find((row) => row.action === "APPS_RECORD_REDEMPTION");
+  const removeItem = db.outbox.find((row) => row.action === "REMOVE_ELIGIBLE_GROUP");
+  await __test.processQueueMessage({ kind: "outbox", outbox_id: appsItem.outbox_id }, env);
+  assert.equal(appsItem.state, "DONE"); assert.equal(state.eventCommitCalls, 1);
+
+  await assert.rejects(() => __test.processQueueMessage({ kind: "outbox", outbox_id: removeItem.outbox_id }, env));
+  assert.equal(removeItem.state, "RETRY"); assert.equal(removeItem.attempts, 1);
+  assert.equal(removeItem.last_error_code, "SQUARE_API_ERROR"); assert.equal(db.redemptions.length, 1);
+  await __test.processQueueMessage({ kind: "outbox", outbox_id: removeItem.outbox_id }, env);
+  await __test.processQueueMessage({ kind: "outbox", outbox_id: appsItem.outbox_id }, env);
+  assert.equal(removeItem.state, "DONE"); assert.equal(state.groupRemoveAttempts, 2); assert.equal(state.groupRemoves, 1);
+  assert.equal(appsItem.state, "DONE"); assert.equal(state.eventCommitCalls, 1, "group recovery must not replay the committed Apps event");
+  assert.equal(db.redemptions.length, 1, "group recovery must not duplicate redemption evidence");
 });
 
 check("eventually consistent payment links and order state remain retryable", async () => {

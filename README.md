@@ -17,9 +17,15 @@ This repository contains the static website published at [spartandrink.com](http
 - `worker/` — the dependency-free Cloudflare Worker that confirms Sheet-backed form results on the Spartan page.
 - `docs/SEO-SOCIAL-PLAYBOOK.md` — the owner routine for local search, social links and campaign attribution.
 - `docs/MARKETING-ENGAGEMENT-ROADMAP.md` — the staged plan for confirmation UX, subscriber interests, acquisition-source learning, referrals, reviews, gamification and social automation.
+- `docs/PROJECT-2-OWNER-GUIDE.md` — a plain-English explanation of what Project 2 will do, why the official Square Sandbox is used, what is live now and which real-world approvals remain.
 - `docs/SQUARE-JOURNEY-PILOT.md` — the manual-first Project 2 plan for linking website claims to Square redemptions and repeat visits before referral/reward automation.
 - `square-worker/` — the isolated, default-off website-to-Square connector candidate; it is not deployed or authorized for production.
 - `docs/SQUARE-CONNECTOR-ROLLOUT.md` — the connector's security, privacy, sandbox, canary and rollback gates.
+- `docs/SQUARE-SANDBOX-NEGATIVE-RECOVERY-ACCEPTANCE.md` — the bounded execution worksheet for the remaining connector negative, partial-failure, Queue and DLQ sandbox cases. It records local proof separately from live provider acceptance and marks the remaining review, live-approval and DLQ-redrive boundaries; it does not authorize a live run.
+- `scripts/send-filtered-form-sandbox.mjs` and `scripts/send-square-sandbox-webhook.mjs` — default-inert, hidden-input sandbox drivers for the filtered Apps request and webhook integrity/replay cases. Their focused validators use mocked transport only; neither script makes a request unless its exact `--execute` form is entered.
+- `docs/SQUARE-DLQ-REDRIVE.md` — the local-only exact-target Queue/DLQ inspection and at-least-once redrive procedure. Its helper validates the two named sandbox Queues and is inert without an explicit mode; a temporary Queues Write token and every live Queue action remain separately gated.
+- `docs/POS-CODE128-PREFLIGHT.md` — the offline physical scanner preflight. Random-mode PASS requires a package-bound exact decoded-value comparison; a beep or no-results lookup alone is inconclusive.
+- `docs/SQUARE-SANDBOX-FAULT-HOOKS.md` — the default-off, sandbox-entrypoint-only, exact-target one-shot fault controller and masked offline preparation boundary. It is not deployed or armed.
 - `square-ops/` — the scheduled-only, default-off operations plane. Its aggregate D1 monitor, unbound counts-only alert engine, read-only Queue/DLQ source and signed Apps Script health source are deployed inertly on schema 4 in the isolated sandbox. The Option B Apps-health sandbox lane passed its bounded acceptance worksheet; the final all-off operations Worker version `12bd4dc9-3ed7-47e0-9c48-0c33d8a5c166` has no operations secrets, all six capability flags are false, and the service has no public route. The final `12:50` UTC cron wrote nothing. Preserved evidence is 34 monitor runs, five resolved incidents, zero active incidents, and zero deliveries, backups or restores.
 - `docs/SQUARE-OPERATIONS-RUNBOOK.md` — the operations plane's non-PII data boundary, alert/backup design, activation gates and rollback order.
 - `docs/APPS-HEALTH-SANDBOX-ACCEPTANCE.md` — the owner-controlled signed Apps-health test matrix, direct-verifier contract, stop rules and exposure-first rollback worksheet. The August 18 deadline failure and earlier August 19 disclosure, selector, second-hop and strict-probe stops remain preserved as historical evidence. Option B, commit `b87fa08b4e8e1e4fcf2462bc1d82cfdbbe4fea5d`, subsequently passed the complete sandbox worksheet with one shared `10000 ms` transport deadline, no retry and strict raw `<8000 ms` acceptance. This completes only the sandbox Apps-health lane; production activation remains gated.
@@ -93,6 +99,11 @@ When Square connector files change, run the complete dependency-free contract su
 
 ```sh
 node scripts/validate-square-connector.mjs
+node scripts/validate-square-sandbox-webhook-driver.mjs
+node scripts/validate-filtered-form-sandbox-driver.mjs
+node scripts/validate-square-dlq-tool.mjs
+node scripts/validate-pos-code128-preflight.mjs
+node scripts/validate-square-sandbox-faults.mjs
 node scripts/validate-square-apps-script.mjs
 node scripts/validate-square-frontend.mjs
 node scripts/validate-square-ops.mjs

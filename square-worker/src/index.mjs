@@ -14,8 +14,9 @@ const SANDBOX_SQUARE_API_BASE = "https://connect.squareupsandbox.com";
 const PRODUCTION_LOCATION_ID = "3MDGSXS33HERT";
 const SANDBOX_OWNER_HARNESS_PATH = "/sandbox/owner-offer-test";
 const encoder = new TextEncoder();
+const SANDBOX_FAULT_CONTROLLER = Symbol("spartan-square-sandbox-fault-controller");
 
-export default {
+const worker = {
   async fetch(request, env, ctx) {
     try {
       const url = new URL(request.url);
@@ -54,6 +55,64 @@ export default {
     if (env.DB) ctx.waitUntil(cleanupExpiredPasses(env));
   },
 };
+
+export default worker;
+
+// The production entrypoint exports `worker` directly. Only the separate
+// sandbox entrypoint can attach this module-private controller symbol; Worker
+// variables, secrets, request headers and query strings cannot create it.
+export function createSandboxWorker(controller) {
+  if (!controller || controller.contract !== "spartan-square-sandbox-faults-v1" ||
+      typeof controller.preflight !== "function" || typeof controller.maybeInject !== "function") {
+    throw new TypeError("SANDBOX_FAULT_CONTROLLER_INVALID");
+  }
+  const attach = (env) => {
+    const sandboxEnv = Object.create(env || null);
+    Object.defineProperty(sandboxEnv, SANDBOX_FAULT_CONTROLLER, {
+      configurable: false,
+      enumerable: false,
+      value: controller,
+      writable: false,
+    });
+    return sandboxEnv;
+  };
+  return Object.freeze({
+    async fetch(request, env, ctx) {
+      try {
+        await controller.preflight(env, { kind: "fetch" });
+      } catch (error) {
+        console.error("square_sandbox_fault_preflight_rejected", safeErrorCode(error));
+        return errorJson("SANDBOX_FAULT_PREFLIGHT_REJECTED", 503);
+      }
+      return worker.fetch(request, attach(env), ctx);
+    },
+    async queue(batch, env, ctx) {
+      const messages = Array.from(batch?.messages || []);
+      const items = messages.map((message) => {
+        const body = message?.body;
+        if (body?.kind === "square_webhook" && typeof body.event_id === "string") {
+          return { kind: "square_webhook", selector: body.event_id };
+        }
+        if (body?.kind === "outbox" && typeof body.outbox_id === "string") {
+          return { kind: "outbox", selector: body.outbox_id };
+        }
+        return { kind: "invalid", selector: "" };
+      });
+      await controller.preflight(env, { kind: "queue", items });
+      return worker.queue(batch, attach(env), ctx);
+    },
+    async scheduled(controllerEvent, env, ctx) {
+      await controller.preflight(env, { kind: "scheduled" });
+      return worker.scheduled(controllerEvent, attach(env), ctx);
+    },
+  });
+}
+
+async function maybeSandboxFault(env, mode, selector) {
+  const controller = env?.[SANDBOX_FAULT_CONTROLLER];
+  if (!controller) return false;
+  return controller.maybeInject({ env, mode, selector });
+}
 
 function sandboxOwnerHarnessRoute(request, env) {
   const url = new URL(request.url);
@@ -236,6 +295,7 @@ async function provisionOffer(input, env) {
 
   const provisioned = await findOrCreateSquareCustomer({
     claimId: claim.claim_id,
+    submissionId: input.submission_id,
     phone,
     name: personName,
     suppliedCustomerId: lookup.square_customer_id,
@@ -270,7 +330,10 @@ async function provisionOffer(input, env) {
   }
 
   const wasMember = Array.isArray(provisioned.customer.group_ids) && provisioned.customer.group_ids.includes(env.SQUARE_ELIGIBLE_GROUP_ID);
-  if (!wasMember) await addCustomerToGroup(provisioned.customer.id, env.SQUARE_ELIGIBLE_GROUP_ID, env);
+  if (!wasMember) {
+    await maybeSandboxFault(env, "SQUARE_GROUP_ADD_FAILURE", input.submission_id);
+    await addCustomerToGroup(provisioned.customer.id, env.SQUARE_ELIGIBLE_GROUP_ID, env);
+  }
   const verifiedCustomer = await retrieveCustomer(provisioned.customer.id, env);
   const groupIds = Array.isArray(verifiedCustomer.group_ids) ? verifiedCustomer.group_ids : [];
   if (verifiedCustomer.reference_id !== provisioned.referenceId || normalizeUsPhone(verifiedCustomer.phone_number) !== phone || !groupIds.includes(env.SQUARE_ELIGIBLE_GROUP_ID)) {
@@ -306,6 +369,7 @@ async function finalizeSquareReady(claim, input, env) {
       !/^\d{4}-\d{2}-\d{2}T/.test(String(claim.finalize_effective_at || ""))) {
     throw new ConnectorError("FINALIZE_EVIDENCE_MISSING", 503);
   }
+  await maybeSandboxFault(env, "APPS_FINALIZE_FAILURE", input.submission_id);
   const finalized = await appsCall("offer_finalize", {
     website_submission_id: input.submission_id,
     coupon_code: input.coupon_code,
@@ -358,6 +422,7 @@ async function findOrCreateSquareCustomer(input, env) {
     return { customer, created: false };
   }
 
+  await maybeSandboxFault(env, "SQUARE_SEARCH_OUTAGE", input.submissionId);
   const search = await squareRequest("POST", "/v2/customers/search", {
     query: { filter: { phone_number: { exact: input.phone } } },
     limit: 10,
@@ -570,6 +635,10 @@ async function processWebhookEvent(eventId, env) {
   event.attempts = Number(event.attempts || 0) + 1;
   event.lease_token = leaseToken;
   event.lease_expires_at = leaseExpiresAt;
+  // This hook intentionally sits outside the normal retry catch. The single
+  // sandbox-only interruption leaves the acquired lease intact so scheduled
+  // recovery, rather than the current Queue delivery, must reclaim it.
+  await maybeSandboxFault(env, "QUEUE_POST_LEASE_INTERRUPT", eventId);
   try {
     if (event.event_type === "payment.created" || event.event_type === "payment.updated") await processPaymentEvent(event, env);
     else if (event.event_type === "refund.created" || event.event_type === "refund.updated") await processRefundEvent(event, env);
@@ -1108,6 +1177,9 @@ async function processOutboxItem(outboxId, env) {
   item.attempts = Number(item.attempts || 0) + 1;
   item.lease_token = leaseToken;
   item.lease_expires_at = leaseExpiresAt;
+  // See the webhook equivalent above. Exact-target matching plus the atomic
+  // one-shot ledger prevents a broader or repeated interruption.
+  await maybeSandboxFault(env, "QUEUE_POST_LEASE_INTERRUPT", outboxId);
   try {
     let payload;
     try { payload = JSON.parse(item.payload_json); } catch { throw permanent("OUTBOX_PAYLOAD_INVALID"); }
@@ -1127,6 +1199,7 @@ async function processOutboxItem(outboxId, env) {
       if (dependency.state !== "DONE") throw transient("APPS_DEPENDENCY_NOT_READY");
     }
     if (item.action === "REMOVE_ELIGIBLE_GROUP") {
+      await maybeSandboxFault(env, "SQUARE_GROUP_REMOVE_FAILURE", outboxId);
       await squareRequest("DELETE", `/v2/customers/${encodeURIComponent(payload.square_customer_id)}/groups/${encodeURIComponent(env.SQUARE_ELIGIBLE_GROUP_ID)}`, null, env);
     } else if (item.action === "ADD_REDEEMED_GROUP") {
       if (env.SQUARE_REDEEMED_GROUP_ID) await addCustomerToGroup(payload.square_customer_id, env.SQUARE_REDEEMED_GROUP_ID, env);
@@ -1827,4 +1900,5 @@ export const __test = Object.freeze({
   claimCouponHash,
   identityPhoneHash,
   reconciliationEventId,
+  maybeSandboxFault,
 });
