@@ -1972,7 +1972,9 @@ function exerciseP02AggregateSql(track) {
     ).get(modifier).value;
     const admittedAt = isoAt(track === "apps_first" ? "-32 seconds" : "-62 seconds");
     const faultAt = isoAt(track === "apps_first" ? "-31 seconds" : "-61 seconds");
-    const faultAvailableAt = isoAt("-1 seconds");
+    const faultAvailableAt = db.prepare(
+      "SELECT strftime('%Y-%m-%dT%H:%M:%fZ', ?, ?) AS value",
+    ).get(faultAt, track === "apps_first" ? "+30 seconds" : "+60 seconds").value;
     const recoveryAt = isoAt("+0 seconds");
     const leaseExpiresAt = db.prepare(
       "SELECT strftime('%Y-%m-%dT%H:%M:%fZ', ?, '+900 seconds') AS value",
