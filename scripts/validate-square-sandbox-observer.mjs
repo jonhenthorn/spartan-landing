@@ -2765,6 +2765,20 @@ try {
   aggregate = q02Db.prepare(__test.D1_Q02_QUERY).get();
   assert.equal(aggregate.terminal_ignored_attempt_one_exact_count, 0);
   assert.match(aggregate.webhook_buckets_json, /OTHER_ENVELOPE/);
+  q02Db.prepare(`UPDATE webhook_events SET state='ENQUEUED', attempts=0,
+    last_error_code=NULL, available_at=NULL, lease_token=NULL, lease_expires_at=NULL
+    WHERE event_id=?`).run(eventId);
+  aggregate = q02Db.prepare(__test.D1_Q02_QUERY).get();
+  assert.equal(aggregate.seed_enqueued_exact_count, 0);
+  assert.match(aggregate.webhook_buckets_json, /OTHER_ENVELOPE/);
+  q02Db.prepare(`UPDATE webhook_events SET state='PROCESSING', attempts=1,
+    updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+    lease_token='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    lease_expires_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+900 seconds')
+    WHERE event_id=?`).run(eventId);
+  aggregate = q02Db.prepare(__test.D1_Q02_QUERY).get();
+  assert.equal(aggregate.processing_attempt_one_exact_count, 0);
+  assert.match(aggregate.webhook_buckets_json, /OTHER_ENVELOPE/);
 } finally {
   q02Db.close();
 }

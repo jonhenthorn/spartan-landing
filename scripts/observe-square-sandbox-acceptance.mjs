@@ -1589,7 +1589,13 @@ SELECT
 // remain inside SQL. The result exposes only fixed classifications and counts,
 // including the exact state/attempt/error/envelope transition of the one row.
 const D1_Q02_QUERY = `
-WITH classified AS (
+WITH normalized AS (
+  SELECT *,
+    json_valid(payload_json) AS payload_is_valid,
+    CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END AS safe_payload_json
+  FROM webhook_events
+),
+classified AS (
   SELECT
     CASE WHEN event_type = 'payment.updated' THEN 'PAYMENT_UPDATED' ELSE 'OTHER_EVENT' END AS event_kind,
     state,
@@ -1597,24 +1603,24 @@ WITH classified AS (
     attempts,
     CASE
       WHEN payload_json = '{}' THEN 'SCRUBBED_EMPTY'
-      WHEN json_valid(payload_json)
-        AND (SELECT COUNT(*) FROM json_each(payload_json)) = 4
-        AND json_type(payload_json, '$.event_id') = 'text'
-        AND json_type(payload_json, '$.type') = 'text'
-        AND json_type(payload_json, '$.merchant_id') = 'text'
-        AND json_type(payload_json, '$.object_id') = 'text'
-        AND json_extract(payload_json, '$.event_id') = event_id
-        AND json_extract(payload_json, '$.type') = event_type
-        AND json_extract(payload_json, '$.merchant_id') = merchant_id
-        AND json_extract(payload_json, '$.object_id') = object_id
+      WHEN payload_is_valid
+        AND (SELECT COUNT(*) FROM json_each(safe_payload_json)) = 4
+        AND json_type(safe_payload_json, '$.event_id') = 'text'
+        AND json_type(safe_payload_json, '$.type') = 'text'
+        AND json_type(safe_payload_json, '$.merchant_id') = 'text'
+        AND json_type(safe_payload_json, '$.object_id') = 'text'
+        AND json_extract(safe_payload_json, '$.event_id') = event_id
+        AND json_extract(safe_payload_json, '$.type') = event_type
+        AND json_extract(safe_payload_json, '$.merchant_id') = merchant_id
+        AND json_extract(safe_payload_json, '$.object_id') = object_id
         THEN 'CANONICAL_FOUR_FIELD'
       ELSE 'OTHER_ENVELOPE'
     END AS envelope_kind
-  FROM webhook_events
+  FROM normalized
 )
 SELECT
-  (SELECT COUNT(*) FROM webhook_events) AS webhook_total_count,
-  (SELECT COUNT(*) FROM webhook_events
+  (SELECT COUNT(*) FROM normalized) AS webhook_total_count,
+  (SELECT COUNT(*) FROM normalized
     WHERE event_type = 'payment.updated' AND merchant_id = 'ML8W3CSGD2B71'
       AND state = 'ENQUEUED' AND attempts = 0 AND last_error_code IS NULL
       AND available_at IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL
@@ -1622,16 +1628,16 @@ SELECT
       AND strftime('%Y-%m-%dT%H:%M:%fZ', updated_at) = updated_at
       AND julianday(created_at) <= julianday(updated_at)
       AND julianday(updated_at) <= julianday('now')
-      AND json_valid(payload_json) AND (SELECT COUNT(*) FROM json_each(payload_json)) = 4
-      AND json_type(payload_json, '$.event_id') = 'text'
-      AND json_type(payload_json, '$.type') = 'text'
-      AND json_type(payload_json, '$.merchant_id') = 'text'
-      AND json_type(payload_json, '$.object_id') = 'text'
-      AND json_extract(payload_json, '$.event_id') = event_id
-      AND json_extract(payload_json, '$.type') = event_type
-      AND json_extract(payload_json, '$.merchant_id') = merchant_id
-      AND json_extract(payload_json, '$.object_id') = object_id) AS seed_enqueued_exact_count,
-  (SELECT COUNT(*) FROM webhook_events
+      AND payload_is_valid AND (SELECT COUNT(*) FROM json_each(safe_payload_json)) = 4
+      AND json_type(safe_payload_json, '$.event_id') = 'text'
+      AND json_type(safe_payload_json, '$.type') = 'text'
+      AND json_type(safe_payload_json, '$.merchant_id') = 'text'
+      AND json_type(safe_payload_json, '$.object_id') = 'text'
+      AND json_extract(safe_payload_json, '$.event_id') = event_id
+      AND json_extract(safe_payload_json, '$.type') = event_type
+      AND json_extract(safe_payload_json, '$.merchant_id') = merchant_id
+      AND json_extract(safe_payload_json, '$.object_id') = object_id) AS seed_enqueued_exact_count,
+  (SELECT COUNT(*) FROM normalized
     WHERE event_type = 'payment.updated' AND merchant_id = 'ML8W3CSGD2B71'
       AND state = 'PROCESSING' AND attempts = 1 AND last_error_code IS NULL
       AND available_at IS NULL
@@ -1645,16 +1651,16 @@ SELECT
       AND julianday(lease_expires_at) >= julianday(updated_at, '+900 seconds')
       AND julianday(lease_expires_at) <= julianday(updated_at, '+905 seconds')
       AND julianday('now') < julianday(lease_expires_at)
-      AND json_valid(payload_json) AND (SELECT COUNT(*) FROM json_each(payload_json)) = 4
-      AND json_type(payload_json, '$.event_id') = 'text'
-      AND json_type(payload_json, '$.type') = 'text'
-      AND json_type(payload_json, '$.merchant_id') = 'text'
-      AND json_type(payload_json, '$.object_id') = 'text'
-      AND json_extract(payload_json, '$.event_id') = event_id
-      AND json_extract(payload_json, '$.type') = event_type
-      AND json_extract(payload_json, '$.merchant_id') = merchant_id
-      AND json_extract(payload_json, '$.object_id') = object_id) AS processing_attempt_one_exact_count,
-  (SELECT COUNT(*) FROM webhook_events
+      AND payload_is_valid AND (SELECT COUNT(*) FROM json_each(safe_payload_json)) = 4
+      AND json_type(safe_payload_json, '$.event_id') = 'text'
+      AND json_type(safe_payload_json, '$.type') = 'text'
+      AND json_type(safe_payload_json, '$.merchant_id') = 'text'
+      AND json_type(safe_payload_json, '$.object_id') = 'text'
+      AND json_extract(safe_payload_json, '$.event_id') = event_id
+      AND json_extract(safe_payload_json, '$.type') = event_type
+      AND json_extract(safe_payload_json, '$.merchant_id') = merchant_id
+      AND json_extract(safe_payload_json, '$.object_id') = object_id) AS processing_attempt_one_exact_count,
+  (SELECT COUNT(*) FROM normalized
     WHERE event_type = 'payment.updated' AND merchant_id = 'ML8W3CSGD2B71'
       AND state = 'IGNORED' AND attempts = 1
       AND last_error_code = 'NORMAL_ORDER_WITHOUT_LINKED_CUSTOMER'
