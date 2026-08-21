@@ -183,36 +183,42 @@ FROM webhook_events;`;
 // Aggregate-only O-01 evidence. It returns no event, object, claim, stage-key,
 // payload, lease-token or provider identifier.
 const D1_O01_QUERY = `
+WITH normalized_webhook_events AS (
+  SELECT *,
+    json_valid(payload_json) AS payload_is_valid,
+    CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END AS safe_payload_json
+  FROM webhook_events
+)
 SELECT
-  (SELECT COUNT(*) FROM webhook_events
+  (SELECT COUNT(*) FROM normalized_webhook_events
     WHERE event_type = 'refund.updated' AND state = 'ENQUEUED' AND attempts = 0
       AND last_error_code IS NULL AND available_at IS NULL
-      AND lease_token IS NULL AND lease_expires_at IS NULL AND json_valid(payload_json)
-      AND (SELECT COUNT(*) FROM json_each(payload_json)) = 4
-      AND json_type(payload_json, '$.event_id') = 'text'
-      AND json_type(payload_json, '$.type') = 'text'
-      AND json_type(payload_json, '$.merchant_id') = 'text'
-      AND json_type(payload_json, '$.object_id') = 'text'
-      AND json_extract(payload_json, '$.event_id') = event_id
-      AND json_extract(payload_json, '$.type') = event_type
-      AND json_extract(payload_json, '$.merchant_id') = merchant_id
-      AND json_extract(payload_json, '$.object_id') = object_id
+      AND lease_token IS NULL AND lease_expires_at IS NULL AND payload_is_valid
+      AND (SELECT COUNT(*) FROM json_each(safe_payload_json)) = 4
+      AND json_type(safe_payload_json, '$.event_id') = 'text'
+      AND json_type(safe_payload_json, '$.type') = 'text'
+      AND json_type(safe_payload_json, '$.merchant_id') = 'text'
+      AND json_type(safe_payload_json, '$.object_id') = 'text'
+      AND json_extract(safe_payload_json, '$.event_id') = event_id
+      AND json_extract(safe_payload_json, '$.type') = event_type
+      AND json_extract(safe_payload_json, '$.merchant_id') = merchant_id
+      AND json_extract(safe_payload_json, '$.object_id') = object_id
       AND merchant_id = 'ML8W3CSGD2B71') AS refund_enqueued_attempt_zero_count,
-  (SELECT COUNT(*) FROM webhook_events
+  (SELECT COUNT(*) FROM normalized_webhook_events
     WHERE event_type = 'payment.updated' AND state = 'ENQUEUED' AND attempts = 0
       AND last_error_code IS NULL AND available_at IS NULL
-      AND lease_token IS NULL AND lease_expires_at IS NULL AND json_valid(payload_json)
-      AND (SELECT COUNT(*) FROM json_each(payload_json)) = 4
-      AND json_type(payload_json, '$.event_id') = 'text'
-      AND json_type(payload_json, '$.type') = 'text'
-      AND json_type(payload_json, '$.merchant_id') = 'text'
-      AND json_type(payload_json, '$.object_id') = 'text'
-      AND json_extract(payload_json, '$.event_id') = event_id
-      AND json_extract(payload_json, '$.type') = event_type
-      AND json_extract(payload_json, '$.merchant_id') = merchant_id
-      AND json_extract(payload_json, '$.object_id') = object_id
+      AND lease_token IS NULL AND lease_expires_at IS NULL AND payload_is_valid
+      AND (SELECT COUNT(*) FROM json_each(safe_payload_json)) = 4
+      AND json_type(safe_payload_json, '$.event_id') = 'text'
+      AND json_type(safe_payload_json, '$.type') = 'text'
+      AND json_type(safe_payload_json, '$.merchant_id') = 'text'
+      AND json_type(safe_payload_json, '$.object_id') = 'text'
+      AND json_extract(safe_payload_json, '$.event_id') = event_id
+      AND json_extract(safe_payload_json, '$.type') = event_type
+      AND json_extract(safe_payload_json, '$.merchant_id') = merchant_id
+      AND json_extract(safe_payload_json, '$.object_id') = object_id
       AND merchant_id = 'ML8W3CSGD2B71') AS payment_enqueued_attempt_zero_count,
-  (SELECT COUNT(*) FROM webhook_events
+  (SELECT COUNT(*) FROM normalized_webhook_events
     WHERE event_type = 'refund.updated' AND state = 'RETRY' AND attempts = 1
       AND last_error_code = 'REFUND_WAITING_FOR_REDEMPTION'
       AND available_at IS NOT NULL AND lease_token IS NULL AND lease_expires_at IS NULL
@@ -221,15 +227,15 @@ SELECT
       AND strftime('%Y-%m-%dT%H:%M:%fZ', available_at) = available_at
       AND julianday(created_at) <= julianday(updated_at)
       AND available_at = strftime('%Y-%m-%dT%H:%M:%fZ', updated_at, '+30 seconds')
-      AND json_valid(payload_json) AND (SELECT COUNT(*) FROM json_each(payload_json)) = 4
-      AND json_type(payload_json, '$.event_id') = 'text'
-      AND json_type(payload_json, '$.type') = 'text'
-      AND json_type(payload_json, '$.merchant_id') = 'text'
-      AND json_type(payload_json, '$.object_id') = 'text'
-      AND json_extract(payload_json, '$.event_id') = event_id
-      AND json_extract(payload_json, '$.type') = event_type
-      AND json_extract(payload_json, '$.merchant_id') = merchant_id
-      AND json_extract(payload_json, '$.object_id') = object_id
+      AND payload_is_valid AND (SELECT COUNT(*) FROM json_each(safe_payload_json)) = 4
+      AND json_type(safe_payload_json, '$.event_id') = 'text'
+      AND json_type(safe_payload_json, '$.type') = 'text'
+      AND json_type(safe_payload_json, '$.merchant_id') = 'text'
+      AND json_type(safe_payload_json, '$.object_id') = 'text'
+      AND json_extract(safe_payload_json, '$.event_id') = event_id
+      AND json_extract(safe_payload_json, '$.type') = event_type
+      AND json_extract(safe_payload_json, '$.merchant_id') = merchant_id
+      AND json_extract(safe_payload_json, '$.object_id') = object_id
       AND merchant_id = 'ML8W3CSGD2B71') AS refund_waiting_attempt_one_count,
   (SELECT COUNT(*) FROM webhook_events
     WHERE event_type = 'payment.updated' AND state = 'PROCESSED' AND attempts = 1
@@ -313,8 +319,14 @@ SELECT
 // digest, payload, lease token, or provider identifier. The envelope checks
 // remain inside SQL so a malformed retained row cannot enter a stable phase.
 const D1_Q01_QUERY = `
+WITH normalized_webhook_events AS (
+  SELECT *,
+    json_valid(payload_json) AS payload_is_valid,
+    CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END AS safe_payload_json
+  FROM webhook_events
+)
 SELECT
-  (SELECT COUNT(*) FROM webhook_events
+  (SELECT COUNT(*) FROM normalized_webhook_events
     WHERE event_type = 'payment.updated' AND state = 'ENQUEUED' AND attempts = 0
       AND last_error_code IS NULL AND available_at IS NULL
       AND lease_token IS NULL AND lease_expires_at IS NULL
@@ -322,17 +334,17 @@ SELECT
       AND strftime('%Y-%m-%dT%H:%M:%fZ', updated_at) = updated_at
       AND julianday(created_at) <= julianday(updated_at)
       AND julianday(updated_at) <= julianday('now')
-      AND json_valid(payload_json) AND (SELECT COUNT(*) FROM json_each(payload_json)) = 4
-      AND json_type(payload_json, '$.event_id') = 'text'
-      AND json_type(payload_json, '$.type') = 'text'
-      AND json_type(payload_json, '$.merchant_id') = 'text'
-      AND json_type(payload_json, '$.object_id') = 'text'
-      AND json_extract(payload_json, '$.event_id') = event_id
-      AND json_extract(payload_json, '$.type') = event_type
-      AND json_extract(payload_json, '$.merchant_id') = merchant_id
-      AND json_extract(payload_json, '$.object_id') = object_id
+      AND payload_is_valid AND (SELECT COUNT(*) FROM json_each(safe_payload_json)) = 4
+      AND json_type(safe_payload_json, '$.event_id') = 'text'
+      AND json_type(safe_payload_json, '$.type') = 'text'
+      AND json_type(safe_payload_json, '$.merchant_id') = 'text'
+      AND json_type(safe_payload_json, '$.object_id') = 'text'
+      AND json_extract(safe_payload_json, '$.event_id') = event_id
+      AND json_extract(safe_payload_json, '$.type') = event_type
+      AND json_extract(safe_payload_json, '$.merchant_id') = merchant_id
+      AND json_extract(safe_payload_json, '$.object_id') = object_id
       AND merchant_id = 'ML8W3CSGD2B71') AS payment_enqueued_attempt_zero_count,
-  (SELECT COUNT(*) FROM webhook_events
+  (SELECT COUNT(*) FROM normalized_webhook_events
     WHERE event_type = 'payment.updated' AND state = 'PROCESSING' AND attempts = 1
       AND last_error_code IS NULL AND available_at IS NULL
       AND lease_token GLOB
@@ -345,17 +357,17 @@ SELECT
       AND julianday(lease_expires_at) >= julianday(updated_at, '+900 seconds')
       AND julianday(lease_expires_at) <= julianday(updated_at, '+905 seconds')
       AND julianday('now') < julianday(lease_expires_at)
-      AND json_valid(payload_json) AND (SELECT COUNT(*) FROM json_each(payload_json)) = 4
-      AND json_type(payload_json, '$.event_id') = 'text'
-      AND json_type(payload_json, '$.type') = 'text'
-      AND json_type(payload_json, '$.merchant_id') = 'text'
-      AND json_type(payload_json, '$.object_id') = 'text'
-      AND json_extract(payload_json, '$.event_id') = event_id
-      AND json_extract(payload_json, '$.type') = event_type
-      AND json_extract(payload_json, '$.merchant_id') = merchant_id
-      AND json_extract(payload_json, '$.object_id') = object_id
+      AND payload_is_valid AND (SELECT COUNT(*) FROM json_each(safe_payload_json)) = 4
+      AND json_type(safe_payload_json, '$.event_id') = 'text'
+      AND json_type(safe_payload_json, '$.type') = 'text'
+      AND json_type(safe_payload_json, '$.merchant_id') = 'text'
+      AND json_type(safe_payload_json, '$.object_id') = 'text'
+      AND json_extract(safe_payload_json, '$.event_id') = event_id
+      AND json_extract(safe_payload_json, '$.type') = event_type
+      AND json_extract(safe_payload_json, '$.merchant_id') = merchant_id
+      AND json_extract(safe_payload_json, '$.object_id') = object_id
       AND merchant_id = 'ML8W3CSGD2B71') AS active_processing_attempt_one_count,
-  (SELECT COUNT(*) FROM webhook_events
+  (SELECT COUNT(*) FROM normalized_webhook_events
     WHERE event_type = 'payment.updated' AND state = 'RETRY' AND attempts = 1
       AND last_error_code = 'STALE_PROCESSING_LEASE'
       AND lease_token IS NULL AND lease_expires_at IS NULL
@@ -365,17 +377,17 @@ SELECT
       AND julianday(created_at) <= julianday(updated_at)
       AND julianday(updated_at) <= julianday('now')
       AND available_at = strftime('%Y-%m-%dT%H:%M:%fZ', updated_at, '+30 seconds')
-      AND json_valid(payload_json) AND (SELECT COUNT(*) FROM json_each(payload_json)) = 4
-      AND json_type(payload_json, '$.event_id') = 'text'
-      AND json_type(payload_json, '$.type') = 'text'
-      AND json_type(payload_json, '$.merchant_id') = 'text'
-      AND json_type(payload_json, '$.object_id') = 'text'
-      AND json_extract(payload_json, '$.event_id') = event_id
-      AND json_extract(payload_json, '$.type') = event_type
-      AND json_extract(payload_json, '$.merchant_id') = merchant_id
-      AND json_extract(payload_json, '$.object_id') = object_id
+      AND payload_is_valid AND (SELECT COUNT(*) FROM json_each(safe_payload_json)) = 4
+      AND json_type(safe_payload_json, '$.event_id') = 'text'
+      AND json_type(safe_payload_json, '$.type') = 'text'
+      AND json_type(safe_payload_json, '$.merchant_id') = 'text'
+      AND json_type(safe_payload_json, '$.object_id') = 'text'
+      AND json_extract(safe_payload_json, '$.event_id') = event_id
+      AND json_extract(safe_payload_json, '$.type') = event_type
+      AND json_extract(safe_payload_json, '$.merchant_id') = merchant_id
+      AND json_extract(safe_payload_json, '$.object_id') = object_id
       AND merchant_id = 'ML8W3CSGD2B71') AS stale_retry_attempt_one_count,
-  (SELECT COUNT(*) FROM webhook_events
+  (SELECT COUNT(*) FROM normalized_webhook_events
     WHERE event_type = 'payment.updated' AND state = 'PROCESSING' AND attempts = 2
       AND last_error_code IS NULL AND available_at IS NULL
       AND lease_token GLOB
@@ -388,15 +400,15 @@ SELECT
       AND julianday(lease_expires_at) >= julianday(updated_at, '+900 seconds')
       AND julianday(lease_expires_at) <= julianday(updated_at, '+905 seconds')
       AND julianday('now') < julianday(lease_expires_at)
-      AND json_valid(payload_json) AND (SELECT COUNT(*) FROM json_each(payload_json)) = 4
-      AND json_type(payload_json, '$.event_id') = 'text'
-      AND json_type(payload_json, '$.type') = 'text'
-      AND json_type(payload_json, '$.merchant_id') = 'text'
-      AND json_type(payload_json, '$.object_id') = 'text'
-      AND json_extract(payload_json, '$.event_id') = event_id
-      AND json_extract(payload_json, '$.type') = event_type
-      AND json_extract(payload_json, '$.merchant_id') = merchant_id
-      AND json_extract(payload_json, '$.object_id') = object_id
+      AND payload_is_valid AND (SELECT COUNT(*) FROM json_each(safe_payload_json)) = 4
+      AND json_type(safe_payload_json, '$.event_id') = 'text'
+      AND json_type(safe_payload_json, '$.type') = 'text'
+      AND json_type(safe_payload_json, '$.merchant_id') = 'text'
+      AND json_type(safe_payload_json, '$.object_id') = 'text'
+      AND json_extract(safe_payload_json, '$.event_id') = event_id
+      AND json_extract(safe_payload_json, '$.type') = event_type
+      AND json_extract(safe_payload_json, '$.merchant_id') = merchant_id
+      AND json_extract(safe_payload_json, '$.object_id') = object_id
       AND merchant_id = 'ML8W3CSGD2B71') AS recovery_processing_attempt_two_count,
   (SELECT COUNT(*) FROM webhook_events
     WHERE event_type = 'payment.updated' AND state = 'IGNORED' AND attempts = 2
@@ -892,7 +904,23 @@ SELECT
     AS canonical_ready_pass_max_expires_at;`;
 
 const D1_P02_QUERY = `
-WITH p02_lineage AS (
+WITH normalized_webhook_events AS (
+  SELECT w.event_id, w.event_type, w.object_id, w.merchant_id,
+    json_valid(w.payload_json) AS payload_is_valid,
+    CASE WHEN json_valid(w.payload_json) THEN w.payload_json ELSE '{}' END AS payload_json,
+    w.state, w.attempts, w.last_error_code, w.created_at, w.updated_at,
+    w.lease_token, w.lease_expires_at, w.available_at
+  FROM webhook_events w
+),
+normalized_square_outbox AS (
+  SELECT o.outbox_id, o.dedupe_key, o.claim_id, o.action,
+    json_valid(o.payload_json) AS payload_is_valid,
+    CASE WHEN json_valid(o.payload_json) THEN o.payload_json ELSE '{}' END AS payload_json,
+    o.state, o.attempts, o.available_at, o.last_error_code, o.created_at, o.updated_at,
+    o.lease_token, o.lease_expires_at
+  FROM square_outbox o
+),
+p02_lineage AS (
   SELECT
     w.event_id AS source_event_id,
     w.object_id AS source_payment_id,
@@ -1035,7 +1063,7 @@ p02_unique_stages AS (
 p02_roles AS (
   SELECT l.*,
     CASE WHEN EXISTS (
-      SELECT 1 FROM square_outbox o
+      SELECT 1 FROM normalized_square_outbox o
        WHERE o.outbox_id = 'out_apps_redeem_' || l.source_claim_id
          AND o.dedupe_key = 'apps-redemption:' || l.source_claim_id
          AND o.claim_id = l.source_claim_id AND o.action = 'APPS_RECORD_REDEMPTION'
@@ -1048,7 +1076,7 @@ p02_roles AS (
          AND o.available_at = o.created_at
          AND julianday(o.created_at) <= julianday(o.updated_at)
          AND julianday(o.updated_at) <= julianday('now')
-         AND json_valid(o.payload_json) AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 16
+         AND o.payload_is_valid AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 16
          AND json_type(o.payload_json, '$.square_event_id') = 'text'
          AND json_type(o.payload_json, '$.square_event_type') = 'text'
          AND json_type(o.payload_json, '$.occurred_at_utc') = 'text'
@@ -1083,7 +1111,7 @@ p02_roles AS (
          AND json_extract(o.payload_json, '$.refund_scope') = ''
     ) THEN 1 ELSE 0 END AS apps_done_ready,
     CASE WHEN EXISTS (
-      SELECT 1 FROM square_outbox o
+      SELECT 1 FROM normalized_square_outbox o
        WHERE o.outbox_id = 'out_add_redeemed_' || l.source_claim_id
          AND o.dedupe_key = 'add-redeemed:' || l.source_claim_id
          AND o.claim_id = l.source_claim_id AND o.action = 'ADD_REDEEMED_GROUP'
@@ -1096,12 +1124,12 @@ p02_roles AS (
          AND o.available_at = o.created_at
          AND julianday(o.created_at) <= julianday(o.updated_at)
          AND julianday(o.updated_at) <= julianday('now')
-         AND json_valid(o.payload_json) AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 1
+         AND o.payload_is_valid AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 1
          AND json_type(o.payload_json, '$.square_customer_id') = 'text'
          AND json_extract(o.payload_json, '$.square_customer_id') = l.source_customer_id
     ) THEN 1 ELSE 0 END AS redeemed_add_done_ready,
     CASE WHEN EXISTS (
-      SELECT 1 FROM square_outbox o
+      SELECT 1 FROM normalized_square_outbox o
        WHERE o.outbox_id = 'out_add_redeemed_' || l.source_claim_id
          AND o.dedupe_key = 'add-redeemed:' || l.source_claim_id
          AND o.claim_id = l.source_claim_id AND o.action = 'ADD_REDEEMED_GROUP'
@@ -1112,12 +1140,12 @@ p02_roles AS (
          AND strftime('%Y-%m-%dT%H:%M:%fZ', o.available_at) = o.available_at
          AND o.created_at = l.source_committed_at AND o.updated_at = o.created_at
          AND o.available_at = o.created_at AND julianday(o.updated_at) <= julianday('now')
-         AND json_valid(o.payload_json) AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 1
+         AND o.payload_is_valid AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 1
          AND json_type(o.payload_json, '$.square_customer_id') = 'text'
          AND json_extract(o.payload_json, '$.square_customer_id') = l.source_customer_id
     ) THEN 1 ELSE 0 END AS redeemed_add_pending_ready,
     CASE WHEN EXISTS (
-      SELECT 1 FROM square_outbox o
+      SELECT 1 FROM normalized_square_outbox o
        WHERE o.outbox_id = 'out_add_redeemed_' || l.source_claim_id
          AND o.dedupe_key = 'add-redeemed:' || l.source_claim_id
          AND o.claim_id = l.source_claim_id AND o.action = 'ADD_REDEEMED_GROUP'
@@ -1134,12 +1162,12 @@ p02_roles AS (
          AND julianday(o.updated_at) <= julianday('now')
          AND julianday(o.lease_expires_at) > julianday('now')
          AND o.lease_expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', o.updated_at, '+900 seconds')
-         AND json_valid(o.payload_json) AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 1
+         AND o.payload_is_valid AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 1
          AND json_type(o.payload_json, '$.square_customer_id') = 'text'
          AND json_extract(o.payload_json, '$.square_customer_id') = l.source_customer_id
     ) THEN 1 ELSE 0 END AS redeemed_add_processing_ready,
     CASE WHEN EXISTS (
-      SELECT 1 FROM square_outbox o
+      SELECT 1 FROM normalized_square_outbox o
        WHERE o.outbox_id = 'out_remove_' || l.source_claim_id
          AND o.dedupe_key = 'remove-group:' || l.source_claim_id
          AND o.claim_id = l.source_claim_id AND o.action = 'REMOVE_ELIGIBLE_GROUP'
@@ -1150,12 +1178,12 @@ p02_roles AS (
          AND strftime('%Y-%m-%dT%H:%M:%fZ', o.available_at) = o.available_at
          AND o.created_at = l.source_committed_at AND o.updated_at = o.created_at
          AND o.available_at = o.created_at AND julianday(o.updated_at) <= julianday('now')
-         AND json_valid(o.payload_json) AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 1
+         AND o.payload_is_valid AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 1
          AND json_type(o.payload_json, '$.square_customer_id') = 'text'
          AND json_extract(o.payload_json, '$.square_customer_id') = l.source_customer_id
     ) THEN 1 ELSE 0 END AS removal_pending_ready,
     CASE WHEN EXISTS (
-      SELECT 1 FROM square_outbox o
+      SELECT 1 FROM normalized_square_outbox o
        WHERE o.outbox_id = 'out_remove_' || l.source_claim_id
          AND o.dedupe_key = 'remove-group:' || l.source_claim_id
          AND o.claim_id = l.source_claim_id AND o.action = 'REMOVE_ELIGIBLE_GROUP'
@@ -1169,12 +1197,12 @@ p02_roles AS (
          AND julianday(o.created_at) <= julianday(o.updated_at)
          AND julianday(o.updated_at) <= julianday('now')
          AND o.available_at = strftime('%Y-%m-%dT%H:%M:%fZ', o.updated_at, '+30 seconds')
-         AND json_valid(o.payload_json) AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 1
+         AND o.payload_is_valid AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 1
          AND json_type(o.payload_json, '$.square_customer_id') = 'text'
          AND json_extract(o.payload_json, '$.square_customer_id') = l.source_customer_id
     ) THEN 1 ELSE 0 END AS removal_wait_ready,
     CASE WHEN EXISTS (
-      SELECT 1 FROM square_outbox o
+      SELECT 1 FROM normalized_square_outbox o
        WHERE o.outbox_id = 'out_remove_' || l.source_claim_id
          AND o.dedupe_key = 'remove-group:' || l.source_claim_id
          AND o.claim_id = l.source_claim_id AND o.action = 'REMOVE_ELIGIBLE_GROUP'
@@ -1188,12 +1216,12 @@ p02_roles AS (
          AND julianday(o.updated_at) <= julianday('now')
          AND o.created_at = l.source_committed_at
          AND o.available_at = strftime('%Y-%m-%dT%H:%M:%fZ', o.updated_at, '+30 seconds')
-         AND json_valid(o.payload_json) AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 1
+         AND o.payload_is_valid AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 1
          AND json_type(o.payload_json, '$.square_customer_id') = 'text'
          AND json_extract(o.payload_json, '$.square_customer_id') = l.source_customer_id
     ) THEN 1 ELSE 0 END AS removal_fault_attempt_one_ready,
     CASE WHEN EXISTS (
-      SELECT 1 FROM square_outbox o
+      SELECT 1 FROM normalized_square_outbox o
        WHERE o.outbox_id = 'out_remove_' || l.source_claim_id
          AND o.dedupe_key = 'remove-group:' || l.source_claim_id
          AND o.claim_id = l.source_claim_id AND o.action = 'REMOVE_ELIGIBLE_GROUP'
@@ -1207,12 +1235,12 @@ p02_roles AS (
          AND julianday(o.created_at) <= julianday(o.updated_at)
          AND julianday(o.updated_at) <= julianday('now')
          AND o.available_at = strftime('%Y-%m-%dT%H:%M:%fZ', o.updated_at, '+60 seconds')
-         AND json_valid(o.payload_json) AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 1
+         AND o.payload_is_valid AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 1
          AND json_type(o.payload_json, '$.square_customer_id') = 'text'
          AND json_extract(o.payload_json, '$.square_customer_id') = l.source_customer_id
     ) THEN 1 ELSE 0 END AS removal_fault_attempt_two_ready,
     CASE WHEN EXISTS (
-      SELECT 1 FROM square_outbox o
+      SELECT 1 FROM normalized_square_outbox o
        WHERE o.outbox_id = 'out_remove_' || l.source_claim_id
          AND o.dedupe_key = 'remove-group:' || l.source_claim_id
          AND o.claim_id = l.source_claim_id AND o.action = 'REMOVE_ELIGIBLE_GROUP'
@@ -1225,12 +1253,12 @@ p02_roles AS (
          AND julianday(o.created_at) <= julianday(o.updated_at)
          AND julianday(o.updated_at) <= julianday('now')
          AND julianday(o.available_at) <= julianday(o.updated_at)
-         AND json_valid(o.payload_json) AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 1
+         AND o.payload_is_valid AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 1
          AND json_type(o.payload_json, '$.square_customer_id') = 'text'
          AND json_extract(o.payload_json, '$.square_customer_id') = l.source_customer_id
     ) THEN 1 ELSE 0 END AS removal_done_attempt_two_ready,
     CASE WHEN EXISTS (
-      SELECT 1 FROM square_outbox o
+      SELECT 1 FROM normalized_square_outbox o
        WHERE o.outbox_id = 'out_remove_' || l.source_claim_id
          AND o.dedupe_key = 'remove-group:' || l.source_claim_id
          AND o.claim_id = l.source_claim_id AND o.action = 'REMOVE_ELIGIBLE_GROUP'
@@ -1243,7 +1271,7 @@ p02_roles AS (
          AND julianday(o.created_at) <= julianday(o.updated_at)
          AND julianday(o.updated_at) <= julianday('now')
          AND julianday(o.available_at) <= julianday(o.updated_at)
-         AND json_valid(o.payload_json) AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 1
+         AND o.payload_is_valid AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 1
          AND json_type(o.payload_json, '$.square_customer_id') = 'text'
          AND json_extract(o.payload_json, '$.square_customer_id') = l.source_customer_id
     ) THEN 1 ELSE 0 END AS removal_done_attempt_three_ready,
@@ -1263,7 +1291,7 @@ p02_roles AS (
 p02_control_pairs AS (
   SELECT r.*,
     CASE WHEN EXISTS (
-      SELECT 1 FROM square_outbox o JOIN p02_unique_stages s ON s.updated_at = o.updated_at
+      SELECT 1 FROM normalized_square_outbox o JOIN p02_unique_stages s ON s.updated_at = o.updated_at
        WHERE s.phase = 'REMOVAL_ADMITTED'
          AND o.outbox_id = 'out_remove_' || r.source_claim_id
          AND o.dedupe_key = 'remove-group:' || r.source_claim_id
@@ -1280,12 +1308,12 @@ p02_control_pairs AS (
          AND julianday(o.created_at) <= julianday(o.updated_at)
          AND o.lease_expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', o.updated_at, '+900 seconds')
          AND julianday(o.lease_expires_at) > julianday('now')
-         AND json_valid(o.payload_json) AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 1
+         AND o.payload_is_valid AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 1
          AND json_type(o.payload_json, '$.square_customer_id') = 'text'
          AND json_extract(o.payload_json, '$.square_customer_id') = r.source_customer_id
     ) THEN 1 ELSE 0 END AS removal_admitted_attempt_one_control_ready,
     CASE WHEN EXISTS (
-      SELECT 1 FROM square_outbox o JOIN p02_unique_stages s ON s.updated_at = o.updated_at
+      SELECT 1 FROM normalized_square_outbox o JOIN p02_unique_stages s ON s.updated_at = o.updated_at
        WHERE s.phase = 'REMOVAL_ADMITTED'
          AND o.outbox_id = 'out_remove_' || r.source_claim_id
          AND o.dedupe_key = 'remove-group:' || r.source_claim_id
@@ -1304,12 +1332,12 @@ p02_control_pairs AS (
          AND julianday(o.available_at) <= julianday(o.updated_at)
          AND o.lease_expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', o.updated_at, '+900 seconds')
          AND julianday(o.lease_expires_at) > julianday('now')
-         AND json_valid(o.payload_json) AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 1
+         AND o.payload_is_valid AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 1
          AND json_type(o.payload_json, '$.square_customer_id') = 'text'
          AND json_extract(o.payload_json, '$.square_customer_id') = r.source_customer_id
     ) THEN 1 ELSE 0 END AS removal_admitted_attempt_two_control_ready,
     CASE WHEN EXISTS (
-      SELECT 1 FROM square_outbox o JOIN p02_unique_stages s ON s.updated_at = o.updated_at
+      SELECT 1 FROM normalized_square_outbox o JOIN p02_unique_stages s ON s.updated_at = o.updated_at
        WHERE s.phase = 'FAULT_COMMITTED'
          AND o.outbox_id = 'out_remove_' || r.source_claim_id
          AND o.dedupe_key = 'remove-group:' || r.source_claim_id
@@ -1321,7 +1349,7 @@ p02_control_pairs AS (
          AND julianday(r.source_committed_at) <= julianday(o.updated_at)
     ) THEN 1 ELSE 0 END AS fault_attempt_one_control_ready,
     CASE WHEN EXISTS (
-      SELECT 1 FROM square_outbox o JOIN p02_unique_stages s ON s.updated_at = o.updated_at
+      SELECT 1 FROM normalized_square_outbox o JOIN p02_unique_stages s ON s.updated_at = o.updated_at
        WHERE s.phase = 'FAULT_COMMITTED'
          AND o.outbox_id = 'out_remove_' || r.source_claim_id
          AND o.dedupe_key = 'remove-group:' || r.source_claim_id
@@ -1333,7 +1361,7 @@ p02_control_pairs AS (
          AND julianday(r.source_committed_at) <= julianday(o.updated_at)
     ) THEN 1 ELSE 0 END AS fault_attempt_two_control_ready,
     CASE WHEN EXISTS (
-      SELECT 1 FROM square_outbox o JOIN p02_unique_stages s ON s.updated_at = o.updated_at
+      SELECT 1 FROM normalized_square_outbox o JOIN p02_unique_stages s ON s.updated_at = o.updated_at
        WHERE s.phase = 'RECOVERY_ADMITTED'
          AND o.outbox_id = 'out_remove_' || r.source_claim_id
          AND o.dedupe_key = 'remove-group:' || r.source_claim_id
@@ -1352,12 +1380,12 @@ p02_control_pairs AS (
          AND o.lease_expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', o.updated_at, '+900 seconds')
          AND julianday(o.available_at) <= julianday(o.updated_at)
          AND julianday(o.lease_expires_at) > julianday('now')
-         AND json_valid(o.payload_json) AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 1
+         AND o.payload_is_valid AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 1
          AND json_type(o.payload_json, '$.square_customer_id') = 'text'
          AND json_extract(o.payload_json, '$.square_customer_id') = r.source_customer_id
     ) THEN 1 ELSE 0 END AS recovery_admitted_attempt_two_control_ready,
     CASE WHEN EXISTS (
-      SELECT 1 FROM square_outbox o JOIN p02_unique_stages s ON s.updated_at = o.updated_at
+      SELECT 1 FROM normalized_square_outbox o JOIN p02_unique_stages s ON s.updated_at = o.updated_at
        WHERE s.phase = 'RECOVERY_ADMITTED'
          AND o.outbox_id = 'out_remove_' || r.source_claim_id
          AND o.dedupe_key = 'remove-group:' || r.source_claim_id
@@ -1376,12 +1404,12 @@ p02_control_pairs AS (
          AND o.lease_expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', o.updated_at, '+900 seconds')
          AND julianday(o.available_at) <= julianday(o.updated_at)
          AND julianday(o.lease_expires_at) > julianday('now')
-         AND json_valid(o.payload_json) AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 1
+         AND o.payload_is_valid AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 1
          AND json_type(o.payload_json, '$.square_customer_id') = 'text'
          AND json_extract(o.payload_json, '$.square_customer_id') = r.source_customer_id
     ) THEN 1 ELSE 0 END AS recovery_admitted_attempt_three_control_ready,
     CASE WHEN EXISTS (
-      SELECT 1 FROM square_outbox o JOIN p02_unique_stages s ON s.updated_at = o.updated_at
+      SELECT 1 FROM normalized_square_outbox o JOIN p02_unique_stages s ON s.updated_at = o.updated_at
        WHERE s.phase = 'COMPLETE'
          AND o.outbox_id = 'out_remove_' || r.source_claim_id
          AND o.dedupe_key = 'remove-group:' || r.source_claim_id
@@ -1391,7 +1419,7 @@ p02_control_pairs AS (
          AND julianday(o.available_at) <= julianday(o.updated_at)
     ) THEN 1 ELSE 0 END AS complete_attempt_two_control_ready,
     CASE WHEN EXISTS (
-      SELECT 1 FROM square_outbox o JOIN p02_unique_stages s ON s.updated_at = o.updated_at
+      SELECT 1 FROM normalized_square_outbox o JOIN p02_unique_stages s ON s.updated_at = o.updated_at
        WHERE s.phase = 'COMPLETE'
          AND o.outbox_id = 'out_remove_' || r.source_claim_id
          AND o.dedupe_key = 'remove-group:' || r.source_claim_id
@@ -1401,7 +1429,7 @@ p02_control_pairs AS (
          AND julianday(o.available_at) <= julianday(o.updated_at)
     ) THEN 1 ELSE 0 END AS complete_attempt_three_control_ready,
     CASE WHEN EXISTS (
-      SELECT 1 FROM square_outbox o JOIN p02_unique_stages s ON s.updated_at = o.updated_at
+      SELECT 1 FROM normalized_square_outbox o JOIN p02_unique_stages s ON s.updated_at = o.updated_at
        WHERE s.phase = 'INVALID'
          AND o.outbox_id = 'out_remove_' || r.source_claim_id
          AND o.dedupe_key = 'remove-group:' || r.source_claim_id
@@ -1413,14 +1441,14 @@ p02_control_pairs AS (
          AND strftime('%Y-%m-%dT%H:%M:%fZ', o.updated_at) = o.updated_at
          AND o.created_at = r.source_committed_at
          AND julianday(o.created_at) <= julianday(o.updated_at)
-         AND json_valid(o.payload_json) AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 1
+         AND o.payload_is_valid AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 1
          AND json_type(o.payload_json, '$.square_customer_id') = 'text'
          AND json_extract(o.payload_json, '$.square_customer_id') = r.source_customer_id
     ) THEN 1 ELSE 0 END AS invalid_control_ready
   FROM p02_roles r
 )
 SELECT
-  (SELECT COUNT(*) FROM webhook_events
+  (SELECT COUNT(*) FROM normalized_webhook_events
     WHERE event_type = 'payment.updated' AND state = 'ENQUEUED' AND attempts = 0
       AND last_error_code IS NULL AND available_at IS NULL
       AND lease_token IS NULL AND lease_expires_at IS NULL
@@ -1428,7 +1456,7 @@ SELECT
       AND strftime('%Y-%m-%dT%H:%M:%fZ', updated_at) = updated_at
       AND julianday(created_at) <= julianday(updated_at)
       AND julianday(updated_at) <= julianday('now')
-      AND json_valid(payload_json) AND (SELECT COUNT(*) FROM json_each(payload_json)) = 4
+      AND payload_is_valid AND (SELECT COUNT(*) FROM json_each(payload_json)) = 4
       AND json_type(payload_json, '$.event_id') = 'text'
       AND json_type(payload_json, '$.type') = 'text'
       AND json_type(payload_json, '$.merchant_id') = 'text'

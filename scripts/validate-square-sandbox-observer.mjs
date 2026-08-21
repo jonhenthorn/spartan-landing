@@ -1530,7 +1530,11 @@ assert.match(__test.D1_O01_QUERY, /state_value = 'O01_REFUND_WAITING_V1'/);
 assert.match(__test.D1_O01_QUERY, /state_value = 'O01_COMPLETE_V1'/);
 assert.match(__test.D1_O01_QUERY, /state_value = 'O01_INVALID_V1'/);
 assert.doesNotMatch(__test.D1_O01_QUERY, /state_value = '(?:REFUND_WAITING|COMPLETE|INVALID)'/);
-assert.equal((__test.D1_O01_QUERY.match(/json_type\(payload_json, '\$\.(?:event_id|type|merchant_id|object_id)'\) = 'text'/g) || []).length, 12);
+assert.match(__test.D1_O01_QUERY,
+  /CASE WHEN json_valid\(payload_json\) THEN payload_json ELSE '\{\}' END AS safe_payload_json/);
+assert.equal((__test.D1_O01_QUERY.match(/json_type\(safe_payload_json, '\$\.(?:event_id|type|merchant_id|object_id)'\) = 'text'/g) || []).length, 12);
+assert.doesNotMatch(__test.D1_O01_QUERY,
+  /json_(?:each|type|extract)\(payload_json(?:,|\))/);
 assert.match(__test.D1_O01_QUERY,
   /action = 'REMOVE_ELIGIBLE_GROUP' AND state = 'DONE' AND attempts = 1/);
 assert.match(__test.D1_O01_QUERY,
@@ -1541,7 +1545,11 @@ assert.match(__test.D1_Q01_QUERY, /last_error_code = 'STALE_PROCESSING_LEASE'/);
 assert.match(__test.D1_Q01_QUERY,
   /available_at = strftime\('%Y-%m-%dT%H:%M:%fZ', updated_at, '\+30 seconds'\)/);
 assert.match(__test.D1_Q01_QUERY, /last_error_code = 'NORMAL_ORDER_WITHOUT_LINKED_CUSTOMER'/);
-assert.equal((__test.D1_Q01_QUERY.match(/json_type\(payload_json, '\$\.(?:event_id|type|merchant_id|object_id)'\) = 'text'/g) || []).length, 16);
+assert.match(__test.D1_Q01_QUERY,
+  /CASE WHEN json_valid\(payload_json\) THEN payload_json ELSE '\{\}' END AS safe_payload_json/);
+assert.equal((__test.D1_Q01_QUERY.match(/json_type\(safe_payload_json, '\$\.(?:event_id|type|merchant_id|object_id)'\) = 'text'/g) || []).length, 16);
+assert.doesNotMatch(__test.D1_Q01_QUERY,
+  /json_(?:each|type|extract)\(payload_json(?:,|\))/);
 assert.doesNotMatch(__test.D1_Q01_QUERY, /SELECT\s+(?:event_id|object_id|payload_json|lease_token|state_key)\b/i);
 assert.match(__test.D1_P01_QUERY, /state_value = 'P01_FAULT_COMMITTED_V1'/);
 assert.match(__test.D1_P01_QUERY, /state_value = 'P01_READY_COMMITTED_V1'/);
@@ -1589,6 +1597,18 @@ assert.doesNotMatch(__test.D1_P02_QUERY, /sandbox_fault_v1_|SQUARE_GROUP_REMOVE_
 assert.match(__test.D1_P02_QUERY, /o\.attempts = 1/);
 assert.match(__test.D1_P02_QUERY, /o\.attempts = 2/);
 assert.match(__test.D1_P02_QUERY, /o\.attempts = 3/);
+assert.match(__test.D1_P02_QUERY,
+  /CASE WHEN json_valid\(w\.payload_json\) THEN w\.payload_json ELSE '\{\}' END AS payload_json/);
+assert.match(__test.D1_P02_QUERY,
+  /CASE WHEN json_valid\(o\.payload_json\) THEN o\.payload_json ELSE '\{\}' END AS payload_json/);
+assert.equal((__test.D1_P02_QUERY.match(/FROM square_outbox o\b/g) || []).length, 1,
+  "P02 raw outbox rows enter only through the CASE-normalizing CTE");
+assert.equal((__test.D1_P02_QUERY.match(/FROM normalized_square_outbox o\b/g) || []).length, 19,
+  "every P02 outbox role and control branch reads CASE-normalized JSON");
+assert.equal((__test.D1_P02_QUERY.match(/o\.payload_is_valid AND/g) || []).length, 15,
+  "every P02 JSON-sensitive outbox branch also preserves the raw validity gate");
+assert.equal((__test.D1_P02_QUERY.match(/FROM normalized_webhook_events\b/g) || []).length, 1,
+  "the P02 webhook envelope branch reads CASE-normalized JSON");
 assert.match(__test.D1_P02_QUERY, /\(SELECT COUNT\(\*\) FROM json_each\(o\.payload_json\)\) = 16/);
 assert.doesNotMatch(__test.D1_P02_QUERY,
   /SELECT\s+(?:event_id|object_id|claim_id|customer_id|payment_id|order_id|payload_json|state_key)\b/i);
@@ -1935,6 +1955,13 @@ function exerciseP02AggregateSql(track) {
     let parsed = __test.parseD1P02(d1Response([db.prepare(__test.D1_P02_QUERY).get()]));
     assert.equal(parsed.payment_enqueued_attempt_zero_count, 1);
     assert.equal(parsed.source_redemption_pair_count, 0);
+    db.prepare("UPDATE webhook_events SET payload_json='not-json' WHERE event_id=?").run(eventId);
+    const malformedSeedAggregate = db.prepare(__test.D1_P02_QUERY).get();
+    assert.equal(malformedSeedAggregate.payment_enqueued_attempt_zero_count, 0);
+    assert.equal(malformedSeedAggregate.webhook_total_count, 1);
+    assert.deepEqual(JSON.parse(malformedSeedAggregate.webhook_buckets_json), [["ENQUEUED", "", 1]]);
+    assert.equal(JSON.stringify(malformedSeedAggregate).includes("not-json"), false);
+    db.prepare("UPDATE webhook_events SET payload_json=? WHERE event_id=?").run(envelope, eventId);
 
     db.prepare(`UPDATE webhook_events SET state='PROCESSED', attempts=1, payload_json='{}',
       updated_at=?, available_at=NULL, last_error_code=NULL, lease_token=NULL, lease_expires_at=NULL
@@ -1972,6 +1999,22 @@ function exerciseP02AggregateSql(track) {
       refund_scope: "",
     });
     const customerPayload = JSON.stringify({ square_customer_id: customerId });
+    const assertMalformedOutboxFailsClosed = (outboxId, zeroFields) => {
+      const retained = db.prepare(`SELECT payload_json, action, state,
+        COALESCE(last_error_code, '') AS error_code FROM square_outbox WHERE outbox_id=?`).get(outboxId);
+      assert.ok(retained);
+      db.prepare("UPDATE square_outbox SET payload_json='not-json' WHERE outbox_id=?").run(outboxId);
+      const malformedAggregate = db.prepare(__test.D1_P02_QUERY).get();
+      for (const field of zeroFields) assert.equal(malformedAggregate[field], 0, field);
+      assert.ok(JSON.parse(malformedAggregate.outbox_buckets_json).some(
+        ([action, state, errorCode, rowCount]) => action === retained.action && state === retained.state &&
+          errorCode === retained.error_code && rowCount >= 1,
+      ));
+      assert.equal(JSON.stringify(malformedAggregate).includes("not-json"), false);
+      assert.equal(JSON.stringify(malformedAggregate).includes(customerId), false);
+      db.prepare("UPDATE square_outbox SET payload_json=? WHERE outbox_id=?")
+        .run(retained.payload_json, outboxId);
+    };
     const appsDoneAt = track === "wait_first"
       ? "2026-08-19T18:31:02.000Z" : "2026-08-19T18:31:01.000Z";
     db.prepare(`INSERT INTO square_outbox (
@@ -2009,6 +2052,17 @@ function exerciseP02AggregateSql(track) {
     assert.equal(parsed.source_add_safe_pair_count, 1);
     assert.equal(track === "apps_first" ? parsed.source_apps_pending_pair_count :
       parsed.source_apps_wait_pair_count, 1);
+    const activeSourceField = track === "apps_first"
+      ? "source_apps_pending_pair_count" : "source_apps_wait_pair_count";
+    assertMalformedOutboxFailsClosed(`out_apps_redeem_${claimId}`, [
+      "source_apps_ready_pair_count", activeSourceField,
+    ]);
+    assertMalformedOutboxFailsClosed(`out_add_redeemed_${claimId}`, [
+      "source_add_pending_pair_count", "source_add_safe_pair_count",
+    ]);
+    assertMalformedOutboxFailsClosed(`out_remove_${claimId}`, [
+      "source_apps_ready_pair_count", activeSourceField,
+    ]);
     db.prepare("UPDATE purchases SET occurred_at=? WHERE purchase_id=?")
       .run("2026-08-19T18:31:00.000000001Z", `pur_${orderId}`);
     parsed = __test.parseD1P02(d1Response([db.prepare(__test.D1_P02_QUERY).get()]));
@@ -2038,6 +2092,10 @@ function exerciseP02AggregateSql(track) {
       lease_token='12345678-1234-4abc-8def-123456789abc',
       lease_expires_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+900 seconds')
       WHERE outbox_id=?`).run(`out_add_redeemed_${claimId}`);
+    assert.equal(db.prepare(__test.D1_P02_QUERY).get().source_add_processing_pair_count, 1);
+    assertMalformedOutboxFailsClosed(`out_add_redeemed_${claimId}`, [
+      "source_add_processing_pair_count", "source_add_safe_pair_count",
+    ]);
     db.prepare("INSERT INTO connector_state (state_key, state_value, updated_at) VALUES (?, ?, ?)")
       .run(stageKey, `P02_REMOVAL_ADMITTED_V1:${lineage}`, admittedAt);
     db.prepare(`UPDATE square_outbox SET state='PROCESSING', attempts=?, last_error_code=?,
@@ -2052,6 +2110,11 @@ function exerciseP02AggregateSql(track) {
     assert.equal(track === "apps_first" ?
       parsed.source_removal_admitted_attempt_one_pair_count :
       parsed.source_removal_admitted_attempt_two_pair_count, 1);
+    assertMalformedOutboxFailsClosed(`out_remove_${claimId}`, [
+      "source_removal_admitted_pair_count",
+      track === "apps_first" ? "source_removal_admitted_attempt_one_pair_count" :
+        "source_removal_admitted_attempt_two_pair_count",
+    ]);
 
     db.prepare("UPDATE connector_state SET state_value=?, updated_at=? WHERE state_key=?")
       .run(`P02_FAULT_COMMITTED_V1:${lineage}`, faultAt, stageKey);
@@ -2066,6 +2129,11 @@ function exerciseP02AggregateSql(track) {
     assert.equal(parsed.p02_fault_committed_count, 1);
     assert.equal(parsed.p02_invalid_count, 0);
     assert.equal(parsed.source_add_processing_pair_count, 1);
+    assertMalformedOutboxFailsClosed(`out_remove_${claimId}`, [
+      "source_fault_pair_count",
+      track === "apps_first" ? "source_fault_attempt_one_pair_count" :
+        "source_fault_attempt_two_pair_count",
+    ]);
 
     db.prepare("UPDATE connector_state SET updated_at=? WHERE state_key=?")
       .run(isoAt(track === "apps_first" ? "-30 seconds" : "-60 seconds"), stageKey);
@@ -2092,6 +2160,11 @@ function exerciseP02AggregateSql(track) {
     assert.equal(track === "apps_first" ?
       parsed.source_recovery_admitted_attempt_two_pair_count :
       parsed.source_recovery_admitted_attempt_three_pair_count, 1);
+    assertMalformedOutboxFailsClosed(`out_remove_${claimId}`, [
+      "source_recovery_admitted_pair_count",
+      track === "apps_first" ? "source_recovery_admitted_attempt_two_pair_count" :
+        "source_recovery_admitted_attempt_three_pair_count",
+    ]);
     db.prepare("UPDATE square_outbox SET lease_expires_at=strftime('%Y-%m-%dT%H:%M:%fZ', ?, '+899 seconds') WHERE outbox_id=?")
       .run(recoveryAt, `out_remove_${claimId}`);
     parsed = __test.parseD1P02(d1Response([db.prepare(__test.D1_P02_QUERY).get()]));
@@ -2109,6 +2182,11 @@ function exerciseP02AggregateSql(track) {
     assert.equal(parsed.source_complete_core_pair_count, 1);
     assert.equal(parsed.source_complete_pair_count, 0);
     assert.equal(parsed.source_add_processing_pair_count, 1);
+    assertMalformedOutboxFailsClosed(`out_remove_${claimId}`, [
+      "source_complete_core_pair_count",
+      track === "apps_first" ? "source_complete_core_attempt_two_pair_count" :
+        "source_complete_core_attempt_three_pair_count",
+    ]);
 
     db.prepare(`UPDATE square_outbox SET state='DONE', attempts=1, last_error_code=NULL,
       updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), lease_token=NULL, lease_expires_at=NULL
@@ -2118,6 +2196,11 @@ function exerciseP02AggregateSql(track) {
     assert.equal(track === "apps_first" ? parsed.source_complete_attempt_two_pair_count :
       parsed.source_complete_attempt_three_pair_count, 1);
     assert.equal(parsed.source_fault_pair_count, 0);
+    assertMalformedOutboxFailsClosed(`out_add_redeemed_${claimId}`, [
+      "source_add_done_pair_count", "source_add_safe_pair_count", "source_complete_pair_count",
+      track === "apps_first" ? "source_complete_attempt_two_pair_count" :
+        "source_complete_attempt_three_pair_count",
+    ]);
 
     db.prepare("UPDATE connector_state SET state_value=?, updated_at=? WHERE state_key=?")
       .run(`P02_INVALID_V1:${lineage}`, recoveryAt, stageKey);
@@ -2127,6 +2210,7 @@ function exerciseP02AggregateSql(track) {
     parsed = __test.parseD1P02(d1Response([db.prepare(__test.D1_P02_QUERY).get()]));
     assert.equal(parsed.p02_invalid_count, 1);
     assert.equal(parsed.source_invalid_pair_count, 1);
+    assertMalformedOutboxFailsClosed(`out_remove_${claimId}`, ["source_invalid_pair_count"]);
     db.prepare("UPDATE square_outbox SET available_at=strftime('%Y-%m-%dT%H:%M:%fZ', ?, '-1 second') WHERE outbox_id=?")
       .run(recoveryAt, `out_remove_${claimId}`);
     parsed = __test.parseD1P02(d1Response([db.prepare(__test.D1_P02_QUERY).get()]));
@@ -2174,6 +2258,7 @@ try {
     object_id: "payment-object-1",
   });
   for (const invalidRefundEnvelope of [
+    "not-json",
     JSON.stringify({
       event_id: "refund-event-1", type: "refund.updated", merchant_id: "ML8W3CSGD2B71",
     }),
@@ -2191,6 +2276,7 @@ try {
     const aggregate = envelopeDb.prepare(__test.D1_O01_QUERY).get();
     assert.equal(aggregate.payment_enqueued_attempt_zero_count, 1);
     assert.equal(aggregate.refund_enqueued_attempt_zero_count, 0);
+    assert.deepEqual(JSON.parse(aggregate.webhook_buckets_json), [["ENQUEUED", "", 2]]);
   }
   envelopeDb.exec("DELETE FROM webhook_events;");
   const validRefundEnvelope = JSON.stringify({
@@ -2199,6 +2285,13 @@ try {
     merchant_id: "ML8W3CSGD2B71",
     object_id: "refund-object-1",
   });
+  insertEnvelope.run("payment-event-1", "payment.updated", "payment-object-1", "not-json");
+  insertEnvelope.run("refund-event-1", "refund.updated", "refund-object-1", validRefundEnvelope);
+  const malformedPaymentAggregate = envelopeDb.prepare(__test.D1_O01_QUERY).get();
+  assert.equal(malformedPaymentAggregate.payment_enqueued_attempt_zero_count, 0);
+  assert.equal(malformedPaymentAggregate.refund_enqueued_attempt_zero_count, 1);
+  assert.deepEqual(JSON.parse(malformedPaymentAggregate.webhook_buckets_json), [["ENQUEUED", "", 2]]);
+  envelopeDb.exec("DELETE FROM webhook_events;");
   envelopeDb.prepare(`INSERT INTO webhook_events (
     event_id, event_type, object_id, merchant_id, payload_json, state, attempts,
     last_error_code, created_at, updated_at, lease_token, lease_expires_at, available_at
@@ -2209,6 +2302,16 @@ try {
   envelopeDb.prepare("INSERT INTO connector_state (state_key, state_value, updated_at) VALUES (?, ?, ?)")
     .run(observerStageKey, "O01_REFUND_WAITING_V1", "2026-08-19T18:00:01.000Z");
   assert.equal(envelopeDb.prepare(__test.D1_O01_QUERY).get().o01_refund_waiting_count, 1);
+  envelopeDb.prepare("UPDATE webhook_events SET payload_json='not-json' WHERE event_id='refund-event-1'")
+    .run();
+  const malformedRetryAggregate = envelopeDb.prepare(__test.D1_O01_QUERY).get();
+  assert.equal(malformedRetryAggregate.refund_waiting_attempt_one_count, 0);
+  assert.equal(malformedRetryAggregate.o01_refund_waiting_count, 1);
+  assert.deepEqual(JSON.parse(malformedRetryAggregate.webhook_buckets_json), [
+    ["RETRY", "REFUND_WAITING_FOR_REDEMPTION", 1],
+  ]);
+  envelopeDb.prepare("UPDATE webhook_events SET payload_json=? WHERE event_id='refund-event-1'")
+    .run(validRefundEnvelope);
   envelopeDb.prepare("UPDATE connector_state SET state_value = 'REFUND_WAITING' WHERE state_key = ?")
     .run(observerStageKey);
   assert.equal(envelopeDb.prepare(__test.D1_O01_QUERY).get().o01_refund_waiting_count, 0);
@@ -2266,6 +2369,7 @@ try {
   ) VALUES (?, 'payment.updated', ?, 'ML8W3CSGD2B71', ?, 'ENQUEUED', 0, NULL,
     '2026-08-19T18:00:00.000Z', '2026-08-19T18:00:00.000Z', NULL, NULL, NULL)`);
   for (const malformedEnvelope of [
+    "not-json",
     JSON.stringify({ event_id: eventId, type: "payment.updated", merchant_id: "ML8W3CSGD2B71" }),
     JSON.stringify({ event_id: eventId, type: "payment.updated", merchant_id: "ML8W3CSGD2B71",
       object_id: objectId, extra: "forbidden" }),
@@ -2274,7 +2378,9 @@ try {
   ]) {
     q01Db.exec("DELETE FROM webhook_events;");
     insertQ01.run(eventId, objectId, malformedEnvelope);
-    assert.equal(q01Db.prepare(__test.D1_Q01_QUERY).get().payment_enqueued_attempt_zero_count, 0);
+    const malformedAggregate = q01Db.prepare(__test.D1_Q01_QUERY).get();
+    assert.equal(malformedAggregate.payment_enqueued_attempt_zero_count, 0);
+    assert.deepEqual(JSON.parse(malformedAggregate.webhook_buckets_json), [["ENQUEUED", "", 1]]);
   }
   q01Db.exec("DELETE FROM webhook_events;");
   insertQ01.run(eventId, objectId, validEnvelope);
@@ -2303,6 +2409,12 @@ try {
     .run(q01StateKey);
   aggregate = q01Db.prepare(__test.D1_Q01_QUERY).get();
   assert.equal(aggregate.q01_retry_requested_active_pair_count, 1);
+  q01Db.prepare("UPDATE webhook_events SET payload_json='not-json' WHERE event_id=?").run(eventId);
+  aggregate = q01Db.prepare(__test.D1_Q01_QUERY).get();
+  assert.equal(aggregate.active_processing_attempt_one_count, 0);
+  assert.equal(aggregate.q01_retry_requested_active_pair_count, 1);
+  assert.deepEqual(JSON.parse(aggregate.webhook_buckets_json), [["PROCESSING", "", 1]]);
+  q01Db.prepare("UPDATE webhook_events SET payload_json=? WHERE event_id=?").run(validEnvelope, eventId);
   q01Db.prepare(`UPDATE connector_state SET updated_at=(
       SELECT strftime('%Y-%m-%dT%H:%M:%fZ', updated_at, '-1 second')
       FROM webhook_events WHERE event_id=?) WHERE state_key=?`).run(eventId, q01StateKey);
@@ -2359,6 +2471,14 @@ try {
   q01Db.prepare("UPDATE connector_state SET updated_at='2026-08-19T18:15:01.000Z' WHERE state_key=?")
     .run(q01StateKey);
   assert.equal(q01Db.prepare(__test.D1_Q01_QUERY).get().q01_scheduled_reclaimed_pair_count, 1);
+  q01Db.prepare("UPDATE webhook_events SET payload_json='not-json' WHERE event_id=?").run(eventId);
+  aggregate = q01Db.prepare(__test.D1_Q01_QUERY).get();
+  assert.equal(aggregate.stale_retry_attempt_one_count, 0);
+  assert.equal(aggregate.q01_scheduled_reclaimed_pair_count, 1);
+  assert.deepEqual(JSON.parse(aggregate.webhook_buckets_json), [
+    ["RETRY", "STALE_PROCESSING_LEASE", 1],
+  ]);
+  q01Db.prepare("UPDATE webhook_events SET payload_json=? WHERE event_id=?").run(validEnvelope, eventId);
 
   q01Db.prepare(`UPDATE webhook_events SET state='PROCESSING', attempts=2,
     last_error_code=NULL, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), available_at=NULL,
@@ -2367,6 +2487,11 @@ try {
     WHERE event_id=?`).run(eventId);
   aggregate = q01Db.prepare(__test.D1_Q01_QUERY).get();
   assert.equal(aggregate.recovery_processing_attempt_two_count, 1);
+  q01Db.prepare("UPDATE webhook_events SET payload_json='not-json' WHERE event_id=?").run(eventId);
+  aggregate = q01Db.prepare(__test.D1_Q01_QUERY).get();
+  assert.equal(aggregate.recovery_processing_attempt_two_count, 0);
+  assert.deepEqual(JSON.parse(aggregate.webhook_buckets_json), [["PROCESSING", "", 1]]);
+  q01Db.prepare("UPDATE webhook_events SET payload_json=? WHERE event_id=?").run(validEnvelope, eventId);
 
   q01Db.prepare(`UPDATE webhook_events SET state='IGNORED', attempts=2,
     last_error_code='NORMAL_ORDER_WITHOUT_LINKED_CUSTOMER', payload_json='{}',

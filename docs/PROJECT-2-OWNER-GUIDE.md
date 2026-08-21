@@ -1,6 +1,6 @@
 # Project 2 — plain-English owner guide
 
-Last reviewed: August 19, 2026
+Last reviewed: August 20, 2026
 
 ## What Project 2 is
 
@@ -34,6 +34,20 @@ That sandbox is evidence that the software works under the tested conditions. It
 4. Physically prove the generated Code128 pass on the intended Square checkout device using `POS-CODE128-PREFLIGHT.md`. A random code can prove scanner readability only when the package-bound verifier confirms the exact decoded value; customer attachment requires an existing matching Square Reference ID.
 5. Provision production completely off, confirm the manual coupon still works, and run one labeled owner canary with one allowlisted submission.
 6. Return every control to off and reconcile Square, D1, Queue, Apps and the website before considering broader use.
+
+## What must happen after the owner test
+
+A successful owner canary is not approval for broader customer use. First, every checkout device must pass the staff procedure and the manual process must remain available during a limited staff pilot.
+
+The pilot is done only when all of these are true:
+
+- It has run for at least 30 days **and** included at least 20 genuine redemptions. This is the “whichever is later” rule: reaching only one threshold is not enough.
+- High-confidence customer linkage is at least 90% for four consecutive weeks.
+- There are zero duplicate redemptions and zero customer-side failures.
+- Staff time is no more than 20 seconds per redemption.
+- Owner reconciliation takes no more than 15 minutes per week.
+- Refunds and corrections remain auditable.
+- The owner records a dated decision to approve or decline broader use before any wider activation.
 
 ## Safety boundary
 
