@@ -12,6 +12,7 @@ import {
   cleanupPrivateRecordPackage,
   createPrivateRecordPackage,
   executeProviderFixture,
+  executeProviderFixtureForValidation,
   formatProviderFixtureResult,
   providerFixtureMain,
   readPrivateRecordPackage,
@@ -26,6 +27,7 @@ const noTimeout = () => new AbortController().signal;
 const NOW_MS = Date.parse("2026-08-19T20:00:00.000Z");
 const EXPIRES_AT = "2026-08-20T20:00:00.000Z";
 const CLIENT_ID = "sandboxScopedClient01";
+const MOCK_VALIDATION_ORIGIN = "https://provider-fixture.invalid";
 const EXPECTED_CASES = ["F-03", "O-01", "P-02", "Q-01", "Q-02"];
 const EXPECTED_SCOPES = Object.freeze({
   "F-03": ["CUSTOMERS_READ", "CUSTOMERS_WRITE", "MERCHANT_PROFILE_READ"],
@@ -123,7 +125,7 @@ function makeMock({ merchantId = PROVIDER_FIXTURE_BOUNDARIES.merchantId, f03Conf
 
   async function fetchImpl(rawUrl, init = {}) {
     const url = new URL(rawUrl);
-    assert.equal(url.origin, PROVIDER_FIXTURE_BOUNDARIES.origin);
+    assert.equal(url.origin, MOCK_VALIDATION_ORIGIN);
     assert.equal(init.redirect, "error");
     assert.equal(init.headers.Authorization, `Bearer ${expectedToken}`);
     assert.equal(init.headers["Square-Version"], PROVIDER_FIXTURE_BOUNDARIES.apiVersion);
@@ -428,7 +430,7 @@ function makeMock({ merchantId = PROVIDER_FIXTURE_BOUNDARIES.merchantId, f03Conf
 async function runCase(caseName, mock = makeMock(), runKey = RUN_KEY, token = TOKEN) {
   mock.setInvocation(caseName, runKey);
   const checkpoints = [];
-  const result = await executeProviderFixture({
+  const result = await executeProviderFixtureForValidation({
     caseName,
     token,
     runKey,
@@ -438,7 +440,6 @@ async function runCase(caseName, mock = makeMock(), runKey = RUN_KEY, token = TO
     fetchImpl: mock.fetchImpl,
     timeoutFactory: noTimeout,
     nowMs: () => NOW_MS,
-    mockValidation: true,
     clock: (() => { let tick = 0; return () => `2026-08-19T20:00:${String(tick++).padStart(2, "0")}.000Z`; })(),
     checkpoint: async (record) => checkpoints.push(structuredClone(record)),
   });
@@ -448,7 +449,9 @@ async function runCase(caseName, mock = makeMock(), runKey = RUN_KEY, token = TO
 const source = fs.readFileSync(new URL("prepare-square-sandbox-provider-fixtures.mjs", import.meta.url), "utf8");
 assert.deepEqual([...PROVIDER_FIXTURE_CASES].sort(), [...EXPECTED_CASES].sort());
 assert.match(source, /https:\/\/connect\.squareupsandbox\.com/);
+assert.match(source, /https:\/\/provider-fixture\.invalid/);
 assert.doesNotMatch(source, /https:\/\/connect\.squareup\.com/);
+assert.doesNotMatch(source, /dependencies\.mockValidation/);
 assert.doesNotMatch(source, /process\.env|SQUARE_ACCESS_TOKEN/);
 assert.match(source, /SANDBOX_PROVIDER_FIXTURE_ONLY/);
 assert.match(source, /cnon:card-nonce-ok/);
@@ -468,12 +471,11 @@ assert.equal(sixthCaseFetches, 0);
 
 for (const customerId of ["_LINKED_CUSTOMER_PRIVATE", "-LINKED_CUSTOMER_PRIVATE"]) {
   let invalidCustomerFetches = 0;
-  const invalidCustomer = await executeProviderFixture({
+  const invalidCustomer = await executeProviderFixtureForValidation({
     caseName: "O-01", token: TOKEN, runKey: RUN_KEY, customerId, ack: PROVIDER_FIXTURE_ACK,
   }, {
     fetchImpl: async () => { invalidCustomerFetches += 1; return json({}); },
     timeoutFactory: noTimeout,
-    mockValidation: true,
   });
   assert.equal(invalidCustomer.result, "INPUT_REJECTED");
   assert.equal(invalidCustomer.requests, 0);
@@ -491,9 +493,32 @@ assert.equal(blockedCore.requests, 0);
 assert.equal(blockedCoreFetches, 0);
 const blockedGlobalTransport = await executeProviderFixture({
   caseName: "Q-01", token: TOKEN, runKey: RUN_KEY, customerId: "", ack: PROVIDER_FIXTURE_ACK,
-}, { fetchImpl: globalThis.fetch, mockValidation: true, timeoutFactory: noTimeout });
+}, { fetchImpl: globalThis.fetch, timeoutFactory: noTimeout });
 assert.equal(blockedGlobalTransport.result, "CREDENTIAL_GATE_BLOCKED");
 assert.equal(blockedGlobalTransport.requests, 0);
+
+const wrappedOrigins = [];
+let wrappedRealSquareFetches = 0;
+const wrappedGlobalTransport = await executeProviderFixtureForValidation({
+  caseName: "Q-01", token: TOKEN, runKey: RUN_KEY, customerId: "", ack: PROVIDER_FIXTURE_ACK,
+}, {
+  fetchImpl: async (rawUrl, init) => {
+    const origin = new URL(rawUrl).origin;
+    wrappedOrigins.push(origin);
+    if (origin === PROVIDER_FIXTURE_BOUNDARIES.origin) {
+      wrappedRealSquareFetches += 1;
+      return globalThis.fetch(rawUrl, init);
+    }
+    throw new Error("NON_ROUTABLE_MOCK_ORIGIN");
+  },
+  timeoutFactory: noTimeout,
+});
+assert.equal(wrappedGlobalTransport.status, "FAILED");
+assert.equal(wrappedGlobalTransport.result, "NETWORK_UNAVAILABLE");
+assert.equal(wrappedGlobalTransport.requests, 1);
+assert.equal(wrappedGlobalTransport.mutationRequests, 0);
+assert.deepEqual(wrappedOrigins, [MOCK_VALIDATION_ORIGIN]);
+assert.equal(wrappedRealSquareFetches, 0);
 
 let inertFetches = 0;
 let inertPackages = 0;
@@ -538,8 +563,8 @@ for (const [caseName, expectedResult] of expected) {
   assert.ok(run.result.mutationRequests >= 2 && run.result.mutationRequests <= 3);
   assert.equal(run.checkpoints.at(-1).status, "READY");
   assert.ok(run.mock.calls.every((call) =>
-    call.url.startsWith(`${PROVIDER_FIXTURE_BOUNDARIES.origin}/v2/`) ||
-    call.url === `${PROVIDER_FIXTURE_BOUNDARIES.origin}/oauth2/token/status`));
+    call.url.startsWith(`${MOCK_VALIDATION_ORIGIN}/v2/`) ||
+    call.url === `${MOCK_VALIDATION_ORIGIN}/oauth2/token/status`));
   assert.deepEqual(run.result.privateRecord.authorization, {
     client_id: CLIENT_ID,
     expires_at: EXPIRES_AT,
@@ -915,38 +940,39 @@ const maxLengthToken = "x".repeat(1024);
 const maxLengthTokenRun = await runCase("Q-01", makeMock({ expectedToken: maxLengthToken }), RUN_KEY, maxLengthToken);
 assert.equal(maxLengthTokenRun.result.status, "COMPLETE");
 
-let blockedCliPrompts = 0;
-let blockedCliFetches = 0;
-let blockedCliPackages = 0;
-const blockedCliOutput = [];
-const blockedCliExit = await providerFixtureMain([
-  "--execute", "--case", "Q-02", "--ack", PROVIDER_FIXTURE_ACK,
-], {
-  readHiddenLine: async () => { blockedCliPrompts += 1; return "private"; },
-  fetchImpl: async () => { blockedCliFetches += 1; return json({}); },
-  createPackage: () => { blockedCliPackages += 1; throw new Error("NO_PACKAGE"); },
-  print: (line) => blockedCliOutput.push(line),
-});
-assert.equal(blockedCliExit, 4);
-assert.equal(blockedCliPrompts, 0);
-assert.equal(blockedCliFetches, 0);
-assert.equal(blockedCliPackages, 0);
-assert.deepEqual(blockedCliOutput, [
-  "STATUS=FAILED CASE=Q-02 RESULT=CREDENTIAL_GATE_BLOCKED REQUESTS=0 MUTATION_REQUESTS=0 PRIVATE_RECORD=NONE",
-]);
+for (const caseName of EXPECTED_CASES) {
+  let blockedCliPrompts = 0;
+  let blockedCliFetches = 0;
+  let blockedCliPackages = 0;
+  const blockedCliOutput = [];
+  const blockedCliExit = await providerFixtureMain([
+    "--execute", "--case", caseName, "--ack", PROVIDER_FIXTURE_ACK,
+  ], {
+    readHiddenLine: async () => { blockedCliPrompts += 1; return "private"; },
+    fetchImpl: async () => { blockedCliFetches += 1; return json({}); },
+    createPackage: () => { blockedCliPackages += 1; throw new Error("NO_PACKAGE"); },
+    print: (line) => blockedCliOutput.push(line),
+  });
+  assert.equal(blockedCliExit, 4);
+  assert.equal(blockedCliPrompts, 0);
+  assert.equal(blockedCliFetches, 0);
+  assert.equal(blockedCliPackages, 0);
+  assert.deepEqual(blockedCliOutput, [
+    `STATUS=FAILED CASE=${caseName} RESULT=CREDENTIAL_GATE_BLOCKED REQUESTS=0 MUTATION_REQUESTS=0 PRIVATE_RECORD=NONE`,
+  ]);
+}
 
 const packageRunKey = "package-private-run-key-0000000001";
 const packageMock = makeMock();
 packageMock.setInvocation("Q-02", packageRunKey);
 const packageHandle = createPrivateRecordPackage("Q-02");
-const packageResult = await executeProviderFixture({
+const packageResult = await executeProviderFixtureForValidation({
   caseName: "Q-02", token: TOKEN, runKey: packageRunKey, customerId: "", ack: PROVIDER_FIXTURE_ACK,
 }, {
   fetchImpl: packageMock.fetchImpl,
   timeoutFactory: noTimeout,
   clock: () => "2026-08-19T20:30:00.000Z",
   nowMs: () => NOW_MS,
-  mockValidation: true,
   checkpoint: async (record) => updatePrivateRecordPackage(packageHandle, record),
 });
 assert.equal(packageResult.status, "COMPLETE");

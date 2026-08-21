@@ -1084,6 +1084,58 @@ for (const driftedConfig of [
   assert.deepEqual(driftFetchCalls, []);
 }
 
+const invalidQueueCredentialCases = Object.freeze([
+  Object.freeze({
+    name: "missing Queue read token",
+    mutate(env) { delete env.SQUARE_ACCEPTANCE_QUEUES_READ_TOKEN; },
+  }),
+  Object.freeze({
+    name: "malformed Queue read token",
+    mutate(env) { env.SQUARE_ACCEPTANCE_QUEUES_READ_TOKEN = "too-short"; },
+  }),
+  Object.freeze({
+    name: "missing Cloudflare account ID",
+    mutate(env) { delete env.SQUARE_ACCEPTANCE_CF_ACCOUNT_ID; },
+  }),
+  Object.freeze({
+    name: "malformed Cloudflare account ID",
+    mutate(env) { env.SQUARE_ACCEPTANCE_CF_ACCOUNT_ID = "A".repeat(32); },
+  }),
+  Object.freeze({
+    name: "missing main Queue ID",
+    mutate(env) { delete env.SQUARE_ACCEPTANCE_MAIN_QUEUE_ID; },
+  }),
+  Object.freeze({
+    name: "malformed main Queue ID",
+    mutate(env) { env.SQUARE_ACCEPTANCE_MAIN_QUEUE_ID = "not-a-queue-id"; },
+  }),
+  Object.freeze({
+    name: "missing DLQ ID",
+    mutate(env) { delete env.SQUARE_ACCEPTANCE_DLQ_ID; },
+  }),
+  Object.freeze({
+    name: "malformed DLQ ID",
+    mutate(env) { env.SQUARE_ACCEPTANCE_DLQ_ID = `${"c".repeat(31)}g`; },
+  }),
+  Object.freeze({
+    name: "main Queue and DLQ IDs are equal",
+    mutate(env) { env.SQUARE_ACCEPTANCE_DLQ_ID = env.SQUARE_ACCEPTANCE_MAIN_QUEUE_ID; },
+  }),
+]);
+for (const credentialCase of invalidQueueCredentialCases) {
+  const env = { ...baseDeps().env };
+  credentialCase.mutate(env);
+  const credentialCommandCalls = [];
+  const credentialFetchCalls = [];
+  await fixedFailure(() => captureSnapshot(baseDeps({
+    env,
+    commandRunner: makeRunner({ calls: credentialCommandCalls }),
+    fetchImpl: makeFetch({ calls: credentialFetchCalls }),
+  })), "STOP_QUEUE_READ_CREDENTIAL_REQUIRED");
+  assert.deepEqual(credentialCommandCalls, [], `${credentialCase.name} must stop before account discovery`);
+  assert.deepEqual(credentialFetchCalls, [], `${credentialCase.name} must stop before network access`);
+}
+
 const conflictingAccountCalls = [];
 await fixedFailure(() => captureSnapshot(baseDeps({
   env: {

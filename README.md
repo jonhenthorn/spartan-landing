@@ -104,7 +104,7 @@ npm ci
 npm run validate
 ```
 
-The checked lockfile pins Wrangler and Miniflare. The validation entrypoint refuses an unreviewed validator inventory or Wrangler dotenv file, checks every tracked `.mjs` file, runs all 17 local validators, packages both Square Worker configurations with dry-run only, and finishes with the whitespace/error diff check. It does not deploy, call a live provider or authorize a sandbox window.
+The checked lockfile pins Wrangler and Miniflare. The validation entrypoint refuses drift from the reviewed validator inventory or CI-workflow digest, rejects any Wrangler dotenv file, checks every tracked `.mjs` file, runs all 17 local validators, packages both Square Worker configurations with dry-run only, and finishes with the whitespace/error diff check. A read-only GitHub Actions workflow that references no repository secrets runs that same command for pull requests and pushes to `main`. Neither path deploys, calls a live provider or authorizes a sandbox window.
 
 ### Preview before publishing
 

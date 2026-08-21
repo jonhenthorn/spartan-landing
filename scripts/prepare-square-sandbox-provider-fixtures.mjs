@@ -7,6 +7,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const SQUARE_SANDBOX_ORIGIN = "https://connect.squareupsandbox.com";
+const MOCK_VALIDATION_ORIGIN = "https://provider-fixture.invalid";
 const SQUARE_API_VERSION = "2026-07-15";
 const SQUARE_MERCHANT_ID = "ML8W3CSGD2B71";
 const SQUARE_LOCATION_ID = "L34NX9YA4PGF6";
@@ -47,9 +48,18 @@ const PRIVATE_FILE = "private-record.json";
 // Deliberately unset. A separately reviewed change must compile the exact client ID of a dedicated,
 // temporary Sandbox application before the CLI can prompt for a credential or make any request.
 const APPROVED_TEMPORARY_OAUTH_CLIENT_ID = null;
-// This synthetic value exists only so the exported core can exercise mocked transport in the local validator.
-// It is not a Square application ID and cannot clear the CLI credential gate.
+// This synthetic value and non-routable origin exist only for the explicit validation-only entry point.
+// They are not Square credentials and cannot clear either live execution gate.
 const MOCK_VALIDATION_OAUTH_CLIENT_ID = "sandboxScopedClient01";
+const OAUTH_CLIENT_ID_PATTERN = /^[A-Za-z0-9_-]{8,191}$/;
+const LIVE_EXECUTION_BOUNDARY = Object.freeze({
+  origin: SQUARE_SANDBOX_ORIGIN,
+  approvedClientId: APPROVED_TEMPORARY_OAUTH_CLIENT_ID,
+});
+const MOCK_VALIDATION_BOUNDARY = Object.freeze({
+  origin: MOCK_VALIDATION_ORIGIN,
+  approvedClientId: MOCK_VALIDATION_OAUTH_CLIENT_ID,
+});
 const RECORD_STATUSES = new Set(["PREPARED", "PREFLIGHT", "CREATING", "PENDING", "READY", "FAILED"]);
 const RESULT_CODES = new Set([
   "NOT_STARTED", "AUTHORIZATION_VERIFIED", "CUSTOMER_CREATED", "ORDER_CREATED", "PAYMENT_CREATED",
@@ -92,6 +102,10 @@ class FixtureError extends Error {
 
 function fail(code) {
   throw new FixtureError(code);
+}
+
+function validOauthClientId(value) {
+  return typeof value === "string" && OAUTH_CLIENT_ID_PATTERN.test(value);
 }
 
 function digest(value) {
@@ -235,6 +249,11 @@ async function squareJson(context, pathName, { method = "GET", body, mutation = 
   }
   if (context.requests >= MAX_REQUESTS) fail("REQUEST_LIMIT_REACHED");
   if (mutation && context.mutationRequests >= 4) fail("REQUEST_LIMIT_REACHED");
+  if (context.executionBoundary !== LIVE_EXECUTION_BOUNDARY &&
+      context.executionBoundary !== MOCK_VALIDATION_BOUNDARY) fail("BOUNDARY_REJECTED");
+  const requestUrl = new URL(pathName, `${context.executionBoundary.origin}/`);
+  if (requestUrl.origin !== context.executionBoundary.origin ||
+      `${requestUrl.pathname}${requestUrl.search}` !== pathName) fail("BOUNDARY_REJECTED");
   context.requests += 1;
   if (mutation) context.mutationRequests += 1;
   const headers = {
@@ -250,7 +269,7 @@ async function squareJson(context, pathName, { method = "GET", body, mutation = 
   }
   let response;
   try {
-    response = await context.fetchImpl(`${SQUARE_SANDBOX_ORIGIN}${pathName}`, init);
+    response = await context.fetchImpl(requestUrl.href, init);
   } catch {
     fail(mutation ? "MUTATION_RESULT_AMBIGUOUS" : "NETWORK_UNAVAILABLE");
   }
@@ -354,7 +373,7 @@ async function preflightAuthorization(context, caseName, record, checkpoint) {
   if (status.merchant_id !== SQUARE_MERCHANT_ID || status.client_id !== context.approvedClientId ||
       JSON.stringify(scopes) !== JSON.stringify(expected) ||
       !Number.isFinite(expiresAtMs) || !Number.isFinite(nowMs) || expiresAtMs <= nowMs + 5 * 60_000 ||
-      expiresAtMs > nowMs + 25 * 60 * 60_000 || !/^[A-Za-z0-9_-]{8,191}$/.test(clientId)) {
+      expiresAtMs > nowMs + 25 * 60 * 60_000 || !validOauthClientId(clientId)) {
     fail("AUTHORIZATION_BOUNDARY_MISMATCH");
   }
   record.authorization = { client_id: clientId, expires_at: status.expires_at, scopes };
@@ -725,17 +744,13 @@ function fixedResult(status, result, context, record) {
   });
 }
 
-export async function executeProviderFixture(rawInput, dependencies = {}) {
+async function executeProviderFixtureAtBoundary(rawInput, dependencies, executionBoundary) {
   let input;
   try { input = validatePrivateInput(rawInput); } catch (error) {
     return fixedResult("FAILED", safeErrorCode(error), null, null);
   }
-  const mockValidation = dependencies.mockValidation === true &&
-    typeof dependencies.fetchImpl === "function" && dependencies.fetchImpl !== globalThis.fetch;
-  const approvedClientId = mockValidation
-    ? MOCK_VALIDATION_OAUTH_CLIENT_ID
-    : APPROVED_TEMPORARY_OAUTH_CLIENT_ID;
-  if (!/^[A-Za-z0-9_-]{8,191}$/.test(String(approvedClientId || ""))) {
+  if ((executionBoundary !== LIVE_EXECUTION_BOUNDARY && executionBoundary !== MOCK_VALIDATION_BOUNDARY) ||
+      !validOauthClientId(executionBoundary.approvedClientId)) {
     return fixedResult("FAILED", "CREDENTIAL_GATE_BLOCKED", null, null);
   }
   const clock = dependencies.clock || (() => new Date().toISOString());
@@ -746,7 +761,8 @@ export async function executeProviderFixture(rawInput, dependencies = {}) {
     fetchImpl: dependencies.fetchImpl || globalThis.fetch,
     signal: (dependencies.timeoutFactory || AbortSignal.timeout)(TOTAL_TIMEOUT_MS),
     nowMs: dependencies.nowMs || (() => Date.now()),
-    approvedClientId,
+    approvedClientId: executionBoundary.approvedClientId,
+    executionBoundary,
     requests: 0,
     mutationRequests: 0,
   };
@@ -774,6 +790,16 @@ export async function executeProviderFixture(rawInput, dependencies = {}) {
     input.customerId = "";
     context.token = "";
   }
+}
+
+export async function executeProviderFixture(rawInput, dependencies = {}) {
+  return executeProviderFixtureAtBoundary(rawInput, dependencies, LIVE_EXECUTION_BOUNDARY);
+}
+
+// Local validators can exercise the complete workflow without granting the general exported core a
+// caller-controlled credential bypass. Every URL handed to the validation transport is bound to `.invalid`.
+export async function executeProviderFixtureForValidation(rawInput, dependencies = {}) {
+  return executeProviderFixtureAtBoundary(rawInput, dependencies, MOCK_VALIDATION_BOUNDARY);
 }
 
 function packagePathAllowed(directory) {
@@ -1063,7 +1089,7 @@ export async function providerFixtureMain(argv = process.argv.slice(2), dependen
     return 2;
   }
 
-  if (!APPROVED_TEMPORARY_OAUTH_CLIENT_ID) {
+  if (!validOauthClientId(APPROVED_TEMPORARY_OAUTH_CLIENT_ID)) {
     print(formatProviderFixtureResult({
       status: "FAILED", caseName, result: "CREDENTIAL_GATE_BLOCKED", requests: 0, mutationRequests: 0,
     }));

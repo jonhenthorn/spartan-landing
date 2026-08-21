@@ -2,6 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const VALIDATORS = Object.freeze([
@@ -28,6 +29,12 @@ const EXPECTED_PACKAGES = Object.freeze({
   wrangler: "4.124.0",
 });
 const EXPECTED_NPM_VERSION = "10.9.2";
+const CI_WORKFLOW_PATH = ".github/workflows/validate.yml";
+const EXPECTED_CI_WORKFLOW_SHA256 = "df0fe797abb9da9803495e4b2ce92953682be481bbc0cd9d55968b1751fe0094";
+const EXPECTED_CI_ACTIONS = Object.freeze([
+  "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+  "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+]);
 
 function fail(code) {
   process.stderr.write(`Project validation stopped: ${code}\n`);
@@ -97,9 +104,52 @@ async function assertValidatorInventory() {
   }
 }
 
+async function assertCiWorkflow() {
+  let source;
+  try {
+    source = await readFile(resolve(ROOT, CI_WORKFLOW_PATH), "utf8");
+  } catch {
+    fail("CI_WORKFLOW_MISSING");
+  }
+  const workflowDigest = createHash("sha256").update(source, "utf8").digest("hex");
+  if (workflowDigest !== EXPECTED_CI_WORKFLOW_SHA256) fail("CI_WORKFLOW_DIGEST_MISMATCH");
+  const unsafeMutations = [
+    source.replace("permissions:\n  contents: read", "permissions:\n  contents: write"),
+    source.replace("run: npm run validate", "run: echo SKIPPED"),
+    source.replace("  pull_request:\n", "  pull_request_target:\n"),
+  ];
+  if (unsafeMutations.some((candidate) => candidate === source ||
+      createHash("sha256").update(candidate, "utf8").digest("hex") === EXPECTED_CI_WORKFLOW_SHA256)) {
+    fail("CI_WORKFLOW_SELF_TEST_FAILED");
+  }
+  const actions = [...source.matchAll(/^\s*uses:\s*(\S+)\s*$/gm)].map((match) => match[1]);
+  if (JSON.stringify(actions) !== JSON.stringify(EXPECTED_CI_ACTIONS)) {
+    fail("CI_ACTION_PIN_MISMATCH");
+  }
+  const required = [
+    "pull_request:",
+    "push:",
+    "contents: read",
+    "fetch-depth: 0",
+    "persist-credentials: false",
+    'node-version: "22"',
+    "npm install --global npm@10.9.2",
+    "run: npm ci",
+    'BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}',
+    'run: git diff --check "$BASE_SHA" "$GITHUB_SHA"',
+    "run: npm run validate",
+  ];
+  if (required.some((fragment) => !source.includes(fragment))) fail("CI_WORKFLOW_INCOMPLETE");
+  if (/\$\{\{\s*secrets\./.test(source) || /^\s*permissions:\s*write-all\s*$/m.test(source) ||
+      /^\s*[a-z_-]+:\s*write\s*$/m.test(source)) {
+    fail("CI_WORKFLOW_PRIVILEGED");
+  }
+}
+
 await assertToolchain();
 await assertNoWranglerDotEnv();
 await assertValidatorInventory();
+await assertCiWorkflow();
 
 const trackedMjs = run("git", ["ls-files", "-z", "--", "*.mjs"], "tracked MJS inventory", {
   capture: true,
@@ -117,4 +167,11 @@ run("git", ["diff", "--check"], "git diff --check");
 process.stdout.write(`\nProject validation passed: ${VALIDATORS.length} validators, ` +
   `${trackedMjs.length} syntax checks, 2 Wrangler dry-runs, pinned Wrangler ${EXPECTED_PACKAGES.wrangler}.\n`);
 
-export const __test = Object.freeze({ EXPECTED_NPM_VERSION, EXPECTED_PACKAGES, VALIDATORS });
+export const __test = Object.freeze({
+  CI_WORKFLOW_PATH,
+  EXPECTED_CI_ACTIONS,
+  EXPECTED_CI_WORKFLOW_SHA256,
+  EXPECTED_NPM_VERSION,
+  EXPECTED_PACKAGES,
+  VALIDATORS,
+});
