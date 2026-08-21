@@ -18,6 +18,7 @@ This repository contains the static website published at [spartandrink.com](http
 - `docs/SEO-SOCIAL-PLAYBOOK.md` — the owner routine for local search, social links and campaign attribution.
 - `docs/MARKETING-ENGAGEMENT-ROADMAP.md` — the staged plan for confirmation UX, subscriber interests, acquisition-source learning, referrals, reviews, gamification and social automation.
 - `docs/PROJECT-2-OWNER-GUIDE.md` — a plain-English explanation of what Project 2 will do, why the official Square Sandbox is used, what is live now and which real-world approvals remain.
+- `docs/PROJECT-2-ACTIVATION-DECISION-RECORD.md` — the default-NO-GO owner record for authorizing exactly one supervised Project 2 sandbox case, assigning rollback authority and documenting evidence custody without storing private case inputs or credentials.
 - `docs/SQUARE-JOURNEY-PILOT.md` — the manual-first Project 2 plan for linking website claims to Square redemptions and repeat visits before referral/reward automation.
 - `square-worker/` — the isolated, default-off website-to-Square connector candidate; it is not deployed or authorized for production.
 - `docs/SQUARE-CONNECTOR-ROLLOUT.md` — the connector's security, privacy, sandbox, canary and rollback gates.
@@ -104,7 +105,7 @@ npm ci
 npm run validate
 ```
 
-The checked lockfile pins Wrangler and Miniflare. The validation entrypoint refuses drift from the reviewed validator inventory or CI-workflow digest, rejects any Wrangler dotenv file, checks every tracked `.mjs` file, runs all 17 local validators, packages both Square Worker configurations with dry-run only, and finishes with the whitespace/error diff check. A read-only GitHub Actions workflow that references no repository secrets runs that same command for pull requests and pushes to `main`. Neither path deploys, calls a live provider or authorizes a sandbox window.
+The checked lockfile pins Wrangler and Miniflare. The validation entrypoint refuses drift from the reviewed validator inventory or CI-workflow digest, rejects any Wrangler dotenv file, checks every tracked `.mjs` file, runs all 18 local validators, packages both Square Worker configurations with dry-run only, and finishes with the whitespace/error diff check. A read-only GitHub Actions workflow that references no repository secrets runs that same command for pull requests and pushes to `main`. Neither path deploys, calls a live provider or authorizes a sandbox window.
 
 ### Preview before publishing
 

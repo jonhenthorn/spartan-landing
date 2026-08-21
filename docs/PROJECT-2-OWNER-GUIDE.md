@@ -1,6 +1,6 @@
 # Project 2 — plain-English owner guide
 
-Last reviewed: August 20, 2026
+Last reviewed: August 21, 2026
 
 ## What Project 2 is
 
@@ -27,6 +27,8 @@ That sandbox is evidence that the software works under the tested conditions. It
 - A read-only production preflight reconfirmed the intended fixed 50% discount and found Square's separate checkout text-signup collection prompt off at review time.
 
 ## What remains before one production test
+
+Before any remaining live sandbox case, complete the default-NO-GO [Project 2 activation decision record](PROJECT-2-ACTIVATION-DECISION-RECORD.md). It authorizes only one named sandbox case/window, assigns immediate rollback authority and records evidence custody. It does not authorize production or replace the case's technical worksheet.
 
 1. Finish the official-sandbox failure and recovery matrix, including invalid/ambiguous identity, provider failure, webhook replay/tampering, out-of-order refund delivery, partial Apps/group failures, interrupted Queue work and DLQ replay.
 2. Prove Queue/DLQ monitoring, external owner alerts and recurring backup/restore under separately approved credentials.
