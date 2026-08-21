@@ -5004,9 +5004,10 @@ check("O-01 controller acquisition is single-winner, immutable, deadline-bound, 
       };
     } else {
       guardedDb.beforeWebhookAcquire = ({ peerEventId, db: current }) => {
+        const peerRetryAt = new Date().toISOString();
         Object.assign(current.webhooks.get(peerEventId), {
           state: "RETRY", attempts: 1, last_error_code: "SQUARE_NETWORK_ERROR",
-          available_at: o01TestTime(30_000), updated_at: o01TestTime(0),
+          available_at: new Date(Date.parse(peerRetryAt) + 30_000).toISOString(), updated_at: peerRetryAt,
         });
       };
     }
@@ -5469,10 +5470,11 @@ check("O-01 active exact leases defer and every expired related lease sticky-sto
       `retryoutbox${malformed ? "bad" : "good"}01`, `${RUN_TOKEN}_retry_outbox_${malformed}`,
     );
     const apps = db.outboxes.get(`out_apps_redeem_${fixture.claimId}`);
+    const retryUpdatedAt = new Date(Date.now() - 1_000).toISOString();
     Object.assign(apps, {
       state: "RETRY", attempts: 1, last_error_code: "APPS_EVENT_COMMIT_FAILED",
-      updated_at: o01TestTime(-1_000),
-      available_at: malformed ? null : o01TestTime(29_000),
+      updated_at: retryUpdatedAt,
+      available_at: malformed ? null : new Date(Date.parse(retryUpdatedAt) + 30_000).toISOString(),
       lease_token: null, lease_expires_at: null,
     });
     db.stages.set(stageKey, {
@@ -5529,8 +5531,8 @@ check("O-01 clocks, object bounds, and broker-attempt boundaries are exact and b
 
   for (const [name, mutate] of [
     ["future retry", (row) => {
-      row.updated_at = o01TestTime(6_000);
-      row.available_at = o01TestTime(36_000);
+      row.updated_at = new Date(Date.now() + 60_000).toISOString();
+      row.available_at = new Date(Date.parse(row.updated_at) + 30_000).toISOString();
     }],
     ["created after retry", (row) => { row.created_at = o01TestTime(-60_000); }],
     ["noncanonical retry", (row) => { row.updated_at = "2026-08-20T06:00:00Z"; }],
@@ -5548,8 +5550,8 @@ check("O-01 clocks, object bounds, and broker-attempt boundaries are exact and b
   {
     const fixture = makeO01Fixture("futurelease0001");
     setO01ActiveLease(fixture.refund, 1, null);
-    fixture.refund.updated_at = o01TestTime(6_000);
-    fixture.refund.lease_expires_at = o01TestTime(906_000);
+    fixture.refund.updated_at = new Date(Date.now() + 60_000).toISOString();
+    fixture.refund.lease_expires_at = new Date(Date.parse(fixture.refund.updated_at) + 900_000).toISOString();
     const db = new O01ControllerD1([fixture.refund, fixture.payment]);
     const env = await armO01Isolation(baseSandboxEnv(db), fixture.refund, fixture.payment,
       `${RUN_TOKEN}_future_lease`);
@@ -5853,7 +5855,9 @@ check("O-01 postflight releases only exact durable outcomes and the captured bro
     ["refund undefined error", (fixture) => { delete fixture.refund.last_error_code; }],
     ["refund stray availability", (fixture) => { fixture.refund.available_at = o01TestTime(30_000); }],
     ["refund stray lease", (fixture) => { fixture.refund.lease_token = "123e4567-e89b-42d3-a456-426614174000"; }],
-    ["refund future terminal", (fixture) => { fixture.refund.updated_at = o01TestTime(6_000); }],
+    ["refund future terminal", (fixture) => {
+      fixture.refund.updated_at = new Date(Date.now() + 60_000).toISOString();
+    }],
     ["refund noncanonical terminal", (fixture) => { fixture.refund.updated_at = "2026-08-20T06:00:00Z"; }],
   ]) {
     const { fixture, db, env, stageKey } = await reachO01PaymentRecorded(
