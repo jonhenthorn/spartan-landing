@@ -396,6 +396,10 @@ function legacyMigrationPrompt({ target = true } = {}) {
   return [ACCOUNT, COMMIT, BASELINE, ...(target ? [UPLOAD] : [])];
 }
 
+function legacyMigrationRecoveryPrompt() {
+  return [ACCOUNT, BASELINE, UPLOAD];
+}
+
 function legacyMigrationVersions({
   sourceVars = LEGACY_BASE_VARS,
   targetVars = BASE_VARS,
@@ -423,6 +427,26 @@ check("empty and plan modes are inert and process-free", async () => {
   const plan = await invokeMain(["--plan"], emptyPrompt, runner);
   assert.equal(plan.status, 0);
   assert.deepEqual(plan.output, driverTest.FIXED_PLAN);
+  const migrationClosurePrefix = [
+    "STATUS=PLAN RESULT=NO_MUTATION",
+    "STEP=CHECK_ACCOUNT_CONFIG_BRANCH_COMMIT_BASELINE",
+    "STEP=REQUIRE_SEPARATE_OWNER_GO_AND_PREAUTHORIZED_MIGRATION_RECOVERY",
+    "STEP=OPTIONAL_ONE_TIME_PREPARE_CURRENT_ALL_OFF_TARGET",
+    "STEP=READ_ONLY_VERIFY_LEGACY_TO_CURRENT_ALL_OFF_MIGRATION",
+    "STEP=REQUIRE_READY_LEGACY_TO_CURRENT_ALL_OFF_MIGRATION",
+    "STEP=DEDICATED_LEGACY_MIGRATION_RECOVERY_AVAILABLE_UNTIL_CLOSURE",
+    "STEP=DEPLOY_CURRENT_ALL_OFF_TARGET_AT_100_PERCENT",
+    "STEP=POST_DEPLOY_STRICT_READ_ONLY_ALL_OFF_CHECK",
+    "STEP=CAPTURE_MONITORED_ALL_OFF_BASELINE_AND_COMPLETE_CLEANUP_CLOSURE",
+    "STEP=REVOKE_TEMPORARY_MIGRATION_CREDENTIALS",
+    "STEP=REQUIRE_FINAL_INDEPENDENT_REVIEWER_AND_OWNER_MIGRATION_CLOSURE",
+  ];
+  assert.deepEqual(plan.output.slice(0, migrationClosurePrefix.length), migrationClosurePrefix);
+  assert.equal(
+    plan.output[migrationClosurePrefix.length],
+    "STEP=OPTIONAL_PREPARE_EXACT_ONE_OR_EXACT_TWO_REPLAY_WEBHOOK_SEED_VERSION",
+    "every migration authority, recovery and closure step must precede case preparation",
+  );
   assert.equal(runner.state.calls.length, 0);
 });
 
@@ -514,10 +538,24 @@ check("legacy-baseline migration actions require their exact frozen vectors befo
     "--ack-rollback-to-exact-legacy-on-ambiguity",
     "--ack-historical-versions-retained",
   ]);
+  assert.deepEqual(driverTest.RECOVER_LEGACY_BASELINE_ARGS, [
+    "--execute", "--recover-interrupted-legacy-baseline-migration",
+    "--ack-sandbox-only", "--ack-owner-approved-legacy-baseline-migration",
+    "--ack-preauthorized-exact-legacy-recovery",
+    "--ack-interrupted-or-ambiguous-migration-only",
+    "--ack-exact-legacy-all-off-source",
+    "--ack-exact-prepared-current-all-off-target",
+    "--ack-source-or-target-100-percent-only",
+    "--ack-restore-exact-legacy-source-now",
+    "--ack-no-case-provider-queue-d1-or-secret-mutation",
+    "--ack-historical-versions-retained",
+  ]);
+  assert.notDeepEqual(driverTest.RECOVER_LEGACY_BASELINE_ARGS, driverTest.ROLLBACK_ARGS);
 
   for (const exact of [
     driverTest.PREPARE_CURRENT_ALL_OFF_TARGET_ARGS,
     driverTest.MIGRATE_LEGACY_BASELINE_ARGS,
+    driverTest.RECOVER_LEGACY_BASELINE_ARGS,
   ]) {
     for (let index = 0; index < exact.length; index += 1) {
       const runner = makeRunner();
@@ -815,6 +853,112 @@ check("ambiguous legacy migration rolls back only target traffic to the exact so
     assert.deepEqual(runner.state.calls.filter((call) => call.args.includes("deploy"))
       .map((call) => call.args.find((arg) => /@100%$/.test(arg))), [`${UPLOAD}@100%`]);
   }
+});
+
+check("standalone legacy recovery restores exact target traffic once and is idempotent at source", async () => {
+  const targetRunner = makeRunner({
+    versions: legacyMigrationVersions(),
+    trafficId: UPLOAD,
+    gitStatus: "interrupted migration recovery must not depend on Git state\n",
+  });
+  const targetPrompt = promptFrom(legacyMigrationRecoveryPrompt());
+  const restored = await invokeMain(
+    driverTest.RECOVER_LEGACY_BASELINE_ARGS, targetPrompt, targetRunner,
+  );
+  assert.equal(restored.status, 0, restored.output.join("\n"));
+  assert.deepEqual(restored.output, [
+    "STATUS=COMPLETE RESULT=EXACT_LEGACY_MIGRATION_RECOVERY_CONFIRMED",
+  ]);
+  targetPrompt.assertDone();
+  assert.equal(targetRunner.state.trafficId, BASELINE);
+  assert.equal(targetRunner.state.trafficVersions, null);
+  const targetDeployments = targetRunner.state.calls.filter((call) => call.args.includes("deploy"));
+  assert.deepEqual(targetDeployments.map((call) =>
+    call.args.find((arg) => /@100%$/.test(arg))), [`${BASELINE}@100%`]);
+  const recoveryConfig = targetDeployments[0].args[targetDeployments[0].args.indexOf("--config") + 1];
+  assert.ok(recoveryConfig.startsWith(`${tmpdir()}/spartan-square-rollback-control-`));
+  assert.equal(existsSync(recoveryConfig), false);
+  assert.equal(targetRunner.state.calls.some((call) => call.command === "git"), false);
+  assert.equal(targetRunner.state.calls.some((call) => call.args.includes("upload") || call.args.includes("secret")), false);
+
+  const sourceRunner = makeRunner({
+    versions: legacyMigrationVersions(),
+    trafficId: BASELINE,
+    gitStatus: "recovery remains idempotent under Git drift\n",
+  });
+  const sourcePrompt = promptFrom(legacyMigrationRecoveryPrompt());
+  const alreadySource = await invokeMain(
+    driverTest.RECOVER_LEGACY_BASELINE_ARGS, sourcePrompt, sourceRunner,
+  );
+  assert.equal(alreadySource.status, 0, alreadySource.output.join("\n"));
+  assert.deepEqual(alreadySource.output, [
+    "STATUS=COMPLETE RESULT=LEGACY_MIGRATION_RECOVERY_ALREADY_AT_EXACT_SOURCE",
+  ]);
+  sourcePrompt.assertDone();
+  assert.equal(sourceRunner.state.calls.some((call) => call.args.includes("deploy")), false);
+  assert.equal(sourceRunner.state.calls.some((call) => call.command === "git"), false);
+
+  const genericRunner = makeRunner({
+    versions: legacyMigrationVersions(),
+    trafficId: UPLOAD,
+  });
+  const generic = await invokeMain(
+    driverTest.ROLLBACK_ARGS,
+    promptFrom([ACCOUNT, BASELINE, UPLOAD]),
+    genericRunner,
+  );
+  assert.equal(generic.status, 3);
+  assert.deepEqual(generic.output, ["STATUS=REJECTED RESULT=ROLLBACK_UNCONFIRMED"]);
+  assert.equal(genericRunner.state.calls.some((call) => call.args.includes("deploy")), false);
+});
+
+check("standalone legacy recovery refuses metadata drift, split or third-version traffic without mutation", async () => {
+  const cases = [
+    makeRunner({
+      versions: legacyMigrationVersions({ sourceVars: BASE_VARS }),
+      trafficId: UPLOAD,
+    }),
+    makeRunner({
+      versions: legacyMigrationVersions({
+        targetVars: { ...BASE_VARS, SQUARE_CONSUMER_ENABLED: "true" },
+      }),
+      trafficId: UPLOAD,
+    }),
+    makeRunner({
+      versions: legacyMigrationVersions(),
+      trafficVersions: [
+        { version_id: BASELINE, percentage: 50 },
+        { version_id: UPLOAD, percentage: 50 },
+      ],
+    }),
+    makeRunner({
+      versions: legacyMigrationVersions(),
+      trafficId: CLEANUP,
+    }),
+  ];
+  for (const runner of cases) {
+    const result = await invokeMain(
+      driverTest.RECOVER_LEGACY_BASELINE_ARGS,
+      promptFrom(legacyMigrationRecoveryPrompt()),
+      runner,
+    );
+    assert.equal(result.status, 3);
+    assert.deepEqual(result.output, [
+      "STATUS=REJECTED RESULT=LEGACY_MIGRATION_RECOVERY_UNCONFIRMED",
+    ]);
+    assert.equal(runner.state.calls.some((call) => call.args.includes("deploy")), false);
+    assert.equal(runner.state.calls.some((call) => call.args.includes("upload") || call.args.includes("secret")), false);
+  }
+
+  const sameRunner = makeRunner();
+  const samePrompt = promptFrom([ACCOUNT, BASELINE, BASELINE]);
+  const same = await invokeMain(
+    driverTest.RECOVER_LEGACY_BASELINE_ARGS, samePrompt, sameRunner,
+  );
+  assert.equal(same.status, 2);
+  assert.deepEqual(same.output, ["STATUS=REJECTED RESULT=MIGRATION_VERSION_IDS_REJECTED"]);
+  assert.equal(sameRunner.state.calls.length, 0);
+  samePrompt.assertDone();
 });
 
 check("the exact generated temporary config resolves repository paths and passes an offline Wrangler version-upload dry-run", () => {

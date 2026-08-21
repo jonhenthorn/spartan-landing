@@ -18,6 +18,7 @@ This repository contains the static website published at [spartandrink.com](http
 - `docs/SEO-SOCIAL-PLAYBOOK.md` — the owner routine for local search, social links and campaign attribution.
 - `docs/MARKETING-ENGAGEMENT-ROADMAP.md` — the staged plan for confirmation UX, subscriber interests, acquisition-source learning, referrals, reviews, gamification and social automation.
 - `docs/PROJECT-2-OWNER-GUIDE.md` — a plain-English explanation of what Project 2 will do, why the official Square Sandbox is used, what is live now and which real-world approvals remain.
+- `docs/PROJECT-2-BASELINE-MIGRATION-DECISION-RECORD.md` — the blank default-NO-GO owner authority and closure record for the separate one-window legacy-to-current sandbox all-off migration; private account, commit, version and credential values remain outside the repository.
 - `docs/PROJECT-2-ACTIVATION-DECISION-RECORD.md` — the default-NO-GO owner record for authorizing exactly one supervised Project 2 sandbox case, assigning rollback authority and documenting evidence custody without storing private case inputs or credentials.
 - `docs/SQUARE-JOURNEY-PILOT.md` — the manual-first Project 2 plan for linking website claims to Square redemptions and repeat visits before referral/reward automation.
 - `square-worker/` — the isolated, default-off website-to-Square connector candidate; it is not deployed or authorized for production.

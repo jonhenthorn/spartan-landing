@@ -134,6 +134,42 @@ The deploy action collects the same four hidden inputs, re-runs the complete sou
 
 On an ambiguous deployment or failed post-deploy verification, the operator may return traffic only to the exact audited legacy source and emits no success. `MIGRATION_REJECTED_LEGACY_TRAFFIC_CONFIRMED` means the legacy allocation was restored and the migration did not pass. `ROLLBACK_UNCONFIRMED`, any other rejection, any target/source drift or any unexpected traffic allocation is a stop requiring read-only review; do not infer success or proceed to a case.
 
+### Standalone interrupted-migration recovery
+
+If the migration operator process is interrupted after target deployment may have started, the deploy action's inline ambiguity recovery might never run or return a result. The separate recovery surface below is available only for that interrupted or otherwise ambiguous migration attempt and only when exact-legacy recovery was preauthorized in the private owner-approved migration record. It is not a generic rollback, a migration pass or approval for F-02 or any other case.
+
+```sh
+node scripts/manage-square-sandbox-fault-window.mjs \
+  --execute --recover-interrupted-legacy-baseline-migration \
+  --ack-sandbox-only --ack-owner-approved-legacy-baseline-migration \
+  --ack-preauthorized-exact-legacy-recovery \
+  --ack-interrupted-or-ambiguous-migration-only \
+  --ack-exact-legacy-all-off-source \
+  --ack-exact-prepared-current-all-off-target \
+  --ack-source-or-target-100-percent-only \
+  --ack-restore-exact-legacy-source-now \
+  --ack-no-case-provider-queue-d1-or-secret-mutation \
+  --ack-historical-versions-retained
+```
+
+The hidden prompt order is exact account ID, exact legacy all-off source UUID and exact prepared current all-off target UUID. Keep all three values in the private migration record; do not put them in arguments or shared evidence. The recovery uses an immutable local control, exact-validates both named versions and accepts only either the source or target owning 100% of traffic. It performs no target upload, secret change, case action, provider call, Queue operation or D1 write, and it retains both historical versions.
+
+If the exact target owns 100%, recovery restores and post-verifies the exact legacy source at 100% and returns only:
+
+`STATUS=COMPLETE RESULT=EXACT_LEGACY_MIGRATION_RECOVERY_CONFIRMED`
+
+If the exact legacy source already owns 100%, it makes no traffic change and returns only:
+
+`STATUS=COMPLETE RESULT=LEGACY_MIGRATION_RECOVERY_ALREADY_AT_EXACT_SOURCE`
+
+Metadata drift, split allocation or a third active version is rejected before traffic mutation. An inaccessible or mismatched source/target, an unrecognized allocation, or an unconfirmed restore/postcheck returns:
+
+`STATUS=REJECTED RESULT=LEGACY_MIGRATION_RECOVERY_UNCONFIRMED`
+
+That rejection does not prove the final allocation. Stop, preserve the private evidence and obtain an independent read-only review; do not rerun the migration, infer recovery or proceed to a case.
+
+Either `STATUS=COMPLETE` recovery result closes only the immediate return-to-legacy action. It deliberately leaves the legacy source active, so it cannot satisfy the strict current all-off `--check`. Before any case, a separately controlled migration must later reach the fixed current-target success, then pass the normal strict read-only `--check`, the monitored all-off baseline and cleanup proof, temporary credential revocation, independent reviewer signoff and owner migration closure. F-02 remains `NOT APPROVED` and still requires its own activation record and authority.
+
 After the fixed migration success, run the normal read-only `--check`, capture a new private observer baseline and complete the monitored all-off proof. Preserve both historical versions and the fixed/count/time evidence. Migration closure proves only that the exact current all-off sandbox baseline is active and stable within the monitored boundary. It does not prepare F-02, provide its Queue credential, allowlist a canary, start its watcher, send its request or change the Project 2 activation decision from `NOT APPROVED`.
 
 ## Live-use boundary

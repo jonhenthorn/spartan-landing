@@ -27,7 +27,7 @@ Technical sources of truth:
 | One labeled synthetic canary/fixture recorded privately | `[REVIEW/FILL]` |
 | No other case or customer traffic permitted during the window | `[REVIEW/FILL]` |
 
-This record cannot authorize the one-time legacy-to-current all-off migration. That migration requires its own owner decision and closure record. Even after migration success, this case record remains `NOT APPROVED` until every applicable field and final pre-run signature is completed for the one case/window. This record also excludes production, real customers, real money, POS-setting changes, broader activation and any case other than the one filled above.
+This record cannot authorize the one-time legacy-to-current all-off migration. That migration requires a completed private copy of the separate default-NO-GO [baseline migration decision and closure record](PROJECT-2-BASELINE-MIGRATION-DECISION-RECORD.md). Even after migration success, this case record remains `NOT APPROVED` until every applicable field and final pre-run signature is completed for the one case/window. This record also excludes production, real customers, real money, POS-setting changes, broader activation and any case other than the one filled above.
 
 ## Decision authority
 

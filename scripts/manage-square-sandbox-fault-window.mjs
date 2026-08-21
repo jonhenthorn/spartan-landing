@@ -505,13 +505,32 @@ const MIGRATE_LEGACY_BASELINE_ARGS = Object.freeze([
   "--ack-rollback-to-exact-legacy-on-ambiguity",
   "--ack-historical-versions-retained",
 ]);
+const RECOVER_LEGACY_BASELINE_ARGS = Object.freeze([
+  "--execute", "--recover-interrupted-legacy-baseline-migration",
+  "--ack-sandbox-only", "--ack-owner-approved-legacy-baseline-migration",
+  "--ack-preauthorized-exact-legacy-recovery",
+  "--ack-interrupted-or-ambiguous-migration-only",
+  "--ack-exact-legacy-all-off-source",
+  "--ack-exact-prepared-current-all-off-target",
+  "--ack-source-or-target-100-percent-only",
+  "--ack-restore-exact-legacy-source-now",
+  "--ack-no-case-provider-queue-d1-or-secret-mutation",
+  "--ack-historical-versions-retained",
+]);
 
 const FIXED_PLAN = Object.freeze([
   "STATUS=PLAN RESULT=NO_MUTATION",
   "STEP=CHECK_ACCOUNT_CONFIG_BRANCH_COMMIT_BASELINE",
+  "STEP=REQUIRE_SEPARATE_OWNER_GO_AND_PREAUTHORIZED_MIGRATION_RECOVERY",
   "STEP=OPTIONAL_ONE_TIME_PREPARE_CURRENT_ALL_OFF_TARGET",
   "STEP=READ_ONLY_VERIFY_LEGACY_TO_CURRENT_ALL_OFF_MIGRATION",
+  "STEP=REQUIRE_READY_LEGACY_TO_CURRENT_ALL_OFF_MIGRATION",
+  "STEP=DEDICATED_LEGACY_MIGRATION_RECOVERY_AVAILABLE_UNTIL_CLOSURE",
   "STEP=DEPLOY_CURRENT_ALL_OFF_TARGET_AT_100_PERCENT",
+  "STEP=POST_DEPLOY_STRICT_READ_ONLY_ALL_OFF_CHECK",
+  "STEP=CAPTURE_MONITORED_ALL_OFF_BASELINE_AND_COMPLETE_CLEANUP_CLOSURE",
+  "STEP=REVOKE_TEMPORARY_MIGRATION_CREDENTIALS",
+  "STEP=REQUIRE_FINAL_INDEPENDENT_REVIEWER_AND_OWNER_MIGRATION_CLOSURE",
   "STEP=OPTIONAL_PREPARE_EXACT_ONE_OR_EXACT_TWO_REPLAY_WEBHOOK_SEED_VERSION",
   "STEP=UPLOAD_UNPUBLISHED_CASE_VERSION",
   "STEP=ADD_ALLOWLISTED_HIDDEN_FAULT_SECRETS",
@@ -826,6 +845,20 @@ async function legacyMigrationInputs(prompt, { withTarget = false } = {}) {
     fail("MIGRATION_VERSION_IDS_REJECTED");
   }
   return { accountId, reviewedCommit, sourceVersion, targetVersion };
+}
+
+async function legacyMigrationRecoveryInputs(prompt) {
+  const accountId = await promptValue(prompt, "Expected Cloudflare account ID", 32, ACCOUNT_ID);
+  const sourceVersion = await promptValue(
+    prompt, "Exact audited legacy all-off source version", 36, UUID,
+  );
+  const targetVersion = await promptValue(
+    prompt, "Exact prepared current all-off target version", 36, UUID,
+  );
+  if (targetVersion.toLowerCase() === sourceVersion.toLowerCase()) {
+    fail("MIGRATION_VERSION_IDS_REJECTED");
+  }
+  return { accountId, sourceVersion, targetVersion };
 }
 
 function parseJson(text, code) {
@@ -2056,6 +2089,25 @@ async function migrateLegacyBaseline(run, prompt, print) {
   );
 }
 
+async function recoverInterruptedLegacyBaselineMigration(run, prompt, print) {
+  const inputs = await legacyMigrationRecoveryInputs(prompt);
+  await verifyWrangler(run);
+  await verifyAccount(run, inputs.accountId);
+  let alreadySource;
+  try {
+    alreadySource = await rollbackLegacyMigrationWithImmutableControl(
+      run, inputs.accountId, inputs.sourceVersion, inputs.targetVersion,
+    );
+  } catch {
+    fail("LEGACY_MIGRATION_RECOVERY_UNCONFIRMED", 3);
+  }
+  print(
+    "STATUS=COMPLETE RESULT=" + (alreadySource
+      ? "LEGACY_MIGRATION_RECOVERY_ALREADY_AT_EXACT_SOURCE"
+      : "EXACT_LEGACY_MIGRATION_RECOVERY_CONFIRMED"),
+  );
+}
+
 async function cleanupCandidate(run, prompt, print) {
   const local = validateLocalBoundary();
   const inputs = await commonInputs(prompt);
@@ -2135,6 +2187,10 @@ export async function sandboxFaultWindowMain(argv = process.argv.slice(2), depen
     }
     if (sameArgs(argv, MIGRATE_LEGACY_BASELINE_ARGS)) {
       await migrateLegacyBaseline(run, prompt, print);
+      return 0;
+    }
+    if (sameArgs(argv, RECOVER_LEGACY_BASELINE_ARGS)) {
+      await recoverInterruptedLegacyBaselineMigration(run, prompt, print);
       return 0;
     }
     if (sameArgs(argv, PREPARE_ARGS)) {
@@ -2357,7 +2413,7 @@ export const __test = Object.freeze({
   PREPARE_Q02_ISOLATION_ARGS, Q02_ISOLATION_MODE,
   PREPARE_REPLAY_ISOLATION_ARGS, PREPARE_REPLAY_SEED_ARGS, PREPARE_SEED_ARGS,
   QUEUE_CANARY_SENTINEL, QUEUE_MODES, REFUND_BEFORE_PAYMENT_ISOLATION_MODE,
-  REPLAY_ISOLATION_MODE, REPLAY_SEED_KIND, ROLLBACK_ARGS, SEED_KIND,
+  RECOVER_LEGACY_BASELINE_ARGS, REPLAY_ISOLATION_MODE, REPLAY_SEED_KIND, ROLLBACK_ARGS, SEED_KIND,
   ROLLBACK_F04_APPS_FINALIZE_ARGS, ROLLBACK_F04_RECOVERY_ARGS, ROLLBACK_F04_SEARCH_ARGS,
   ROOT, SANDBOX_ENTRYPOINT, SANDBOX_MIGRATIONS_DIR, STANDING_SECRET_NAMES, WORKER, WRANGLER_VERSION,
   assertAnyCaseCandidate, assertNoWranglerDotenvFiles, assertTraffic, assertVersionMetadata,
