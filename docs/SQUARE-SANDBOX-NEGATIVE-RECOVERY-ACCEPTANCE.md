@@ -1,6 +1,6 @@
 # Square connector negative/recovery sandbox acceptance worksheet
 
-Last reviewed: August 20, 2026
+Last reviewed: August 21, 2026
 
 Status: **execution plan prepared; no live case in this worksheet has been run or accepted.** Local validators now exercise the corresponding fail-closed and recovery logic, but local mocks are not Square, Google Apps Script, Cloudflare Queue or DLQ acceptance. The deployed sandbox connector remains all-off, canary-only with an empty allowlist. This worksheet does not authorize a deployment, flag change, webhook subscription, customer/order/refund fixture, credential entry or Queue/DLQ operation.
 
@@ -27,6 +27,7 @@ This worksheet does not cover physical Code128 scanning, recurring backups, rete
 - Keep `SQUARE_CANARY_ONLY=true` with exactly one approved case submission ID during any offer case. Keep the owner harness unavailable outside the exact supervised interval.
 - Every controller candidate must have candidate-only plaintext `SQUARE_SANDBOX_CONTROL_PROFILE` exactly equal to encrypted `SQUARE_SANDBOX_FAULT_MODE`. Injecting profiles require `SQUARE_SANDBOX_FAULTS_ENABLED=true`; the allowlisted non-injecting F-04 recovery, P-01 recovery, offer, redrive, replay and refund-before-payment profiles require it to remain `false`. The all-off baseline, every profile-absent webhook-only seed, checked sandbox config and production config have no profile.
 - Do not edit or commit the checked-in false flags to run a case. Any future candidate version, traffic allocation and rollback version require separate review before deployment.
+- The one-time legacy-to-current all-off baseline migration is a separate owner authority. It may prepare and deploy only the exact current all-off sandbox target and cannot authorize a case, canary, request, provider action or production change.
 - Never simulate an outage by deleting, corrupting, displaying or intentionally mismatching a real sandbox secret. Never revoke the standing connector authorization merely to create a failure.
 - Never edit D1 business rows, reset attempts, purge a Queue/DLQ or delete provider/ledger evidence to force a pass. Remote D1 commands in this worksheet are read-only `SELECT` statements.
 - Do not inspect or print secret values. The checked-in request drivers read URLs and signing material from hidden interactive prompts, keep secrets only in process memory and print only fixed status/result codes plus bounded HTTP/request/timing fields.
@@ -235,12 +236,27 @@ Required baseline:
 
 Stop if the current remote state differs from the documented all-off boundary without a reviewed explanation.
 
+### One-time baseline migration prerequisite
+
+The audited live source is a legacy all-off sandbox version whose only permitted metadata difference from the checked current all-off configuration is that `SQUARE_SANDBOX_FAULTS_ENABLED` is absent instead of exactly `"false"`. At this review, no uploaded Worker version matches the exact current all-off target. No target preparation, readiness check or migration deployment has run live.
+
+Before any remaining case, obtain a separate owner migration approval and follow the exact three-surface procedure in `SQUARE-SANDBOX-FAULT-HOOKS.md`:
+
+1. Prepare one unpublished target with `--execute --prepare-current-all-off-target`; require `STATUS=PREPARED RESULT=SANDBOX_CURRENT_ALL_OFF_TARGET_READY TARGET_VERSION=<uuid>` while the exact legacy source remains at 100% traffic.
+2. Run `--check-legacy-baseline-migration`; require `STATUS=READY RESULT=READY_SANDBOX_LEGACY_TO_CURRENT_ALL_OFF_MIGRATION` after exact source, target, account, commit and traffic revalidation.
+3. Independently reconfirm empty reported Queues, zero nonterminal webhook/outbox work, disabled Square sandbox webhook subscription, quiet ingress and no case/provider request. Then deploy only with `--execute --migrate-legacy-baseline-to-current-all-off`; require `STATUS=COMPLETE RESULT=SANDBOX_LEGACY_TO_CURRENT_ALL_OFF_MIGRATION_CONFIRMED BASELINE_VERSION=<target-uuid>`.
+
+Keep the account, commit and both version IDs in the private owner evidence record and hidden prompts only. The target differs from the legacy source only by adding the explicit false fault flag; every other handler, variable, resource and standing-secret name must match. Preparation changes no traffic or secret value. Deployment changes only the sandbox traffic allocation. An ambiguous deploy rolls back only to the exact legacy source; a rejection, `ROLLBACK_UNCONFIRMED`, drift or unexpected allocation is a stop and never case evidence.
+
+After migration success, run the normal read-only baseline check, capture a new private observer baseline and require the monitored all-off proof before considering a case window. Preserve both versions. Do not run `--cleanup`, create a canary or prepare a case merely because the migration result passed. This prerequisite remains distinct from the default-NO-GO Project 2 activation record.
+
 ## Current live-readiness map
 
 | Case | Local proof | Existing live primitive | Live status before approval |
 | --- | --- | --- | --- |
+| one-time all-off baseline migration | Exact legacy-source/current-target metadata and three-surface operator validation | Local target-prepare, read-only readiness and exact target-deploy contract; no exact target exists yet and no migration surface has run live | **NOT APPROVED — separate migration authority, target preparation, readiness, deployment and monitored all-off closure required** |
 | `F-01` filtered claim | Form, Apps, signed-health and focused driver validators | Default-inert direct Apps driver requires a fresh signed `source_environment_code=sandbox` health attestation before its generated synthetic fixture | **READY only after the exact sandbox Apps target, two separate temporary credentials and supervised window are approved** |
-| `F-02` declined consent | Wrapped offer-isolation, candidate-bound observer and connector validators | Local fixed-mode helper/operator candidate plus zero-local-delta watcher admits only query-free owner harness/offer and rejects consent before Turnstile/provider/D1/Queue work | **NOT RUN — local primitive ready; live sandbox deployment, exact-one-canary and Queues Read approval required** |
+| `F-02` declined consent | Wrapped offer-isolation, candidate-bound observer and connector validators | Local fixed-mode helper/operator candidate plus zero-local-delta watcher admits only query-free owner harness/offer and rejects consent before Turnstile/provider/D1/Queue work | **NOT APPROVED — first close the separate baseline migration; afterward a separate F-02 activation record, exact-one-canary window, deployment and Queues Read approval are still required** |
 | `F-03` ambiguous Square match | Wrapped offer-isolation repeat, candidate-bound observer and connector validators | Local route-isolation primitive and stable one-delta/no-second-delta watcher are ready; exact two-match Square fixture remains credential-gated | **BLOCKED — provider credential gate; then fixture/deployment and Queues Read approval required** |
 | `F-04` provider outage/recovery | Wrapped three-candidate causal runtime, guarded D1, dedicated operator, candidate-bound observer and zero-mutation provider-preflight validators | Local `SQUARE_SEARCH_OUTAGE` → `APPS_FINALIZE_FAILURE` → `F04_OFFER_RECOVERY_ISOLATION` chain and fixed `F04_NEW_CUSTOMER_SLOT_CLEAR` preflight are ready; no candidate/preflight has run, and the preflight's approved client remains compiled `null` | **BLOCKED — dedicated OAuth issuance/custody/revocation, fresh point-in-time preflight, Apps READY, deployment, exact-one-canary and Queues Read approval required** |
 | `R-01` exact claim replay | Wrapped READY-replay isolation, candidate-bound observer, connector and Apps validators | Local route-isolation primitive and one-fresh-pass watcher are ready; one synthetic claim must already be `READY` | **NOT RUN — READY fixture, fresh Turnstile, live sandbox deployment and Queues Read approval required** |
@@ -325,7 +341,7 @@ await (async () => {
 })();
 ```
 
-Expected fixed result: HTTP `400`, `CONSENT_REQUIRED`. Require terminal watcher result `OBSERVED_F02_DECLINED_CONSENT_NO_LOCAL_DELTA_STABLE`, with stable monitored zero local delta, both Queues reported empty at baseline and terminal, and `request_evidence:"NOT_OBSERVED"`; the separately recorded bounded HTTP result remains necessary because the watcher cannot attest that the request occurred. Require no D1 claim/pass row, Apps consent/link/event write, Square request or Queue message. Immediately use the exact rollback and cleanup path after that result or any stop. Result: `[NOT RUN — LOCAL ROUTE-ISOLATION/OBSERVER PRIMITIVE READY; LIVE SANDBOX DEPLOYMENT, EXACT-ONE-CANARY AND QUEUES READ APPROVAL REQUIRED]`.
+Expected fixed result: HTTP `400`, `CONSENT_REQUIRED`. Require terminal watcher result `OBSERVED_F02_DECLINED_CONSENT_NO_LOCAL_DELTA_STABLE`, with stable monitored zero local delta, both Queues reported empty at baseline and terminal, and `request_evidence:"NOT_OBSERVED"`; the separately recorded bounded HTTP result remains necessary because the watcher cannot attest that the request occurred. Require no D1 claim/pass row, Apps consent/link/event write, Square request or Queue message. Immediately use the exact rollback and cleanup path after that result or any stop. Result: `[NOT APPROVED — FIRST CLOSE THE SEPARATE LEGACY-BASELINE MIGRATION; MIGRATION SUCCESS STILL DOES NOT APPROVE THE F-02 ACTIVATION RECORD, EXACT-ONE-CANARY WINDOW, DEPLOYMENT OR QUEUES READ CREDENTIAL]`.
 
 ### `F-03` — ambiguous Square customer match
 
@@ -663,7 +679,7 @@ If a credential was exposed, stop before reuse, revoke/rotate it in every sandbo
 | Case | UTC date | Reviewed version/tool | Result | Evidence note |
 | --- | --- | --- | --- | --- |
 | `F-01` filtered | — | local driver ready | `NOT RUN` | Signed sandbox-health and supervised Apps window not authorized |
-| `F-02` declined consent | — | local offer-isolation + candidate-bound zero-delta observer primitive ready | `NOT RUN` | Live sandbox deployment, exact-one-canary and Queues Read approval required; request is not observer-attested |
+| `F-02` declined consent | — | local offer-isolation + candidate-bound zero-delta observer primitive ready | `NOT APPROVED` | Separate legacy-baseline migration must close first; migration does not approve the later F-02 activation record, exact-one-canary window, deployment or Queues Read credential; request is not observer-attested |
 | `F-03` ambiguous match | — | local offer-isolation + stable one-delta/no-second-delta observer proof | `BLOCKED` | Provider credential gate; then fixture/deployment and Queues Read approval required; provider/repeat request are not observer-attested |
 | `F-04` provider outage | — | local triple-helper + three-candidate causal runtime/operator/observer + zero-mutation preflight proof | `BLOCKED` | Provider client compiled null; dedicated OAuth issuance/custody/revocation, fresh `F04_NEW_CUSTOMER_SLOT_CLEAR`, Apps READY, exact-one-canary, deployment and Queues Read approval required; no live Square/Apps evidence |
 | `R-01` exact claim replay | — | local READY-replay isolation + one-fresh-pass observer proof | `NOT RUN` | READY fixture, fresh Turnstile, live deployment and Queues Read approval required |

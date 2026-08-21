@@ -61,6 +61,7 @@ const APPS_URL = "https://script.google.com/macros/s/sandbox_fault_window_integr
 const FORBIDDEN_APPS_URL = "https://script.google.com/macros/s/forbidden_production_integration_deployment_1234567890/exec";
 const PRIVATE_CONTRACT = "spartan-square-connector-v1-2026-08-17";
 const BASE_VARS = validateLocalBoundary().vars;
+const LEGACY_BASE_VARS = driverTest.LEGACY_ALL_OFF_VARS;
 const COMMON_FAULT_NAMES = driverTest.FAULT_SECRET_NAMES.filter(
   (name) => name !== "SQUARE_SANDBOX_FAULT_SOURCE_DIGEST",
 );
@@ -208,13 +209,16 @@ function offerIsolationRequest(coupon, consent = "yes") {
 
 function makeRunner({
   trafficId = BASELINE,
+  trafficVersions = null,
   versions = {},
   uploadIds = [],
   secretIds = [],
+  failUpload = false,
   nextUploadSecrets = null,
   failFirstCandidateDeploy = false,
   ambiguousDeployId = "",
   ambiguousDeployTrafficId = "",
+  ambiguousDeployTrafficVersions = null,
   secretBulkEcho = false,
   gitStatus = "",
   account = ACCOUNT,
@@ -223,15 +227,20 @@ function makeRunner({
   const state = {
     calls: [],
     trafficId,
+    trafficVersions: trafficVersions ? trafficVersions.map((version) => ({ ...version })) : null,
     versions: new Map(Object.entries(versions)),
     latestVersionId: "",
     uploadIds: [...uploadIds],
     secretIds: [...secretIds],
+    failUpload,
     nextUploadSecrets: nextUploadSecrets ? [...nextUploadSecrets] : null,
     failFirstCandidateDeploy,
     candidateDeployAttempts: 0,
     ambiguousDeployId,
     ambiguousDeployTrafficId,
+    ambiguousDeployTrafficVersions: ambiguousDeployTrafficVersions
+      ? ambiguousDeployTrafficVersions.map((version) => ({ ...version }))
+      : null,
     ambiguousDeployAttempts: 0,
     secretBulkEcho,
     gitStatus,
@@ -264,7 +273,8 @@ function makeRunner({
       return { code: 0, stdout: JSON.stringify({ loggedIn: true, accounts: [{ id: state.account, name: "fixture" }] }), stderr: "" };
     }
     if (cli[0] === "deployments" && cli[1] === "status") {
-      return { code: 0, stdout: JSON.stringify({ versions: [{ version_id: state.trafficId, percentage: 100 }] }), stderr: "" };
+      const active = state.trafficVersions || [{ version_id: state.trafficId, percentage: 100 }];
+      return { code: 0, stdout: JSON.stringify({ versions: active }), stderr: "" };
     }
     if (cli[0] === "versions" && cli[1] === "view") {
       const version = state.versions.get(cli[2]);
@@ -294,6 +304,9 @@ function makeRunner({
         chmodSync(configPath, 0o644);
       } else if (state.uploadConfigMutation === "unreadable") {
         chmodSync(configPath, 0o000);
+      }
+      if (state.failUpload) {
+        return { code: 1, stdout: "", stderr: "fixture ambiguous upload" };
       }
       return { code: 0, stdout: `Worker Version ID: ${id}\n`, stderr: "" };
     }
@@ -326,7 +339,12 @@ function makeRunner({
     if (cli[0] === "versions" && cli[1] === "deploy") {
       const id = String(cli[2] || "").replace(/@100%$/, "");
       if (id === state.ambiguousDeployId && state.ambiguousDeployAttempts++ === 0) {
-        if (state.ambiguousDeployTrafficId) state.trafficId = state.ambiguousDeployTrafficId;
+        if (state.ambiguousDeployTrafficVersions) {
+          state.trafficVersions = state.ambiguousDeployTrafficVersions.map((version) => ({ ...version }));
+        } else if (state.ambiguousDeployTrafficId) {
+          state.trafficId = state.ambiguousDeployTrafficId;
+          state.trafficVersions = null;
+        }
         return { code: 1, stdout: "", stderr: "fixture ambiguous deployment" };
       }
       if (id === CANDIDATE && state.failFirstCandidateDeploy && state.candidateDeployAttempts++ === 0) {
@@ -334,6 +352,7 @@ function makeRunner({
       }
       assert.ok(state.versions.has(id), `known deployed version: ${id}`);
       state.trafficId = id;
+      state.trafficVersions = null;
       return { code: 0, stdout: "Deployment complete\n", stderr: "" };
     }
     return { code: 99, stdout: "", stderr: "unexpected fixture command" };
@@ -371,6 +390,21 @@ async function assertExactReadyAcknowledgementRequired(args, acknowledgement, wr
 
 function commonPrompt({ candidate = false, commit = true } = {}) {
   return [ACCOUNT, ...(commit ? [COMMIT] : []), BASELINE, ...(candidate ? [CANDIDATE] : [])];
+}
+
+function legacyMigrationPrompt({ target = true } = {}) {
+  return [ACCOUNT, COMMIT, BASELINE, ...(target ? [UPLOAD] : [])];
+}
+
+function legacyMigrationVersions({
+  sourceVars = LEGACY_BASE_VARS,
+  targetVars = BASE_VARS,
+  includeTarget = true,
+} = {}) {
+  return {
+    [BASELINE]: fixtureVersion(BASELINE, sourceVars),
+    ...(includeTarget ? { [UPLOAD]: fixtureVersion(UPLOAD, targetVars) } : {}),
+  };
 }
 
 function f04ChainPrompt({ commit = true } = {}) {
@@ -452,6 +486,335 @@ check("read-only check verifies exact Git, account, config, Wrangler and all-off
   assert.deepEqual(result.output, ["STATUS=COMPLETE RESULT=READ_ONLY_BASELINE_VERIFIED"]);
   prompt.assertDone();
   assert.ok(runner.state.calls.every((call) => !call.args.includes("deploy") && !call.args.includes("upload") && !call.args.includes("secret")));
+});
+
+check("legacy-baseline migration actions require their exact frozen vectors before prompting", async () => {
+  assert.deepEqual(driverTest.PREPARE_CURRENT_ALL_OFF_TARGET_ARGS, [
+    "--execute", "--prepare-current-all-off-target",
+    "--ack-sandbox-only", "--ack-reviewed-commit",
+    "--ack-owner-approved-legacy-baseline-migration",
+    "--ack-exact-legacy-all-off-source",
+    "--ack-only-missing-explicit-faults-false",
+    "--ack-unpublished-target-only", "--ack-no-traffic-or-secret-mutation",
+    "--ack-historical-versions-retained",
+  ]);
+  assert.deepEqual(driverTest.CHECK_LEGACY_BASELINE_MIGRATION_ARGS, [
+    "--check-legacy-baseline-migration",
+  ]);
+  assert.deepEqual(driverTest.MIGRATE_LEGACY_BASELINE_ARGS, [
+    "--execute", "--migrate-legacy-baseline-to-current-all-off",
+    "--ack-sandbox-only", "--ack-reviewed-commit",
+    "--ack-owner-approved-legacy-baseline-migration",
+    "--ack-exact-legacy-all-off-source",
+    "--ack-exact-prepared-current-all-off-target",
+    "--ack-ready-legacy-to-current-all-off-migration",
+    "--ack-main-queue-and-dlq-empty", "--ack-zero-nonterminal-webhook-outbox-work",
+    "--ack-square-webhook-subscription-disabled", "--ack-webhook-ingress-quiet",
+    "--ack-no-case-or-provider-request", "--ack-100-percent-sandbox-traffic",
+    "--ack-rollback-to-exact-legacy-on-ambiguity",
+    "--ack-historical-versions-retained",
+  ]);
+
+  for (const exact of [
+    driverTest.PREPARE_CURRENT_ALL_OFF_TARGET_ARGS,
+    driverTest.MIGRATE_LEGACY_BASELINE_ARGS,
+  ]) {
+    for (let index = 0; index < exact.length; index += 1) {
+      const runner = makeRunner();
+      const prompt = promptFrom([]);
+      const result = await invokeMain(exact.filter((_, position) => position !== index), prompt, runner);
+      assert.equal(result.status, 2, `${exact[1]} rejects missing vector element ${index}`);
+      assert.deepEqual(result.output, [
+        "STATUS=REJECTED RESULT=EXPLICIT_MODE_AND_ACKNOWLEDGEMENTS_REQUIRED",
+      ]);
+      assert.equal(prompt.prompts.length, 0);
+      assert.equal(runner.state.calls.length, 0);
+    }
+    const runner = makeRunner();
+    const prompt = promptFrom([]);
+    const extra = await invokeMain([...exact, "--ack-unreviewed-extra"], prompt, runner);
+    assert.equal(extra.status, 2);
+    assert.deepEqual(extra.output, [
+      "STATUS=REJECTED RESULT=EXPLICIT_MODE_AND_ACKNOWLEDGEMENTS_REQUIRED",
+    ]);
+    assert.equal(prompt.prompts.length, 0);
+    assert.equal(runner.state.calls.length, 0);
+  }
+
+  const checkRunner = makeRunner();
+  const checkPrompt = promptFrom([]);
+  const wrongCheck = await invokeMain(
+    [...driverTest.CHECK_LEGACY_BASELINE_MIGRATION_ARGS, "--execute"], checkPrompt, checkRunner,
+  );
+  assert.equal(wrongCheck.status, 2);
+  assert.deepEqual(wrongCheck.output, [
+    "STATUS=REJECTED RESULT=EXPLICIT_MODE_AND_ACKNOWLEDGEMENTS_REQUIRED",
+  ]);
+  assert.equal(checkPrompt.prompts.length, 0);
+  assert.equal(checkRunner.state.calls.length, 0);
+});
+
+check("legacy source admission freezes exactly the one missing explicit-false field", async () => {
+  const currentKeys = Object.keys(BASE_VARS).sort();
+  const legacyKeys = Object.keys(LEGACY_BASE_VARS).sort();
+  assert.deepEqual(currentKeys.filter((name) => !legacyKeys.includes(name)), [
+    "SQUARE_SANDBOX_FAULTS_ENABLED",
+  ]);
+  assert.deepEqual(legacyKeys.filter((name) => !currentKeys.includes(name)), []);
+  assert.equal(BASE_VARS.SQUARE_SANDBOX_FAULTS_ENABLED, "false");
+  assert.equal(Object.hasOwn(LEGACY_BASE_VARS, "SQUARE_SANDBOX_FAULTS_ENABLED"), false);
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(BASE_VARS)
+      .filter(([name]) => name !== "SQUARE_SANDBOX_FAULTS_ENABLED")),
+    LEGACY_BASE_VARS,
+  );
+
+  const exactRunner = makeRunner({ versions: legacyMigrationVersions() });
+  const exact = await invokeMain(
+    driverTest.CHECK_LEGACY_BASELINE_MIGRATION_ARGS,
+    promptFrom(legacyMigrationPrompt()), exactRunner,
+  );
+  assert.equal(exact.status, 0, exact.output.join("\n"));
+  assert.deepEqual(exact.output, [
+    "STATUS=READY RESULT=READY_SANDBOX_LEGACY_TO_CURRENT_ALL_OFF_MIGRATION",
+  ]);
+
+  for (const sourceVars of [
+    BASE_VARS,
+    { ...LEGACY_BASE_VARS, SQUARE_OFFER_ENABLED: "true" },
+    Object.fromEntries(Object.entries(LEGACY_BASE_VARS)
+      .filter(([name]) => name !== "SQUARE_WEBHOOK_ENABLED")),
+  ]) {
+    const runner = makeRunner({ versions: legacyMigrationVersions({ sourceVars }) });
+    const result = await invokeMain(
+      driverTest.CHECK_LEGACY_BASELINE_MIGRATION_ARGS,
+      promptFrom(legacyMigrationPrompt()), runner,
+    );
+    assert.equal(result.status, 2);
+    assert.deepEqual(result.output, ["STATUS=REJECTED RESULT=VERSION_FLAGS_REJECTED"]);
+    assert.equal(runner.state.calls.some((call) => call.args.includes("deploy")), false);
+  }
+
+  const strictRunner = makeRunner({
+    versions: { [BASELINE]: fixtureVersion(BASELINE, LEGACY_BASE_VARS) },
+  });
+  const strict = await invokeMain(["--check"], promptFrom(commonPrompt()), strictRunner);
+  assert.equal(strict.status, 2);
+  assert.deepEqual(strict.output, ["STATUS=REJECTED RESULT=VERSION_FLAGS_REJECTED"]);
+});
+
+check("legacy migration preparation uploads one current target without traffic or secret mutation", async () => {
+  const runner = makeRunner({
+    versions: legacyMigrationVersions({ includeTarget: false }),
+    uploadIds: [UPLOAD],
+  });
+  const prompt = promptFrom(legacyMigrationPrompt({ target: false }));
+  const result = await invokeMain(
+    driverTest.PREPARE_CURRENT_ALL_OFF_TARGET_ARGS, prompt, runner,
+  );
+  assert.equal(result.status, 0);
+  assert.deepEqual(result.output, [
+    `STATUS=PREPARED RESULT=SANDBOX_CURRENT_ALL_OFF_TARGET_READY TARGET_VERSION=${UPLOAD}`,
+  ]);
+  prompt.assertDone();
+  assert.equal(runner.state.trafficId, BASELINE);
+  assert.equal(runner.state.trafficVersions, null);
+  const uploads = runner.state.calls.filter((call) => call.args.includes("upload"));
+  assert.equal(uploads.length, 1);
+  assert.deepEqual(uploads[0].uploadVars, BASE_VARS);
+  assert.equal(existsSync(uploads[0].uploadConfigPath), false);
+  assert.equal(runner.state.calls.some((call) => call.args.includes("deploy")), false);
+  assert.equal(runner.state.calls.some((call) => call.args.includes("secret")), false);
+  assert.doesNotThrow(() => driverTest.assertVersionMetadata(
+    runner.state.versions.get(UPLOAD), {
+      expectedId: UPLOAD,
+      expectedVars: BASE_VARS,
+      expectedSecrets: driverTest.STANDING_SECRET_NAMES,
+    },
+  ));
+
+  const ambiguous = makeRunner({
+    versions: legacyMigrationVersions({ includeTarget: false }),
+    uploadIds: [UPLOAD],
+    failUpload: true,
+  });
+  const rejected = await invokeMain(
+    driverTest.PREPARE_CURRENT_ALL_OFF_TARGET_ARGS,
+    promptFrom(legacyMigrationPrompt({ target: false })), ambiguous,
+  );
+  assert.equal(rejected.status, 2);
+  assert.deepEqual(rejected.output, [
+    "STATUS=REJECTED RESULT=TARGET_PREPARE_REJECTED_LEGACY_TRAFFIC_CONFIRMED",
+  ]);
+  assert.equal(ambiguous.state.calls.filter((call) => call.args.includes("upload")).length, 1);
+  assert.equal(ambiguous.state.calls.some((call) => call.args.includes("deploy")), false);
+  assert.equal(ambiguous.state.calls.some((call) => call.args.includes("secret")), false);
+  assert.equal(ambiguous.state.trafficId, BASELINE);
+});
+
+check("legacy migration readiness is read-only and rejects a missing or same target", async () => {
+  const runner = makeRunner({ versions: legacyMigrationVersions() });
+  const prompt = promptFrom(legacyMigrationPrompt());
+  const ready = await invokeMain(
+    driverTest.CHECK_LEGACY_BASELINE_MIGRATION_ARGS, prompt, runner,
+  );
+  assert.equal(ready.status, 0, ready.output.join("\n"));
+  assert.deepEqual(ready.output, [
+    "STATUS=READY RESULT=READY_SANDBOX_LEGACY_TO_CURRENT_ALL_OFF_MIGRATION",
+  ]);
+  prompt.assertDone();
+  assert.equal(runner.state.trafficId, BASELINE);
+  assert.ok(runner.state.calls.every((call) =>
+    !call.args.includes("upload") && !call.args.includes("deploy") && !call.args.includes("secret")));
+
+  const missing = makeRunner({
+    versions: legacyMigrationVersions({ includeTarget: false }),
+  });
+  const missingResult = await invokeMain(
+    driverTest.CHECK_LEGACY_BASELINE_MIGRATION_ARGS,
+    promptFrom(legacyMigrationPrompt()), missing,
+  );
+  assert.equal(missingResult.status, 2);
+  assert.deepEqual(missingResult.output, ["STATUS=REJECTED RESULT=TARGET_VERSION_NOT_FOUND"]);
+  assert.equal(missing.state.calls.some((call) => call.args.includes("deploy")), false);
+
+  const sameRunner = makeRunner();
+  const samePrompt = promptFrom([ACCOUNT, COMMIT, BASELINE, BASELINE]);
+  const same = await invokeMain(
+    driverTest.CHECK_LEGACY_BASELINE_MIGRATION_ARGS, samePrompt, sameRunner,
+  );
+  assert.equal(same.status, 2);
+  assert.deepEqual(same.output, ["STATUS=REJECTED RESULT=MIGRATION_VERSION_IDS_REJECTED"]);
+  assert.equal(sameRunner.state.calls.length, 0);
+  samePrompt.assertDone();
+});
+
+check("legacy migration deploys only the exact prepared target", async () => {
+  const runner = makeRunner({ versions: legacyMigrationVersions() });
+  const prompt = promptFrom(legacyMigrationPrompt());
+  const result = await invokeMain(driverTest.MIGRATE_LEGACY_BASELINE_ARGS, prompt, runner);
+  assert.equal(result.status, 0, result.output.join("\n"));
+  assert.deepEqual(result.output, [
+    `STATUS=COMPLETE RESULT=SANDBOX_LEGACY_TO_CURRENT_ALL_OFF_MIGRATION_CONFIRMED BASELINE_VERSION=${UPLOAD}`,
+  ]);
+  prompt.assertDone();
+  assert.equal(runner.state.trafficId, UPLOAD);
+  const deployments = runner.state.calls.filter((call) => call.args.includes("deploy"));
+  assert.deepEqual(deployments.map((call) =>
+    call.args.find((arg) => /@100%$/.test(arg))), [`${UPLOAD}@100%`]);
+  assert.equal(runner.state.calls.some((call) => call.args.includes("upload")), false);
+  assert.equal(runner.state.calls.some((call) => call.args.includes("secret")), false);
+});
+
+check("legacy migration rejects source, target, traffic and identifier drift before deployment", async () => {
+  for (const [versions, expected] of [
+    [legacyMigrationVersions({ sourceVars: BASE_VARS }), "VERSION_FLAGS_REJECTED"],
+    [legacyMigrationVersions({
+      targetVars: { ...BASE_VARS, SQUARE_CONSUMER_ENABLED: "true" },
+    }), "VERSION_FLAGS_REJECTED"],
+  ]) {
+    const runner = makeRunner({ versions });
+    const result = await invokeMain(
+      driverTest.MIGRATE_LEGACY_BASELINE_ARGS,
+      promptFrom(legacyMigrationPrompt()), runner,
+    );
+    assert.equal(result.status, 2);
+    assert.deepEqual(result.output, [`STATUS=REJECTED RESULT=${expected}`]);
+    assert.equal(runner.state.calls.some((call) => call.args.includes("deploy")), false);
+  }
+
+  for (const runner of [
+    makeRunner({
+      versions: legacyMigrationVersions(),
+      trafficVersions: [
+        { version_id: BASELINE, percentage: 50 },
+        { version_id: UPLOAD, percentage: 50 },
+      ],
+    }),
+    makeRunner({ versions: legacyMigrationVersions(), trafficId: CLEANUP }),
+  ]) {
+    const result = await invokeMain(
+      driverTest.MIGRATE_LEGACY_BASELINE_ARGS,
+      promptFrom(legacyMigrationPrompt()), runner,
+    );
+    assert.equal(result.status, 2);
+    assert.deepEqual(result.output, ["STATUS=REJECTED RESULT=TRAFFIC_BOUNDARY_REJECTED"]);
+    assert.equal(runner.state.calls.some((call) => call.args.includes("deploy")), false);
+  }
+
+  const sameRunner = makeRunner();
+  const samePrompt = promptFrom([ACCOUNT, COMMIT, BASELINE, BASELINE]);
+  const same = await invokeMain(driverTest.MIGRATE_LEGACY_BASELINE_ARGS, samePrompt, sameRunner);
+  assert.equal(same.status, 2);
+  assert.deepEqual(same.output, ["STATUS=REJECTED RESULT=MIGRATION_VERSION_IDS_REJECTED"]);
+  assert.equal(sameRunner.state.calls.length, 0);
+  samePrompt.assertDone();
+});
+
+check("ambiguous legacy migration rolls back only target traffic to the exact source", async () => {
+  const changed = makeRunner({
+    versions: legacyMigrationVersions(),
+    ambiguousDeployId: UPLOAD,
+    ambiguousDeployTrafficId: UPLOAD,
+  });
+  const changedResult = await invokeMain(
+    driverTest.MIGRATE_LEGACY_BASELINE_ARGS,
+    promptFrom(legacyMigrationPrompt()), changed,
+  );
+  assert.equal(changedResult.status, 2, changedResult.output.join("\n"));
+  assert.deepEqual(changedResult.output, [
+    "STATUS=REJECTED RESULT=MIGRATION_REJECTED_LEGACY_TRAFFIC_CONFIRMED",
+  ]);
+  assert.equal(changed.state.trafficId, BASELINE);
+  const changedDeployments = changed.state.calls.filter((call) => call.args.includes("deploy"));
+  assert.deepEqual(changedDeployments.map((call) =>
+    call.args.find((arg) => /@100%$/.test(arg))), [`${UPLOAD}@100%`, `${BASELINE}@100%`]);
+  const rollbackConfig = changedDeployments[1].args[
+    changedDeployments[1].args.indexOf("--config") + 1
+  ];
+  assert.ok(rollbackConfig.startsWith(`${tmpdir()}/spartan-square-rollback-control-`));
+  assert.notEqual(rollbackConfig, driverTest.CONFIG);
+  assert.equal(existsSync(rollbackConfig), false);
+
+  const unchanged = makeRunner({
+    versions: legacyMigrationVersions(),
+    ambiguousDeployId: UPLOAD,
+  });
+  const unchangedResult = await invokeMain(
+    driverTest.MIGRATE_LEGACY_BASELINE_ARGS,
+    promptFrom(legacyMigrationPrompt()), unchanged,
+  );
+  assert.equal(unchangedResult.status, 2);
+  assert.deepEqual(unchangedResult.output, [
+    "STATUS=REJECTED RESULT=MIGRATION_REJECTED_LEGACY_TRAFFIC_CONFIRMED",
+  ]);
+  assert.equal(unchanged.state.trafficId, BASELINE);
+  assert.deepEqual(unchanged.state.calls.filter((call) => call.args.includes("deploy"))
+    .map((call) => call.args.find((arg) => /@100%$/.test(arg))), [`${UPLOAD}@100%`]);
+
+  for (const ambiguousState of [
+    {
+      ambiguousDeployTrafficVersions: [
+        { version_id: BASELINE, percentage: 50 },
+        { version_id: UPLOAD, percentage: 50 },
+      ],
+    },
+    { ambiguousDeployTrafficId: CLEANUP },
+  ]) {
+    const runner = makeRunner({
+      versions: legacyMigrationVersions(),
+      ambiguousDeployId: UPLOAD,
+      ...ambiguousState,
+    });
+    const result = await invokeMain(
+      driverTest.MIGRATE_LEGACY_BASELINE_ARGS,
+      promptFrom(legacyMigrationPrompt()), runner,
+    );
+    assert.equal(result.status, 3);
+    assert.deepEqual(result.output, ["STATUS=REJECTED RESULT=ROLLBACK_UNCONFIRMED"]);
+    assert.deepEqual(runner.state.calls.filter((call) => call.args.includes("deploy"))
+      .map((call) => call.args.find((arg) => /@100%$/.test(arg))), [`${UPLOAD}@100%`]);
+  }
 });
 
 check("the exact generated temporary config resolves repository paths and passes an offline Wrangler version-upload dry-run", () => {

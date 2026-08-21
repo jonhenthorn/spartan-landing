@@ -73,6 +73,69 @@ P-01 is a two-candidate causal exception, not a consumed-row one-shot. The fault
 
 P-02 never falls back to process memory, the generic consumed-row hook, a repeated failure, a percentage or a provider-secret failure. If a causal D1 batch response is lost, it rereads the exact state/outbox pair and continues only when the co-stamped committed result is unambiguous; otherwise it stops. A lost fault-commit response still converges to the one durable `FAULT_COMMITTED` retry and its fixed injected error. A lost completion response likewise converges only after exact `COMPLETE`/`DONE` reread. This makes commit-before-return a retained causal result, not a silently consumed run.
 
+## One-time legacy all-off baseline migration
+
+This migration is a separate sandbox control-plane authority, not an acceptance case and not approval for F-02. At this review, the exact current all-off target does not already exist as an uploaded Worker version. The three surfaces below are implemented for a future owner-approved window, but none has been run live.
+
+The exact audited legacy source is already all-off. Its metadata must match the current checked all-off configuration in every handler, variable, resource binding and standing-secret name except one: `SQUARE_SANDBOX_FAULTS_ENABLED` is absent from the legacy source and is exactly `"false"` in the current target. A source with any other difference is rejected. The source must own 100% of sandbox traffic, have no control profile or temporary fault secret, and remain active throughout target preparation and the read-only readiness check.
+
+This one-time authority may only upload one unpublished exact current all-off target and, after a distinct readiness result, move 100% of the fixed sandbox Worker traffic from the exact legacy source to that exact target. It does not authorize a case candidate, flag enablement, secret change, request, Square or Apps call, Queue message operation, D1 write, production change or version deletion. Keep the account, reviewed commit and both version IDs in the private owner record and enter them only through the operator's hidden prompts; never put them in command arguments or shared evidence.
+
+Before preparation, the separate private migration record must name the one UTC window, business owner/final `GO` or `NO-GO` authority, migration operator, ambiguity-rollback operator, evidence custodian, independent reviewer and temporary Queues Read credential/revocation owner. It must bind the privately reviewed source and future target evidence, preauthorize exact-legacy rollback on ambiguity and require post-migration all-off verification. A Project 2 case activation signature cannot substitute for any of these migration decisions.
+
+First, after separate owner approval, prepare the target:
+
+```sh
+node scripts/manage-square-sandbox-fault-window.mjs \
+  --execute --prepare-current-all-off-target \
+  --ack-sandbox-only --ack-reviewed-commit \
+  --ack-owner-approved-legacy-baseline-migration \
+  --ack-exact-legacy-all-off-source \
+  --ack-only-missing-explicit-faults-false \
+  --ack-unpublished-target-only --ack-no-traffic-or-secret-mutation \
+  --ack-historical-versions-retained
+```
+
+The hidden prompt order is exact account ID, reviewed full commit and exact active legacy source UUID. The action verifies the local/repository boundary, authenticated sandbox account, exact legacy metadata and legacy 100% traffic before upload. It then uploads and exact-verifies one current all-off version while leaving legacy traffic and all secret values unchanged. Require only:
+
+`STATUS=PREPARED RESULT=SANDBOX_CURRENT_ALL_OFF_TARGET_READY TARGET_VERSION=<uuid>`
+
+Preparation is not readiness and does not change traffic. Record the returned target UUID privately, then run the distinct read-only gate:
+
+```sh
+node scripts/manage-square-sandbox-fault-window.mjs \
+  --check-legacy-baseline-migration
+```
+
+Its hidden prompts are exact account ID, reviewed full commit, exact active legacy source UUID and exact prepared target UUID. It re-verifies the legacy source at 100%, the distinct target's exact current all-off metadata and the production-denial boundary. Require only:
+
+`STATUS=READY RESULT=READY_SANDBOX_LEGACY_TO_CURRENT_ALL_OFF_MIGRATION`
+
+That fixed line is migration readiness only. Before deployment, independently confirm both Queues reported empty, zero nonterminal webhook/outbox work, the Square sandbox webhook subscription disabled, ingress quiet and no case or provider request authorized. Then run the exact migration vector:
+
+```sh
+node scripts/manage-square-sandbox-fault-window.mjs \
+  --execute --migrate-legacy-baseline-to-current-all-off \
+  --ack-sandbox-only --ack-reviewed-commit \
+  --ack-owner-approved-legacy-baseline-migration \
+  --ack-exact-legacy-all-off-source \
+  --ack-exact-prepared-current-all-off-target \
+  --ack-ready-legacy-to-current-all-off-migration \
+  --ack-main-queue-and-dlq-empty --ack-zero-nonterminal-webhook-outbox-work \
+  --ack-square-webhook-subscription-disabled --ack-webhook-ingress-quiet \
+  --ack-no-case-or-provider-request --ack-100-percent-sandbox-traffic \
+  --ack-rollback-to-exact-legacy-on-ambiguity \
+  --ack-historical-versions-retained
+```
+
+The deploy action collects the same four hidden inputs, re-runs the complete source/target/traffic checks, assigns only the named target 100% of sandbox traffic and then re-verifies the target metadata and allocation. Require only:
+
+`STATUS=COMPLETE RESULT=SANDBOX_LEGACY_TO_CURRENT_ALL_OFF_MIGRATION_CONFIRMED BASELINE_VERSION=<target-uuid>`
+
+On an ambiguous deployment or failed post-deploy verification, the operator may return traffic only to the exact audited legacy source and emits no success. `MIGRATION_REJECTED_LEGACY_TRAFFIC_CONFIRMED` means the legacy allocation was restored and the migration did not pass. `ROLLBACK_UNCONFIRMED`, any other rejection, any target/source drift or any unexpected traffic allocation is a stop requiring read-only review; do not infer success or proceed to a case.
+
+After the fixed migration success, run the normal read-only `--check`, capture a new private observer baseline and complete the monitored all-off proof. Preserve both historical versions and the fixed/count/time evidence. Migration closure proves only that the exact current all-off sandbox baseline is active and stable within the monitored boundary. It does not prepare F-02, provide its Queue credential, allowlist a canary, start its watcher, send its request or change the Project 2 activation decision from `NOT APPROVED`.
+
 ## Live-use boundary
 
 The former generic offline action name `--prepare` is retained only as a fail-closed compatibility surface, not a runnable preparation procedure. No current controller mode is accepted by it. It rejects F-04, P-01, P-02, offer, replay, O-01, Q-01 and Q-02 immediately after the hidden mode entry and before any selector, source, secret or URL prompt or random-token generation. It performs no file or network operation. Every current mode must use the fixed helper named below; P-02 alone uses its narrower separate wrapper.

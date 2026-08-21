@@ -61,6 +61,10 @@ const IMMUTABLE_ALL_OFF_VARS = Object.freeze({
   PROCESSING_RECOVERY_LIMIT: "25",
   RECONCILIATION_LOOKBACK_HOURS: "96",
 });
+const LEGACY_ALL_OFF_VARS = Object.freeze(Object.fromEntries(
+  Object.entries(IMMUTABLE_ALL_OFF_VARS)
+    .filter(([name]) => name !== "SQUARE_SANDBOX_FAULTS_ENABLED"),
+));
 const BRANCH = "codex/square-claim-redemption";
 const WORKER = "spartan-square-connector-sandbox";
 const WRANGLER_VERSION = "4.124.0";
@@ -476,10 +480,38 @@ const CLEANUP_ARGS = Object.freeze([
   "--ack-exact-fault-secret-names-only", "--ack-historical-test-versions-retained",
   "--ack-auto-rollback-on-drift",
 ]);
+const PREPARE_CURRENT_ALL_OFF_TARGET_ARGS = Object.freeze([
+  "--execute", "--prepare-current-all-off-target",
+  "--ack-sandbox-only", "--ack-reviewed-commit",
+  "--ack-owner-approved-legacy-baseline-migration",
+  "--ack-exact-legacy-all-off-source",
+  "--ack-only-missing-explicit-faults-false",
+  "--ack-unpublished-target-only", "--ack-no-traffic-or-secret-mutation",
+  "--ack-historical-versions-retained",
+]);
+const CHECK_LEGACY_BASELINE_MIGRATION_ARGS = Object.freeze([
+  "--check-legacy-baseline-migration",
+]);
+const MIGRATE_LEGACY_BASELINE_ARGS = Object.freeze([
+  "--execute", "--migrate-legacy-baseline-to-current-all-off",
+  "--ack-sandbox-only", "--ack-reviewed-commit",
+  "--ack-owner-approved-legacy-baseline-migration",
+  "--ack-exact-legacy-all-off-source",
+  "--ack-exact-prepared-current-all-off-target",
+  "--ack-ready-legacy-to-current-all-off-migration",
+  "--ack-main-queue-and-dlq-empty", "--ack-zero-nonterminal-webhook-outbox-work",
+  "--ack-square-webhook-subscription-disabled", "--ack-webhook-ingress-quiet",
+  "--ack-no-case-or-provider-request", "--ack-100-percent-sandbox-traffic",
+  "--ack-rollback-to-exact-legacy-on-ambiguity",
+  "--ack-historical-versions-retained",
+]);
 
 const FIXED_PLAN = Object.freeze([
   "STATUS=PLAN RESULT=NO_MUTATION",
   "STEP=CHECK_ACCOUNT_CONFIG_BRANCH_COMMIT_BASELINE",
+  "STEP=OPTIONAL_ONE_TIME_PREPARE_CURRENT_ALL_OFF_TARGET",
+  "STEP=READ_ONLY_VERIFY_LEGACY_TO_CURRENT_ALL_OFF_MIGRATION",
+  "STEP=DEPLOY_CURRENT_ALL_OFF_TARGET_AT_100_PERCENT",
   "STEP=OPTIONAL_PREPARE_EXACT_ONE_OR_EXACT_TWO_REPLAY_WEBHOOK_SEED_VERSION",
   "STEP=UPLOAD_UNPUBLISHED_CASE_VERSION",
   "STEP=ADD_ALLOWLISTED_HIDDEN_FAULT_SECRETS",
@@ -783,6 +815,19 @@ async function commonInputs(prompt, {
   return { accountId, reviewedCommit, baselineVersion, candidateVersion, priorCandidateVersion };
 }
 
+async function legacyMigrationInputs(prompt, { withTarget = false } = {}) {
+  const accountId = await promptValue(prompt, "Expected Cloudflare account ID", 32, ACCOUNT_ID);
+  const reviewedCommit = await promptValue(prompt, "Reviewed full Git commit", 40, COMMIT);
+  const sourceVersion = await promptValue(prompt, "Exact active legacy all-off source version", 36, UUID);
+  const targetVersion = withTarget
+    ? await promptValue(prompt, "Exact prepared current all-off target version", 36, UUID)
+    : "";
+  if (targetVersion && targetVersion.toLowerCase() === sourceVersion.toLowerCase()) {
+    fail("MIGRATION_VERSION_IDS_REJECTED");
+  }
+  return { accountId, reviewedCommit, sourceVersion, targetVersion };
+}
+
 function parseJson(text, code) {
   try {
     const parsed = JSON.parse(text);
@@ -1029,6 +1074,53 @@ async function verifyBaseline(run, inputs, baseVars, { localGit = true } = {}) {
   assertTraffic(traffic, inputs.baselineVersion);
 }
 
+function assertFaultControlEnvironmentAbsent() {
+  for (const name of FAULT_SECRET_NAMES) {
+    if (Object.hasOwn(process.env, name)) fail("FAULT_SECRET_ENV_REJECTED");
+  }
+  if (Object.hasOwn(process.env, "SQUARE_SANDBOX_CONTROL_PROFILE")) fail("CHILD_ENV_REJECTED");
+}
+
+async function verifyLegacyMigrationSource(run, inputs) {
+  const local = validateLocalBoundary();
+  assertFaultControlEnvironmentAbsent();
+  await verifyLocalGit(run, inputs.reviewedCommit);
+  await verifyWrangler(run);
+  await verifyAccount(run, inputs.accountId);
+  assertVersionMetadata(await getVersion(run, inputs.accountId, inputs.sourceVersion), {
+    expectedId: inputs.sourceVersion,
+    expectedVars: LEGACY_ALL_OFF_VARS,
+    expectedSecrets: STANDING_SECRET_NAMES,
+  });
+  assertTraffic(await getTraffic(run, inputs.accountId), inputs.sourceVersion);
+  return local;
+}
+
+async function getMigrationTargetVersion(run, accountId, targetVersion) {
+  try {
+    return await getVersion(run, accountId, targetVersion);
+  } catch (error) {
+    if (error instanceof OperatorError && error.code === "VERSION_METADATA_UNAVAILABLE") {
+      fail("TARGET_VERSION_NOT_FOUND");
+    }
+    throw error;
+  }
+}
+
+async function verifyLegacyMigrationReady(run, inputs) {
+  const local = await verifyLegacyMigrationSource(run, inputs);
+  assertVersionMetadata(
+    await getMigrationTargetVersion(run, inputs.accountId, inputs.targetVersion),
+    {
+      expectedId: inputs.targetVersion,
+      expectedVars: IMMUTABLE_ALL_OFF_VARS,
+      expectedSecrets: STANDING_SECRET_NAMES,
+    },
+  );
+  assertTraffic(await getTraffic(run, inputs.accountId), inputs.sourceVersion);
+  return local;
+}
+
 function renderTemporaryConfig(baseText, vars) {
   let rendered = baseText;
   for (const [key, relativeValue, absoluteValue] of [
@@ -1209,6 +1301,88 @@ async function rollbackWithImmutableControl(run, accountId, baselineVersion, can
 async function rollbackAfterAmbiguousMutation(run, accountId, baselineVersion, candidateVersion) {
   try {
     await rollbackWithImmutableControl(run, accountId, baselineVersion, candidateVersion);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function confirmLegacyTrafficWithImmutableControl(run, accountId, sourceVersion) {
+  const temporary = createRollbackControlConfig();
+  try {
+    const configArgs = ["--config", temporary.path, "--name", WORKER];
+    const source = await remoteJson(run, accountId, [
+      "versions", "view", sourceVersion, ...configArgs, "--json",
+    ], "VERSION_METADATA_UNAVAILABLE");
+    assertVersionMetadata(source, {
+      expectedId: sourceVersion,
+      expectedVars: LEGACY_ALL_OFF_VARS,
+      expectedSecrets: STANDING_SECRET_NAMES,
+    });
+    const traffic = await remoteJson(run, accountId, [
+      "deployments", "status", ...configArgs, "--json",
+    ], "TRAFFIC_STATUS_UNAVAILABLE");
+    assertTraffic(traffic, sourceVersion);
+  } finally {
+    temporary.cleanup();
+  }
+}
+
+async function rollbackLegacyMigrationWithImmutableControl(
+  run, accountId, sourceVersion, targetVersion,
+) {
+  const temporary = createRollbackControlConfig();
+  try {
+    const configArgs = ["--config", temporary.path, "--name", WORKER];
+    const source = await remoteJson(run, accountId, [
+      "versions", "view", sourceVersion, ...configArgs, "--json",
+    ], "VERSION_METADATA_UNAVAILABLE");
+    assertVersionMetadata(source, {
+      expectedId: sourceVersion,
+      expectedVars: LEGACY_ALL_OFF_VARS,
+      expectedSecrets: STANDING_SECRET_NAMES,
+    });
+    const target = await remoteJson(run, accountId, [
+      "versions", "view", targetVersion, ...configArgs, "--json",
+    ], "VERSION_METADATA_UNAVAILABLE");
+    assertVersionMetadata(target, {
+      expectedId: targetVersion,
+      expectedVars: IMMUTABLE_ALL_OFF_VARS,
+      expectedSecrets: STANDING_SECRET_NAMES,
+    });
+    const before = await remoteJson(run, accountId, [
+      "deployments", "status", ...configArgs, "--json",
+    ], "TRAFFIC_STATUS_UNAVAILABLE");
+    let alreadySource = false;
+    try {
+      assertTraffic(before, sourceVersion);
+      alreadySource = true;
+    } catch {
+      assertTraffic(before, targetVersion);
+    }
+    if (!alreadySource) {
+      await invoke(run, "npx", npxArgs(
+        "versions", "deploy", `${sourceVersion}@100%`, ...configArgs,
+        "--yes", "--message", "SANDBOX ONLY - exact legacy migration rollback",
+      ), { env: cloudflareEnv(accountId) }, "ROLLBACK_UNCONFIRMED");
+    }
+    const after = await remoteJson(run, accountId, [
+      "deployments", "status", ...configArgs, "--json",
+    ], "ROLLBACK_UNCONFIRMED");
+    assertTraffic(after, sourceVersion);
+    return alreadySource;
+  } finally {
+    temporary.cleanup();
+  }
+}
+
+async function rollbackLegacyMigrationAfterAmbiguousMutation(
+  run, accountId, sourceVersion, targetVersion,
+) {
+  try {
+    await rollbackLegacyMigrationWithImmutableControl(
+      run, accountId, sourceVersion, targetVersion,
+    );
     return true;
   } catch {
     return false;
@@ -1804,6 +1978,84 @@ async function rollbackCandidate(run, prompt, print, { diagnose = diagnoseRollba
   print(`STATUS=COMPLETE RESULT=${result}${diagnosticReady ? "" : "_LOCAL_DIAGNOSTIC_REJECTED"}`);
 }
 
+async function prepareCurrentAllOffTarget(run, prompt, print) {
+  const inputs = await legacyMigrationInputs(prompt);
+  const local = await verifyLegacyMigrationSource(run, inputs);
+  let targetVersion = "";
+  try {
+    targetVersion = await uploadVersion(
+      run, inputs.accountId, local.vars,
+      "SANDBOX ONLY - unpublished current explicit all-off migration target",
+    );
+    if (targetVersion.toLowerCase() === inputs.sourceVersion.toLowerCase()) {
+      fail("MIGRATION_VERSION_IDS_REJECTED");
+    }
+    assertVersionMetadata(await getVersion(run, inputs.accountId, targetVersion), {
+      expectedId: targetVersion,
+      expectedVars: IMMUTABLE_ALL_OFF_VARS,
+      expectedSecrets: STANDING_SECRET_NAMES,
+    });
+    assertTraffic(await getTraffic(run, inputs.accountId), inputs.sourceVersion);
+  } catch (error) {
+    if (error instanceof OperatorError && [
+      "TEMP_CONFIG_DRIFT_REMOVED", "TEMP_CONFIG_CLEANUP_REJECTED",
+    ].includes(error.code)) {
+      throw error;
+    }
+    let legacyTrafficConfirmed = false;
+    try {
+      await confirmLegacyTrafficWithImmutableControl(
+        run, inputs.accountId, inputs.sourceVersion,
+      );
+      legacyTrafficConfirmed = true;
+    } catch {}
+    fail(
+      legacyTrafficConfirmed
+        ? "TARGET_PREPARE_REJECTED_LEGACY_TRAFFIC_CONFIRMED"
+        : "LEGACY_TRAFFIC_UNCONFIRMED",
+      legacyTrafficConfirmed ? 2 : 3,
+    );
+  }
+  print(`STATUS=PREPARED RESULT=SANDBOX_CURRENT_ALL_OFF_TARGET_READY TARGET_VERSION=${targetVersion}`);
+}
+
+async function checkLegacyBaselineMigration(run, prompt, print) {
+  const inputs = await legacyMigrationInputs(prompt, { withTarget: true });
+  await verifyLegacyMigrationReady(run, inputs);
+  print("STATUS=READY RESULT=READY_SANDBOX_LEGACY_TO_CURRENT_ALL_OFF_MIGRATION");
+}
+
+async function migrateLegacyBaseline(run, prompt, print) {
+  const inputs = await legacyMigrationInputs(prompt, { withTarget: true });
+  await verifyLegacyMigrationReady(run, inputs);
+  try {
+    await deployVersion(
+      run, inputs.accountId, inputs.targetVersion,
+      "SANDBOX ONLY - legacy to current explicit all-off migration",
+    );
+    assertTraffic(await getTraffic(run, inputs.accountId), inputs.targetVersion);
+    assertVersionMetadata(await getVersion(run, inputs.accountId, inputs.targetVersion), {
+      expectedId: inputs.targetVersion,
+      expectedVars: IMMUTABLE_ALL_OFF_VARS,
+      expectedSecrets: STANDING_SECRET_NAMES,
+    });
+  } catch {
+    const rolledBack = await rollbackLegacyMigrationAfterAmbiguousMutation(
+      run, inputs.accountId, inputs.sourceVersion, inputs.targetVersion,
+    );
+    fail(
+      rolledBack
+        ? "MIGRATION_REJECTED_LEGACY_TRAFFIC_CONFIRMED"
+        : "ROLLBACK_UNCONFIRMED",
+      rolledBack ? 2 : 3,
+    );
+  }
+  print(
+    "STATUS=COMPLETE RESULT=SANDBOX_LEGACY_TO_CURRENT_ALL_OFF_MIGRATION_CONFIRMED " +
+    `BASELINE_VERSION=${inputs.targetVersion}`,
+  );
+}
+
 async function cleanupCandidate(run, prompt, print) {
   const local = validateLocalBoundary();
   const inputs = await commonInputs(prompt);
@@ -1871,6 +2123,18 @@ export async function sandboxFaultWindowMain(argv = process.argv.slice(2), depen
       const inputs = await commonInputs(prompt);
       await verifyBaseline(run, inputs, local.vars);
       print("STATUS=COMPLETE RESULT=READ_ONLY_BASELINE_VERIFIED");
+      return 0;
+    }
+    if (sameArgs(argv, CHECK_LEGACY_BASELINE_MIGRATION_ARGS)) {
+      await checkLegacyBaselineMigration(run, prompt, print);
+      return 0;
+    }
+    if (sameArgs(argv, PREPARE_CURRENT_ALL_OFF_TARGET_ARGS)) {
+      await prepareCurrentAllOffTarget(run, prompt, print);
+      return 0;
+    }
+    if (sameArgs(argv, MIGRATE_LEGACY_BASELINE_ARGS)) {
+      await migrateLegacyBaseline(run, prompt, print);
       return 0;
     }
     if (sameArgs(argv, PREPARE_ARGS)) {
@@ -2073,14 +2337,17 @@ export async function sandboxFaultWindowMain(argv = process.argv.slice(2), depen
 }
 
 export const __test = Object.freeze({
-  BRANCH, CLEANUP_ARGS, CONFIG, DEPLOY_ARGS, DEPLOY_OFFER_ARGS, DEPLOY_OFFER_ISOLATION_ARGS,
+  BRANCH, CHECK_LEGACY_BASELINE_MIGRATION_ARGS, CLEANUP_ARGS, CONFIG,
+  DEPLOY_ARGS, DEPLOY_OFFER_ARGS, DEPLOY_OFFER_ISOLATION_ARGS,
   DEPLOY_F04_APPS_FINALIZE_ARGS, DEPLOY_F04_RECOVERY_ARGS, DEPLOY_F04_SEARCH_ARGS,
   DEPLOY_O01_ISOLATION_ARGS, DEPLOY_O01_SEED_ARGS, DEPLOY_P01_ISOLATION_ARGS, DEPLOY_P01_RECOVERY_ARGS,
   DEPLOY_P02_ISOLATION_ARGS, DEPLOY_REPLAY_ISOLATION_ARGS,
   DEPLOY_Q01_ISOLATION_ARGS, DEPLOY_Q02_ISOLATION_ARGS, DEPLOY_REPLAY_SEED_ARGS, DEPLOY_SEED_ARGS,
-  D1_ID, FAULT_SECRET_NAMES, FIXED_PLAN, IMMUTABLE_ALL_OFF_VARS, MODES, NON_INJECTING_MODES, OFFER_MODES,
+  D1_ID, FAULT_SECRET_NAMES, FIXED_PLAN, IMMUTABLE_ALL_OFF_VARS, LEGACY_ALL_OFF_VARS,
+  MIGRATE_LEGACY_BASELINE_ARGS, MODES, NON_INJECTING_MODES, OFFER_MODES,
   F04_APPS_FINALIZE_MODE, F04_CHAIN_MODES, F04_FAULT_MODES, F04_RECOVERY_ISOLATION_MODE, F04_SEARCH_MODE,
-  OFFER_ROUTE_ISOLATION_MODE, OFFER_ROUTE_MODES, PREPARE_ARGS, PREPARE_OFFER_ISOLATION_ARGS,
+  OFFER_ROUTE_ISOLATION_MODE, OFFER_ROUTE_MODES, PREPARE_ARGS,
+  PREPARE_CURRENT_ALL_OFF_TARGET_ARGS, PREPARE_OFFER_ISOLATION_ARGS,
   O01_SEED_KIND, PREPARE_O01_ISOLATION_ARGS, PREPARE_O01_SEED_ARGS,
   P01_ISOLATION_MODE, P01_RECOVERY_ISOLATION_MODE,
   PREPARE_F04_CHAIN_ARGS,

@@ -23,19 +23,23 @@ That sandbox is evidence that the software works under the tested conditions. It
 - The current public website coupon and manual Square lookup process remain unchanged.
 - No Project 2 connector or operations Worker is deployed in production.
 - The isolated sandbox connector, databases, Queue and monitoring Worker exist, but every customer-facing and automation control is off.
+- The sandbox connector is still on an audited legacy all-off version. Its only allowed difference from the current all-off configuration is a missing explicit false fault flag. No exact current all-off target version exists yet, and no migration action has run live.
 - The official sandbox happy path, qualifying redemption, full-refund review, reconciliation, rollback and signed Apps-health monitoring have passed their completed worksheets.
 - A read-only production preflight reconfirmed the intended fixed 50% discount and found Square's separate checkout text-signup collection prompt off at review time.
 
 ## What remains before one production test
 
-Before any remaining live sandbox case, complete the default-NO-GO [Project 2 activation decision record](PROJECT-2-ACTIVATION-DECISION-RECORD.md). It authorizes only one named sandbox case/window, assigns immediate rollback authority and records evidence custody. It does not authorize production or replace the case's technical worksheet.
+Before any remaining live sandbox case, the owner must separately approve a one-time sandbox baseline migration. The bounded procedure first uploads one exact current all-off target without changing traffic, then performs a read-only source/target check, and only then may move sandbox traffic from the exact legacy all-off source to that target. It cannot run F-02, enable a control, send a request, change a secret, touch business data or affect production. The technical procedure and fixed results are in [Square sandbox fault hooks](SQUARE-SANDBOX-FAULT-HOOKS.md).
 
-1. Finish the official-sandbox failure and recovery matrix, including invalid/ambiguous identity, provider failure, webhook replay/tampering, out-of-order refund delivery, partial Apps/group failures, interrupted Queue work and DLQ replay.
-2. Prove Queue/DLQ monitoring, external owner alerts and recurring backup/restore under separately approved credentials.
-3. Verify the exact production Square merchant, customer-group and eligible-item variation IDs.
-4. Physically prove the generated Code128 pass on the intended Square checkout device using `POS-CODE128-PREFLIGHT.md`. A random code can prove scanner readability only when the package-bound verifier confirms the exact decoded value; customer attachment requires an existing matching Square Reference ID.
-5. Provision production completely off, confirm the manual coupon still works, and run one labeled owner canary with one allowlisted submission.
-6. Return every control to off and reconcile Square, D1, Queue, Apps and the website before considering broader use.
+After that migration and its monitored all-off proof close, F-02 and every other case remain **not approved**. Complete a fresh default-NO-GO [Project 2 activation decision record](PROJECT-2-ACTIVATION-DECISION-RECORD.md) for exactly one named sandbox case/window. It assigns immediate rollback authority and records evidence custody. It does not authorize production or replace the case's technical worksheet.
+
+1. Approve and close the separate one-time legacy-to-current all-off sandbox migration; preserve both versions and the private evidence.
+2. Finish the official-sandbox failure and recovery matrix, including invalid/ambiguous identity, provider failure, webhook replay/tampering, out-of-order refund delivery, partial Apps/group failures, interrupted Queue work and DLQ replay.
+3. Prove Queue/DLQ monitoring, external owner alerts and recurring backup/restore under separately approved credentials.
+4. Verify the exact production Square merchant, customer-group and eligible-item variation IDs.
+5. Physically prove the generated Code128 pass on the intended Square checkout device using `POS-CODE128-PREFLIGHT.md`. A random code can prove scanner readability only when the package-bound verifier confirms the exact decoded value; customer attachment requires an existing matching Square Reference ID.
+6. Provision production completely off, confirm the manual coupon still works, and run one labeled owner canary with one allowlisted submission.
+7. Return every control to off and reconcile Square, D1, Queue, Apps and the website before considering broader use.
 
 ## What must happen after the owner test
 
@@ -53,6 +57,6 @@ The pilot is done only when all of these are true:
 
 ## Safety boundary
 
-Production activation, real customer creation, a real order/payment/refund, POS-setting changes, alert recipients, Queue credentials and backup storage each remain separate approval boundaries. A sandbox pass never authorizes those actions.
+Production activation, real customer creation, a real order/payment/refund, POS-setting changes, alert recipients, Queue credentials and backup storage each remain separate approval boundaries. A baseline-migration result is not a sandbox case pass, and neither result authorizes those actions.
 
 If Project 2 is unavailable or uncertain, the existing website coupon and staff phone-lookup process remain the fallback.
