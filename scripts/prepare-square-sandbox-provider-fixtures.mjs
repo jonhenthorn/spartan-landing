@@ -6,6 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { inspectWebhookFixturePackage } from "./prepare-square-sandbox-webhook-fixture.mjs";
+
 const SQUARE_SANDBOX_ORIGIN = "https://connect.squareupsandbox.com";
 const MOCK_VALIDATION_ORIGIN = "https://provider-fixture.invalid";
 const SQUARE_API_VERSION = "2026-07-15";
@@ -27,8 +29,11 @@ const SANDBOX_CARD_NONCE = "cnon:card-nonce-ok";
 const UNLINKED_FIXTURE_LINE_NAME = "Project 2 harmless unlinked sandbox fixture";
 const UNLINKED_FIXTURE_AMOUNT = 100;
 const EXECUTION_ACK = "SANDBOX_PROVIDER_FIXTURE_ONLY";
+const READ_ONLY_EXECUTION_ACK = "SANDBOX_PROVIDER_READ_ONLY_PREFLIGHT_ONLY";
 const CLEANUP_ACK = "REMOVE_LOCAL_PROVIDER_FIXTURE_RECORD";
 const CASES = new Set(["F-03", "O-01", "P-02", "Q-01", "Q-02"]);
+const READ_ONLY_CASES = new Set(["F-04", "P-01", "REPLAY-4XX"]);
+const ALL_CASES = new Set([...CASES, ...READ_ONLY_CASES]);
 const QUALIFYING_CASES = new Set(["O-01", "P-02"]);
 const EXPECTED_SCOPES = Object.freeze({
   "F-03": Object.freeze(["CUSTOMERS_READ", "CUSTOMERS_WRITE", "MERCHANT_PROFILE_READ"]),
@@ -37,20 +42,34 @@ const EXPECTED_SCOPES = Object.freeze({
   "Q-01": Object.freeze(["MERCHANT_PROFILE_READ", "ORDERS_READ", "ORDERS_WRITE", "PAYMENTS_READ", "PAYMENTS_WRITE"]),
   "Q-02": Object.freeze(["MERCHANT_PROFILE_READ", "ORDERS_READ", "ORDERS_WRITE", "PAYMENTS_READ", "PAYMENTS_WRITE"]),
 });
+const READ_ONLY_EXPECTED_SCOPES = Object.freeze({
+  "F-04": Object.freeze(["CUSTOMERS_READ", "MERCHANT_PROFILE_READ"]),
+  "P-01": Object.freeze(["CUSTOMERS_READ", "MERCHANT_PROFILE_READ"]),
+  "REPLAY-4XX": Object.freeze(["MERCHANT_PROFILE_READ", "PAYMENTS_READ"]),
+});
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const MAX_REQUESTS = 16;
+const MAX_READ_ONLY_REQUESTS = 5;
 const TOTAL_TIMEOUT_MS = 30_000;
 const PROVIDER_CLOCK_SKEW_MS = 5_000;
 const PACKAGE_KIND = "spartan-square-sandbox-provider-fixture";
 const PACKAGE_VERSION = 1;
 const PACKAGE_PREFIX = "spartan-square-provider-fixture-";
 const PRIVATE_FILE = "private-record.json";
+const READ_ONLY_PACKAGE_KIND = "spartan-square-sandbox-provider-read-only-preflight";
+const READ_ONLY_PACKAGE_VERSION = 1;
+const READ_ONLY_PACKAGE_PREFIX = "spartan-square-provider-read-only-";
 // Deliberately unset. A separately reviewed change must compile the exact client ID of a dedicated,
 // temporary Sandbox application before the CLI can prompt for a credential or make any request.
 const APPROVED_TEMPORARY_OAUTH_CLIENT_ID = null;
+// Intentionally separate from the mutation credential gate. A reviewed dedicated read-only Sandbox
+// OAuth application must be compiled here before any live preflight can prompt, inspect a package,
+// create a private record, or make a request.
+const APPROVED_READ_ONLY_OAUTH_CLIENT_ID = null;
 // This synthetic value and non-routable origin exist only for the explicit validation-only entry point.
 // They are not Square credentials and cannot clear either live execution gate.
 const MOCK_VALIDATION_OAUTH_CLIENT_ID = "sandboxScopedClient01";
+const MOCK_READ_ONLY_VALIDATION_OAUTH_CLIENT_ID = "sandboxReadOnlyClient01";
 const OAUTH_CLIENT_ID_PATTERN = /^[A-Za-z0-9_-]{8,191}$/;
 const LIVE_EXECUTION_BOUNDARY = Object.freeze({
   origin: SQUARE_SANDBOX_ORIGIN,
@@ -59,6 +78,14 @@ const LIVE_EXECUTION_BOUNDARY = Object.freeze({
 const MOCK_VALIDATION_BOUNDARY = Object.freeze({
   origin: MOCK_VALIDATION_ORIGIN,
   approvedClientId: MOCK_VALIDATION_OAUTH_CLIENT_ID,
+});
+const READ_ONLY_LIVE_EXECUTION_BOUNDARY = Object.freeze({
+  origin: SQUARE_SANDBOX_ORIGIN,
+  approvedClientId: APPROVED_READ_ONLY_OAUTH_CLIENT_ID,
+});
+const READ_ONLY_MOCK_VALIDATION_BOUNDARY = Object.freeze({
+  origin: MOCK_VALIDATION_ORIGIN,
+  approvedClientId: MOCK_READ_ONLY_VALIDATION_OAUTH_CLIENT_ID,
 });
 const RECORD_STATUSES = new Set(["PREPARED", "PREFLIGHT", "CREATING", "PENDING", "READY", "FAILED"]);
 const RESULT_CODES = new Set([
@@ -73,9 +100,24 @@ const RESULT_CODES = new Set([
   "CUSTOMERS_NOT_DISTINCT", "ORDER_BOUNDARY_MISMATCH", "PAYMENT_BOUNDARY_MISMATCH",
   "REFUND_BOUNDARY_MISMATCH", "REQUEST_LIMIT_REACHED", "PRIVATE_RECORD_REJECTED",
 ]);
+const READ_ONLY_RECORD_STATUSES = new Set(["PREPARED", "PREFLIGHT", "COMPLETE", "FAILED"]);
+const READ_ONLY_RESULT_CODES = new Set([
+  "NOT_STARTED", "AUTHORIZATION_VERIFIED", "F04_NEW_CUSTOMER_SLOT_CLEAR", "P01_NEW_CUSTOMER_SLOT_CLEAR",
+  "REPLAY_PERMANENT_SQUARE_REJECTION_READY", "NEW_CUSTOMER_CONFLICT", "INPUT_REJECTED", "AUTH_REJECTED",
+  "SCOPE_REJECTED", "RATE_LIMITED", "PROVIDER_UNAVAILABLE", "PROVIDER_REJECTED", "NETWORK_UNAVAILABLE",
+  "RESPONSE_REJECTED", "BOUNDARY_REJECTED", "CREDENTIAL_GATE_BLOCKED", "AUTHORIZATION_BOUNDARY_MISMATCH",
+  "MERCHANT_BOUNDARY_MISMATCH", "LOCATION_BOUNDARY_MISMATCH", "GROUP_BOUNDARY_MISMATCH",
+  "REQUEST_LIMIT_REACHED", "PRIVATE_RECORD_REJECTED", "PACKAGE_REJECTED",
+]);
+const NEW_CUSTOMER_PHONE_PATTERN = /^\+1[2-9]\d{2}55501\d{2}$/;
+const READ_ONLY_CANARY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9-]{7,79}$/;
+const READ_ONLY_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9 .'-]{1,79}$/;
+const REPLAY_OBJECT_ID_PATTERN = /^SANDBOX_REFUND_CONFIRMED_ABSENT_[A-Z0-9]{8,64}$/;
 
 export const PROVIDER_FIXTURE_ACK = EXECUTION_ACK;
 export const PROVIDER_FIXTURE_CASES = Object.freeze([...CASES]);
+export const PROVIDER_READ_ONLY_ACK = READ_ONLY_EXECUTION_ACK;
+export const PROVIDER_READ_ONLY_CASES = Object.freeze([...READ_ONLY_CASES]);
 export const PROVIDER_FIXTURE_BOUNDARIES = Object.freeze({
   origin: SQUARE_SANDBOX_ORIGIN,
   apiVersion: SQUARE_API_VERSION,
@@ -183,8 +225,80 @@ function initialPrivateRecord(input, now) {
   };
 }
 
+function validateReadOnlyInput(input) {
+  if (!input || typeof input !== "object" || !READ_ONLY_CASES.has(input.caseName) ||
+      input.ack !== READ_ONLY_EXECUTION_ACK) fail("INPUT_REJECTED");
+  const newCustomerCase = input.caseName === "F-04" || input.caseName === "P-01";
+  const expectedKeys = newCustomerCase
+    ? ["ack", "canary", "canaryConfirmation", "caseName", "name", "nameConfirmation", "phone",
+        "phoneConfirmation", "token"]
+    : ["ack", "caseName", "packagePath", "token"];
+  if (!exactKeys(input, expectedKeys)) fail("INPUT_REJECTED");
+  const token = String(input.token || "");
+  if (token.length < 20 || token.length > 1024 || /\s|[\u0000-\u001f\u007f]/.test(token)) {
+    fail("INPUT_REJECTED");
+  }
+  if (newCustomerCase) {
+    const canary = String(input.canary || "");
+    const name = String(input.name || "");
+    const phone = String(input.phone || "");
+    if (!READ_ONLY_CANARY_PATTERN.test(canary) || !READ_ONLY_NAME_PATTERN.test(name) ||
+        name.trim() !== name || !NEW_CUSTOMER_PHONE_PATTERN.test(phone) ||
+        input.canaryConfirmation !== canary || input.nameConfirmation !== name ||
+        input.phoneConfirmation !== phone) fail("INPUT_REJECTED");
+    return { caseName: input.caseName, token, canary, name, phone, ack: input.ack, packagePath: "" };
+  }
+  const packagePath = String(input.packagePath || "");
+  if (packagePath.length < 1 || packagePath.length > 4096 || /[\u0000-\u001f\u007f]/.test(packagePath)) {
+    fail("INPUT_REJECTED");
+  }
+  return { caseName: input.caseName, token, canary: "", name: "", phone: "", ack: input.ack, packagePath };
+}
+
+function initialReadOnlyPrivateRecord(input, now) {
+  const newCustomerCase = input.caseName === "F-04" || input.caseName === "P-01";
+  return {
+    kind: READ_ONLY_PACKAGE_KIND,
+    version: READ_ONLY_PACKAGE_VERSION,
+    case: input.caseName,
+    status: "PREPARED",
+    result_code: "NOT_STARTED",
+    created_at_utc: now,
+    updated_at_utc: now,
+    authorization: null,
+    boundary_hashes: newCustomerCase
+      ? {
+          canary_sha256: digest(input.canary),
+          eligible_group_id_sha256: digest(SQUARE_ELIGIBLE_GROUP_ID),
+          location_id_sha256: digest(SQUARE_LOCATION_ID),
+          merchant_id_sha256: digest(SQUARE_MERCHANT_ID),
+          name_sha256: digest(input.name),
+          phone_sha256: digest(input.phone),
+        }
+      : {
+          location_id_sha256: digest(SQUARE_LOCATION_ID),
+          merchant_id_sha256: digest(SQUARE_MERCHANT_ID),
+          replay_artifact_sha256: null,
+          replay_manifest_sha256: null,
+          replay_target_sha256: null,
+        },
+    observed_counts: newCustomerCase
+      ? { customer_matches: 0 }
+      : { permanent_provider_rejections: 0 },
+    provider_http_status: null,
+    response_evidence: newCustomerCase ? null : { body_sha256: null, byte_count: 0 },
+    request_counts: { mutations: 0, total: 0 },
+  };
+}
+
 function safeErrorCode(error) {
   return error instanceof FixtureError ? error.code : "NETWORK_UNAVAILABLE";
+}
+
+function safeReadOnlyErrorCode(error) {
+  if (error instanceof FixtureError && READ_ONLY_RESULT_CODES.has(error.code)) return error.code;
+  if (error?.code === "PACKAGE_REJECTED" || error?.message === "PACKAGE_REJECTED") return "PACKAGE_REJECTED";
+  return "NETWORK_UNAVAILABLE";
 }
 
 async function readBoundedJson(response) {
@@ -231,6 +345,56 @@ async function readBoundedJson(response) {
     if (error instanceof FixtureError) throw error;
     fail("RESPONSE_REJECTED");
   }
+}
+
+async function readBoundedJsonWithEvidence(response) {
+  const declared = Number(response?.headers?.get?.("content-length"));
+  if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) fail("RESPONSE_REJECTED");
+  let bytes;
+  if (!response?.body || typeof response.body.getReader !== "function") {
+    const text = await response.text().catch(() => fail("RESPONSE_REJECTED"));
+    bytes = Buffer.from(text, "utf8");
+    if (bytes.byteLength > MAX_RESPONSE_BYTES) fail("RESPONSE_REJECTED");
+  } else {
+    const reader = response.body.getReader();
+    const chunks = [];
+    let total = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > MAX_RESPONSE_BYTES) {
+          await reader.cancel().catch(() => {});
+          fail("RESPONSE_REJECTED");
+        }
+        chunks.push(value);
+      }
+    } catch (error) {
+      if (error instanceof FixtureError) throw error;
+      fail("RESPONSE_REJECTED");
+    }
+    bytes = Buffer.alloc(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      Buffer.from(chunk).copy(bytes, offset);
+      offset += chunk.byteLength;
+    }
+  }
+  let payload;
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    payload = JSON.parse(text);
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) fail("RESPONSE_REJECTED");
+  } catch (error) {
+    if (error instanceof FixtureError) throw error;
+    fail("RESPONSE_REJECTED");
+  }
+  return Object.freeze({
+    payload,
+    byteCount: bytes.byteLength,
+    bodySha256: createHash("sha256").update(bytes).digest("hex"),
+  });
 }
 
 function providerFailure(status) {
@@ -287,6 +451,84 @@ async function squareJson(context, pathName, { method = "GET", body, mutation = 
   }
   if (!response.ok) fail(providerFailure(response.status));
   return payload;
+}
+
+function exactJsonValue(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+async function readOnlySquareJson(context, request, { permanentClientRejection = false } = {}) {
+  const expected = context.requestPlan[context.requests];
+  if (!expected || !exactKeys(request, ["body", "method", "path"]) ||
+      request.path !== expected.path || request.method !== expected.method ||
+      !exactJsonValue(request.body, expected.body) ||
+      !["GET", "POST"].includes(request.method)) fail("BOUNDARY_REJECTED");
+  if (context.requests >= MAX_READ_ONLY_REQUESTS || context.mutationRequests !== 0) {
+    fail("REQUEST_LIMIT_REACHED");
+  }
+  if (context.executionBoundary !== READ_ONLY_LIVE_EXECUTION_BOUNDARY &&
+      context.executionBoundary !== READ_ONLY_MOCK_VALIDATION_BOUNDARY) fail("BOUNDARY_REJECTED");
+  const apiPath = request.path.startsWith("/v2/") && !request.path.startsWith("//");
+  const tokenStatusPath = request.path === "/oauth2/token/status";
+  if ((!apiPath && !tokenStatusPath) || /[\r\n]/.test(request.path)) fail("BOUNDARY_REJECTED");
+  const requestUrl = new URL(request.path, `${context.executionBoundary.origin}/`);
+  if (requestUrl.origin !== context.executionBoundary.origin ||
+      `${requestUrl.pathname}${requestUrl.search}` !== request.path) fail("BOUNDARY_REJECTED");
+
+  context.requests += 1;
+  const headers = {
+    Accept: "application/json",
+    Authorization: `Bearer ${context.token}`,
+    "Square-Version": SQUARE_API_VERSION,
+  };
+  const init = { method: request.method, headers, redirect: "error", signal: context.signal };
+  if (tokenStatusPath) headers["Content-Type"] = "application/json";
+  if (request.body !== undefined) {
+    headers["Content-Type"] = "application/json";
+    init.body = JSON.stringify(request.body);
+  }
+  let response;
+  try {
+    response = await context.fetchImpl(requestUrl.href, init);
+  } catch {
+    fail("NETWORK_UNAVAILABLE");
+  }
+  if (!response || !Number.isInteger(response.status)) fail("RESPONSE_REJECTED");
+  const contentType = response.headers?.get?.("content-type") || "";
+  if (!/^application\/json(?:\s*;|$)/i.test(contentType)) fail("RESPONSE_REJECTED");
+  const evidence = await readBoundedJsonWithEvidence(response);
+  if (permanentClientRejection) {
+    if (response.status >= 400 && response.status <= 499 &&
+        ![401, 403, 429].includes(response.status)) return { ...evidence, status: response.status };
+    fail(providerFailure(response.status));
+  }
+  if (!response.ok) fail(providerFailure(response.status));
+  return { ...evidence, status: response.status };
+}
+
+function readOnlyRequestPlan(caseName, phone = "", replayTargetId = "") {
+  const common = [
+    { method: "POST", path: "/oauth2/token/status", body: undefined },
+    { method: "GET", path: "/v2/merchants/me", body: undefined },
+    { method: "GET", path: `/v2/locations/${SQUARE_LOCATION_ID}`, body: undefined },
+  ];
+  if (caseName === "REPLAY-4XX") {
+    if (!REPLAY_OBJECT_ID_PATTERN.test(replayTargetId)) fail("PACKAGE_REJECTED");
+    return Object.freeze([
+      ...common,
+      { method: "GET", path: `/v2/refunds/${replayTargetId}`, body: undefined },
+    ].map((request) => Object.freeze(request)));
+  }
+  if (!NEW_CUSTOMER_PHONE_PATTERN.test(phone)) fail("INPUT_REJECTED");
+  return Object.freeze([
+    ...common,
+    { method: "GET", path: `/v2/customers/groups/${SQUARE_ELIGIBLE_GROUP_ID}`, body: undefined },
+    {
+      method: "POST",
+      path: "/v2/customers/search",
+      body: { query: { filter: { phone_number: { exact: phone } } }, limit: 10 },
+    },
+  ].map((request) => Object.freeze(request)));
 }
 
 function exactObjectId(value, expected) {
@@ -380,6 +622,107 @@ async function preflightAuthorization(context, caseName, record, checkpoint) {
   record.status = "PREFLIGHT";
   record.result_code = "AUTHORIZATION_VERIFIED";
   await checkpoint(record);
+}
+
+function syncReadOnlyCounts(record, context) {
+  record.request_counts = { mutations: 0, total: context.requests };
+}
+
+async function checkpointReadOnly(record, context, checkpoint) {
+  syncReadOnlyCounts(record, context);
+  await checkpoint(record);
+}
+
+async function preflightReadOnlyAuthorization(context, caseName, record, checkpoint) {
+  const { payload: status } = await readOnlySquareJson(context, context.requestPlan[0]);
+  const scopes = Array.isArray(status.scopes) && status.scopes.every((scope) => typeof scope === "string")
+    ? [...new Set(status.scopes)].sort()
+    : [];
+  const expected = [...READ_ONLY_EXPECTED_SCOPES[caseName]].sort();
+  const expiresAtMs = Date.parse(String(status.expires_at || ""));
+  const nowMs = Number(context.nowMs());
+  const clientId = String(status.client_id || "");
+  if (status.merchant_id !== SQUARE_MERCHANT_ID || clientId !== context.approvedClientId ||
+      JSON.stringify(scopes) !== JSON.stringify(expected) || !Number.isFinite(expiresAtMs) ||
+      !Number.isFinite(nowMs) || expiresAtMs <= nowMs + 5 * 60_000 ||
+      expiresAtMs > nowMs + 25 * 60 * 60_000 || !validOauthClientId(clientId)) {
+    fail("AUTHORIZATION_BOUNDARY_MISMATCH");
+  }
+  record.authorization = {
+    client_id_sha256: digest(clientId),
+    expires_at_utc: status.expires_at,
+    scopes,
+  };
+  record.status = "PREFLIGHT";
+  record.result_code = "AUTHORIZATION_VERIFIED";
+  record.updated_at_utc = context.clock();
+  await checkpointReadOnly(record, context, checkpoint);
+}
+
+async function preflightReadOnlyAccount(context) {
+  const merchant = (await readOnlySquareJson(context, context.requestPlan[1])).payload.merchant;
+  if (!exactObjectId(merchant?.id, SQUARE_MERCHANT_ID) || merchant.status !== "ACTIVE") {
+    fail("MERCHANT_BOUNDARY_MISMATCH");
+  }
+  const location = (await readOnlySquareJson(context, context.requestPlan[2])).payload.location;
+  if (!exactObjectId(location?.id, SQUARE_LOCATION_ID) ||
+      !exactObjectId(location?.merchant_id, SQUARE_MERCHANT_ID) ||
+      location.status !== "ACTIVE" || location.currency !== "USD") fail("LOCATION_BOUNDARY_MISMATCH");
+}
+
+async function preflightNewCustomerSlot(context, record) {
+  const group = (await readOnlySquareJson(context, context.requestPlan[3])).payload.group;
+  if (!exactObjectId(group?.id, SQUARE_ELIGIBLE_GROUP_ID) || group.name !== "Eligible") {
+    fail("GROUP_BOUNDARY_MISMATCH");
+  }
+  const searchResult = await readOnlySquareJson(context, context.requestPlan[4]);
+  const search = searchResult.payload;
+  record.provider_http_status = searchResult.status;
+  if (!exactKeys(search, []) && !exactKeys(search, ["customers"]) && !exactKeys(search, ["cursor"]) &&
+      !exactKeys(search, ["customers", "cursor"])) fail("RESPONSE_REJECTED");
+  if (Object.hasOwn(search, "cursor")) fail("NEW_CUSTOMER_CONFLICT");
+  if (search.customers !== undefined && !Array.isArray(search.customers)) fail("RESPONSE_REJECTED");
+  const customerCount = search.customers?.length || 0;
+  record.observed_counts.customer_matches = customerCount;
+  if (customerCount !== 0) fail("NEW_CUSTOMER_CONFLICT");
+  return searchResult.status;
+}
+
+function replayPackageBinding(inspection) {
+  try {
+    if (!inspection || inspection.manifest?.case_name !== "replay" || !inspection.eventRecord?.bytes ||
+        !/^[a-f0-9]{64}$/.test(String(inspection.eventRecord.digest || "")) ||
+        !/^[a-f0-9]{64}$/.test(String(inspection.manifestRecord?.digest || "")) ||
+        !/^[a-f0-9]{64}$/.test(String(inspection.manifest?.target_verification?.digest_hex || ""))) {
+      fail("PACKAGE_REJECTED");
+    }
+    const event = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(inspection.eventRecord.bytes));
+    if (!exactKeys(event, ["data", "event_id", "merchant_id", "type"]) ||
+        !exactKeys(event.data, ["id", "type"]) || event.merchant_id !== SQUARE_MERCHANT_ID ||
+        event.type !== "refund.updated" || event.data.type !== "refund" ||
+        !REPLAY_OBJECT_ID_PATTERN.test(event.data.id)) fail("PACKAGE_REJECTED");
+    return {
+      artifactSha256: inspection.eventRecord.digest,
+      eventIdentity: `${inspection.eventRecord.stat?.dev}:${inspection.eventRecord.stat?.ino}:${inspection.eventRecord.stat?.size}`,
+      manifestSha256: inspection.manifestRecord.digest,
+      manifestIdentity: `${inspection.manifestRecord.stat?.dev}:${inspection.manifestRecord.stat?.ino}:${inspection.manifestRecord.stat?.size}`,
+      packageTarget: inspection.target,
+      packageTargetSha256: inspection.manifest.target_verification.digest_hex,
+      targetId: event.data.id,
+      targetSha256: digest(event.data.id),
+    };
+  } catch (error) {
+    if (error instanceof FixtureError) throw error;
+    fail("PACKAGE_REJECTED");
+  }
+}
+
+function sameReplayPackageBinding(first, second) {
+  return first.artifactSha256 === second.artifactSha256 && first.eventIdentity === second.eventIdentity &&
+    first.manifestSha256 === second.manifestSha256 && first.manifestIdentity === second.manifestIdentity &&
+    first.packageTarget === second.packageTarget &&
+    first.packageTargetSha256 === second.packageTargetSha256 && first.targetId === second.targetId &&
+    first.targetSha256 === second.targetSha256;
 }
 
 async function preflightCatalog(context) {
@@ -802,6 +1145,117 @@ export async function executeProviderFixtureForValidation(rawInput, dependencies
   return executeProviderFixtureAtBoundary(rawInput, dependencies, MOCK_VALIDATION_BOUNDARY);
 }
 
+function fixedReadOnlyResult(status, result, context, record) {
+  return Object.freeze({
+    status,
+    result,
+    requests: Math.min(MAX_READ_ONLY_REQUESTS, Math.max(0, Number(context?.requests) || 0)),
+    mutationRequests: 0,
+    privateRecord: record,
+  });
+}
+
+async function executeProviderReadOnlyAtBoundary(rawInput, dependencies, executionBoundary) {
+  let input;
+  try { input = validateReadOnlyInput(rawInput); } catch (error) {
+    return fixedReadOnlyResult("FAILED", safeReadOnlyErrorCode(error), null, null);
+  }
+  if ((executionBoundary !== READ_ONLY_LIVE_EXECUTION_BOUNDARY &&
+       executionBoundary !== READ_ONLY_MOCK_VALIDATION_BOUNDARY) ||
+      !validOauthClientId(executionBoundary.approvedClientId)) {
+    return fixedReadOnlyResult("FAILED", "CREDENTIAL_GATE_BLOCKED", null, null);
+  }
+
+  const clock = dependencies.clock || (() => new Date().toISOString());
+  const record = initialReadOnlyPrivateRecord(input, clock());
+  const checkpoint = dependencies.checkpoint || (async () => {});
+  const context = {
+    token: input.token,
+    fetchImpl: dependencies.fetchImpl || globalThis.fetch,
+    signal: (dependencies.timeoutFactory || AbortSignal.timeout)(TOTAL_TIMEOUT_MS),
+    nowMs: dependencies.nowMs || (() => Date.now()),
+    clock,
+    approvedClientId: executionBoundary.approvedClientId,
+    executionBoundary,
+    requestPlan: Object.freeze([]),
+    requests: 0,
+    mutationRequests: 0,
+  };
+  let replayBinding = null;
+  try {
+    if (typeof context.fetchImpl !== "function" || !context.signal) fail("INPUT_REJECTED");
+    await checkpointReadOnly(record, context, checkpoint);
+
+    if (input.caseName === "REPLAY-4XX") {
+      const inspectPackage = dependencies.inspectReplayPackage || inspectWebhookFixturePackage;
+      if (typeof inspectPackage !== "function") fail("INPUT_REJECTED");
+      replayBinding = replayPackageBinding(await inspectPackage(input.packagePath));
+      record.boundary_hashes.replay_artifact_sha256 = replayBinding.artifactSha256;
+      record.boundary_hashes.replay_manifest_sha256 = replayBinding.manifestSha256;
+      record.boundary_hashes.replay_target_sha256 = replayBinding.targetSha256;
+      context.requestPlan = readOnlyRequestPlan(input.caseName, "", replayBinding.targetId);
+      await checkpointReadOnly(record, context, checkpoint);
+    } else {
+      context.requestPlan = readOnlyRequestPlan(input.caseName, input.phone);
+    }
+
+    await preflightReadOnlyAuthorization(context, input.caseName, record, checkpoint);
+    await preflightReadOnlyAccount(context);
+    if (input.caseName === "REPLAY-4XX") {
+      const inspectPackage = dependencies.inspectReplayPackage || inspectWebhookFixturePackage;
+      const confirmation = replayPackageBinding(await inspectPackage(input.packagePath));
+      if (!sameReplayPackageBinding(replayBinding, confirmation)) fail("PACKAGE_REJECTED");
+      const rejection = await readOnlySquareJson(context, context.requestPlan[3], {
+        permanentClientRejection: true,
+      });
+      const postResponseConfirmation = replayPackageBinding(await inspectPackage(input.packagePath));
+      if (!sameReplayPackageBinding(replayBinding, postResponseConfirmation)) fail("PACKAGE_REJECTED");
+      record.observed_counts.permanent_provider_rejections = 1;
+      record.provider_http_status = rejection.status;
+      record.response_evidence = {
+        body_sha256: rejection.bodySha256,
+        byte_count: rejection.byteCount,
+      };
+      record.status = "COMPLETE";
+      record.result_code = "REPLAY_PERMANENT_SQUARE_REJECTION_READY";
+    } else {
+      record.provider_http_status = await preflightNewCustomerSlot(context, record);
+      record.status = "COMPLETE";
+      record.result_code = input.caseName === "F-04"
+        ? "F04_NEW_CUSTOMER_SLOT_CLEAR"
+        : "P01_NEW_CUSTOMER_SLOT_CLEAR";
+    }
+    record.updated_at_utc = clock();
+    await checkpointReadOnly(record, context, checkpoint);
+    return fixedReadOnlyResult("COMPLETE", record.result_code, context, record);
+  } catch (error) {
+    const code = safeReadOnlyErrorCode(error);
+    record.status = "FAILED";
+    record.result_code = code;
+    record.updated_at_utc = clock();
+    try { await checkpointReadOnly(record, context, checkpoint); } catch { /* Preserve fixed failure output. */ }
+    return fixedReadOnlyResult("FAILED", code, context, record);
+  } finally {
+    input.token = "";
+    input.canary = "";
+    input.name = "";
+    input.phone = "";
+    input.packagePath = "";
+    context.token = "";
+    context.requestPlan = Object.freeze([]);
+    replayBinding = null;
+  }
+}
+
+export async function executeProviderReadOnlyPreflight(rawInput, dependencies = {}) {
+  return executeProviderReadOnlyAtBoundary(rawInput, dependencies, READ_ONLY_LIVE_EXECUTION_BOUNDARY);
+}
+
+// This validation-only entry point is bound to the non-routable `.invalid` origin and a synthetic client ID.
+export async function executeProviderReadOnlyPreflightForValidation(rawInput, dependencies = {}) {
+  return executeProviderReadOnlyAtBoundary(rawInput, dependencies, READ_ONLY_MOCK_VALIDATION_BOUNDARY);
+}
+
 function packagePathAllowed(directory) {
   if (typeof directory !== "string" || directory.includes("\u0000")) return false;
   const resolved = fs.realpathSync(path.resolve(directory));
@@ -810,6 +1264,16 @@ function packagePathAllowed(directory) {
   return Boolean(relative && !relative.startsWith("..") && !path.isAbsolute(relative) &&
     path.dirname(relative) === "." &&
     new RegExp(`^${PACKAGE_PREFIX}[A-Za-z0-9]{6}$`).test(path.basename(relative)));
+}
+
+function readOnlyPackagePathAllowed(directory) {
+  if (typeof directory !== "string" || directory.includes("\u0000")) return false;
+  const resolved = fs.realpathSync(path.resolve(directory));
+  const tempRoot = fs.realpathSync(os.tmpdir());
+  const relative = path.relative(tempRoot, resolved);
+  return Boolean(relative && !relative.startsWith("..") && !path.isAbsolute(relative) &&
+    path.dirname(relative) === "." &&
+    new RegExp(`^${READ_ONLY_PACKAGE_PREFIX}[A-Za-z0-9]{6}$`).test(path.basename(relative)));
 }
 
 function exactKeys(value, expected) {
@@ -918,6 +1382,102 @@ function validatePrivateRecordShape(record, basename) {
   }
 }
 
+function validSha256(value) {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+}
+
+function validateReadOnlyPrivateRecordShape(record, basename) {
+  const minimalKeys = ["case", "kind", "package_basename", "result_code", "status", "version"];
+  if (exactKeys(record, minimalKeys)) {
+    if (record.kind !== READ_ONLY_PACKAGE_KIND || record.version !== READ_ONLY_PACKAGE_VERSION ||
+        !READ_ONLY_CASES.has(record.case) || record.package_basename !== basename ||
+        record.status !== "PREPARED" || record.result_code !== "NOT_STARTED") fail("PRIVATE_RECORD_REJECTED");
+    return;
+  }
+
+  const fullKeys = [
+    "authorization", "boundary_hashes", "case", "created_at_utc", "kind", "observed_counts",
+    "package_basename", "provider_http_status", "request_counts", "response_evidence", "result_code", "status",
+    "updated_at_utc", "version",
+  ];
+  if (!exactKeys(record, fullKeys) || record.kind !== READ_ONLY_PACKAGE_KIND ||
+      record.version !== READ_ONLY_PACKAGE_VERSION || !READ_ONLY_CASES.has(record.case) ||
+      record.package_basename !== basename || !READ_ONLY_RECORD_STATUSES.has(record.status) ||
+      !READ_ONLY_RESULT_CODES.has(record.result_code) || !validUtcTimestamp(record.created_at_utc) ||
+      !validUtcTimestamp(record.updated_at_utc) ||
+      !exactKeys(record.request_counts, ["mutations", "total"]) || record.request_counts.mutations !== 0 ||
+      !Number.isInteger(record.request_counts.total) || record.request_counts.total < 0 ||
+      record.request_counts.total > MAX_READ_ONLY_REQUESTS ||
+      (record.provider_http_status !== null &&
+        (!Number.isInteger(record.provider_http_status) || record.provider_http_status < 100 ||
+         record.provider_http_status > 599))) fail("PRIVATE_RECORD_REJECTED");
+
+  if (record.authorization !== null) {
+    if (!exactKeys(record.authorization, ["client_id_sha256", "expires_at_utc", "scopes"]) ||
+        !validSha256(record.authorization.client_id_sha256) ||
+        !validUtcTimestamp(record.authorization.expires_at_utc) ||
+        JSON.stringify(record.authorization.scopes) !==
+          JSON.stringify([...READ_ONLY_EXPECTED_SCOPES[record.case]].sort())) fail("PRIVATE_RECORD_REJECTED");
+  } else if (!["PREPARED", "FAILED"].includes(record.status)) {
+    fail("PRIVATE_RECORD_REJECTED");
+  }
+
+  const newCustomerCase = record.case === "F-04" || record.case === "P-01";
+  if (newCustomerCase) {
+    const boundaryKeys = [
+      "canary_sha256", "eligible_group_id_sha256", "location_id_sha256", "merchant_id_sha256",
+      "name_sha256", "phone_sha256",
+    ];
+    if (!exactKeys(record.boundary_hashes, boundaryKeys) ||
+        Object.values(record.boundary_hashes).some((value) => !validSha256(value)) ||
+        record.boundary_hashes.eligible_group_id_sha256 !== digest(SQUARE_ELIGIBLE_GROUP_ID) ||
+        record.boundary_hashes.location_id_sha256 !== digest(SQUARE_LOCATION_ID) ||
+        record.boundary_hashes.merchant_id_sha256 !== digest(SQUARE_MERCHANT_ID) ||
+        record.response_evidence !== null || !exactKeys(record.observed_counts, ["customer_matches"]) ||
+        !Number.isInteger(record.observed_counts.customer_matches) ||
+        record.observed_counts.customer_matches < 0 || record.observed_counts.customer_matches > 10) {
+      fail("PRIVATE_RECORD_REJECTED");
+    }
+  } else {
+    const boundaryKeys = [
+      "location_id_sha256", "merchant_id_sha256", "replay_artifact_sha256", "replay_manifest_sha256",
+      "replay_target_sha256",
+    ];
+    if (!exactKeys(record.boundary_hashes, boundaryKeys) ||
+        record.boundary_hashes.location_id_sha256 !== digest(SQUARE_LOCATION_ID) ||
+        record.boundary_hashes.merchant_id_sha256 !== digest(SQUARE_MERCHANT_ID) ||
+        !["replay_artifact_sha256", "replay_manifest_sha256", "replay_target_sha256"].every((key) =>
+          record.boundary_hashes[key] === null || validSha256(record.boundary_hashes[key])) ||
+        !exactKeys(record.response_evidence, ["body_sha256", "byte_count"]) ||
+        (record.response_evidence.body_sha256 !== null && !validSha256(record.response_evidence.body_sha256)) ||
+        !Number.isInteger(record.response_evidence.byte_count) || record.response_evidence.byte_count < 0 ||
+        record.response_evidence.byte_count > MAX_RESPONSE_BYTES ||
+        !exactKeys(record.observed_counts, ["permanent_provider_rejections"]) ||
+        ![0, 1].includes(record.observed_counts.permanent_provider_rejections) ||
+        (record.status !== "COMPLETE" &&
+          (record.response_evidence.body_sha256 !== null || record.response_evidence.byte_count !== 0))) {
+      fail("PRIVATE_RECORD_REJECTED");
+    }
+  }
+
+  if (record.status === "COMPLETE") {
+    if (record.authorization === null || record.request_counts.mutations !== 0 ||
+        (newCustomerCase && (record.request_counts.total !== 5 ||
+          record.observed_counts.customer_matches !== 0 || record.provider_http_status < 200 ||
+          record.provider_http_status > 299 ||
+          record.result_code !== (record.case === "F-04"
+            ? "F04_NEW_CUSTOMER_SLOT_CLEAR" : "P01_NEW_CUSTOMER_SLOT_CLEAR"))) ||
+        (!newCustomerCase && (record.request_counts.total !== 4 ||
+          record.observed_counts.permanent_provider_rejections !== 1 ||
+          record.provider_http_status < 400 || record.provider_http_status > 499 ||
+          [401, 403, 429].includes(record.provider_http_status) ||
+          !validSha256(record.response_evidence.body_sha256) || record.response_evidence.byte_count < 2 ||
+          record.result_code !== "REPLAY_PERMANENT_SQUARE_REJECTION_READY" ||
+          ["replay_artifact_sha256", "replay_manifest_sha256", "replay_target_sha256"].some((key) =>
+            !validSha256(record.boundary_hashes[key]))))) fail("PRIVATE_RECORD_REJECTED");
+  }
+}
+
 function assertPackageDirectory(directory) {
   if (!packagePathAllowed(directory)) fail("PRIVATE_RECORD_REJECTED");
   const stats = fs.lstatSync(directory);
@@ -986,9 +1546,94 @@ export function cleanupPrivateRecordPackage(directory) {
   fs.rmdirSync(directory);
 }
 
+function assertReadOnlyPackageDirectory(directory) {
+  if (!readOnlyPackagePathAllowed(directory)) fail("PRIVATE_RECORD_REJECTED");
+  const stats = fs.lstatSync(directory);
+  if (stats.isSymbolicLink() || !stats.isDirectory() || (stats.mode & 0o077) !== 0) {
+    fail("PRIVATE_RECORD_REJECTED");
+  }
+  if (typeof process.getuid === "function" && stats.uid !== process.getuid()) fail("PRIVATE_RECORD_REJECTED");
+  const entries = fs.readdirSync(directory).sort();
+  if (entries.length !== 1 || entries[0] !== PRIVATE_FILE) fail("PRIVATE_RECORD_REJECTED");
+}
+
+export function createReadOnlyPrivateRecordPackage(caseName) {
+  if (!READ_ONLY_CASES.has(caseName)) fail("PRIVATE_RECORD_REJECTED");
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), READ_ONLY_PACKAGE_PREFIX));
+  fs.chmodSync(directory, 0o700);
+  const file = path.join(directory, PRIVATE_FILE);
+  const initial = {
+    kind: READ_ONLY_PACKAGE_KIND,
+    version: READ_ONLY_PACKAGE_VERSION,
+    case: caseName,
+    status: "PREPARED",
+    result_code: "NOT_STARTED",
+    package_basename: path.basename(directory),
+  };
+  fs.writeFileSync(file, `${JSON.stringify(initial)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  return Object.freeze({ directory, file });
+}
+
+export function updateReadOnlyPrivateRecordPackage(handle, record) {
+  if (!handle || typeof handle !== "object") fail("PRIVATE_RECORD_REJECTED");
+  assertReadOnlyPackageDirectory(handle.directory);
+  const expectedFile = path.join(handle.directory, PRIVATE_FILE);
+  if (path.resolve(handle.file) !== expectedFile || record?.kind !== READ_ONLY_PACKAGE_KIND ||
+      record?.version !== READ_ONLY_PACKAGE_VERSION || !READ_ONLY_CASES.has(record?.case)) {
+    fail("PRIVATE_RECORD_REJECTED");
+  }
+  const current = fs.lstatSync(expectedFile);
+  if (current.isSymbolicLink() || !current.isFile() || current.nlink !== 1 || (current.mode & 0o077) !== 0) {
+    fail("PRIVATE_RECORD_REJECTED");
+  }
+  if (typeof process.getuid === "function" && current.uid !== process.getuid()) fail("PRIVATE_RECORD_REJECTED");
+  const persisted = { ...record, package_basename: path.basename(handle.directory) };
+  validateReadOnlyPrivateRecordShape(persisted, path.basename(handle.directory));
+  const serialized = `${JSON.stringify(persisted, null, 2)}\n`;
+  if (Buffer.byteLength(serialized, "utf8") > MAX_RESPONSE_BYTES ||
+      /Bearer|cnon:|access[_-]?token/i.test(serialized)) fail("PRIVATE_RECORD_REJECTED");
+  const next = `${expectedFile}.next`;
+  fs.writeFileSync(next, serialized, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  fs.renameSync(next, expectedFile);
+  fs.chmodSync(expectedFile, 0o600);
+}
+
+export function readReadOnlyPrivateRecordPackage(directory) {
+  assertReadOnlyPackageDirectory(directory);
+  const file = path.join(directory, PRIVATE_FILE);
+  const stats = fs.lstatSync(file);
+  if (stats.isSymbolicLink() || !stats.isFile() || stats.nlink !== 1 || (stats.mode & 0o077) !== 0 ||
+      stats.size < 2 || stats.size > MAX_RESPONSE_BYTES) fail("PRIVATE_RECORD_REJECTED");
+  if (typeof process.getuid === "function" && stats.uid !== process.getuid()) fail("PRIVATE_RECORD_REJECTED");
+  let parsed;
+  try { parsed = JSON.parse(fs.readFileSync(file, "utf8")); } catch { fail("PRIVATE_RECORD_REJECTED"); }
+  validateReadOnlyPrivateRecordShape(parsed, path.basename(directory));
+  return parsed;
+}
+
+export function cleanupReadOnlyPrivateRecordPackage(directory) {
+  readReadOnlyPrivateRecordPackage(directory);
+  const file = path.join(directory, PRIVATE_FILE);
+  fs.unlinkSync(file);
+  fs.rmdirSync(directory);
+}
+
+export function cleanupProviderPrivateRecordPackage(directory) {
+  const basename = typeof directory === "string" ? path.basename(directory) : "";
+  if (new RegExp(`^${PACKAGE_PREFIX}[A-Za-z0-9]{6}$`).test(basename)) {
+    cleanupPrivateRecordPackage(directory);
+    return;
+  }
+  if (new RegExp(`^${READ_ONLY_PACKAGE_PREFIX}[A-Za-z0-9]{6}$`).test(basename)) {
+    cleanupReadOnlyPrivateRecordPackage(directory);
+    return;
+  }
+  fail("PRIVATE_RECORD_REJECTED");
+}
+
 function safeRecordDirectory(directory) {
   try {
-    if (!directory || !packagePathAllowed(directory)) return "NONE";
+    if (!directory || (!packagePathAllowed(directory) && !readOnlyPackagePathAllowed(directory))) return "NONE";
     return path.resolve(directory);
   } catch {
     return "NONE";
@@ -997,10 +1642,10 @@ function safeRecordDirectory(directory) {
 
 export function formatProviderFixtureResult(value, recordDirectory = "") {
   const statuses = new Set(["INERT", "COMPLETE", "PENDING", "FAILED"]);
-  const results = new Set(["NO_REQUEST", "LOCAL_RECORD_REMOVED", ...RESULT_CODES]);
+  const results = new Set(["NO_REQUEST", "LOCAL_RECORD_REMOVED", ...RESULT_CODES, ...READ_ONLY_RESULT_CODES]);
   const status = statuses.has(value?.status) ? value.status : "FAILED";
   const result = results.has(value?.result) ? value.result : "RESPONSE_REJECTED";
-  const caseName = CASES.has(value?.caseName) ? value.caseName : "NONE";
+  const caseName = ALL_CASES.has(value?.caseName) ? value.caseName : "NONE";
   const requests = Number.isInteger(value?.requests) && value.requests >= 0 && value.requests <= MAX_REQUESTS ? value.requests : 0;
   const mutations = Number.isInteger(value?.mutationRequests) && value.mutationRequests >= 0 && value.mutationRequests <= 4
     ? value.mutationRequests : 0;
@@ -1067,7 +1712,7 @@ export async function providerFixtureMain(argv = process.argv.slice(2), dependen
   }
   if (argv.length === 4 && argv[0] === "--cleanup" && argv[2] === "--ack" && argv[3] === CLEANUP_ACK) {
     try {
-      (dependencies.cleanupPackage || cleanupPrivateRecordPackage)(argv[1]);
+      (dependencies.cleanupPackage || cleanupProviderPrivateRecordPackage)(argv[1]);
       print(formatProviderFixtureResult({
         status: "COMPLETE", caseName: "NONE", result: "LOCAL_RECORD_REMOVED", requests: 0, mutationRequests: 0,
       }));
@@ -1079,6 +1724,85 @@ export async function providerFixtureMain(argv = process.argv.slice(2), dependen
       return 2;
     }
   }
+
+  if (argv[0] === "--execute-read-only") {
+    const caseName = argv[2];
+    const newCustomerSyntax = argv.length === 5 && argv[1] === "--case" &&
+      ["F-04", "P-01"].includes(caseName) && argv[3] === "--ack" &&
+      argv[4] === READ_ONLY_EXECUTION_ACK;
+    const replaySyntax = argv.length === 7 && argv[1] === "--case" && caseName === "REPLAY-4XX" &&
+      argv[3] === "--package" && argv[5] === "--ack" && argv[6] === READ_ONLY_EXECUTION_ACK;
+    if (!newCustomerSyntax && !replaySyntax) {
+      print(formatProviderFixtureResult({
+        status: "FAILED", caseName: READ_ONLY_CASES.has(caseName) ? caseName : "NONE", result: "INPUT_REJECTED",
+        requests: 0, mutationRequests: 0,
+      }));
+      return 2;
+    }
+    if (!validOauthClientId(APPROVED_READ_ONLY_OAUTH_CLIENT_ID)) {
+      print(formatProviderFixtureResult({
+        status: "FAILED", caseName, result: "CREDENTIAL_GATE_BLOCKED", requests: 0, mutationRequests: 0,
+      }));
+      return 4;
+    }
+
+    let token = "";
+    let canary = "";
+    let canaryConfirmation = "";
+    let name = "";
+    let nameConfirmation = "";
+    let phone = "";
+    let phoneConfirmation = "";
+    let packagePath = replaySyntax ? argv[4] : "";
+    let packageHandle = null;
+    try {
+      const prompt = dependencies.readHiddenLine || readHiddenLine;
+      token = await prompt("Temporary read-only Square sandbox access token (hidden): ", 1024);
+      if (newCustomerSyntax) {
+        canary = await prompt("Approved exact sandbox canary (hidden): ", 80);
+        canaryConfirmation = await prompt("Independent review — re-enter exact sandbox canary (hidden): ", 80);
+        name = await prompt("Approved synthetic customer name (hidden): ", 80);
+        nameConfirmation = await prompt("Independent review — re-enter exact synthetic customer name (hidden): ", 80);
+        phone = await prompt("Approved reserved +1NXX55501XX phone (hidden): ", 12);
+        phoneConfirmation = await prompt("Independent review — re-enter exact reserved phone (hidden): ", 12);
+      }
+      const rawInput = {
+        caseName, token, ack: READ_ONLY_EXECUTION_ACK,
+        ...(newCustomerSyntax
+          ? { canary, canaryConfirmation, name, nameConfirmation, phone, phoneConfirmation }
+          : { packagePath }),
+      };
+      validateReadOnlyInput(rawInput);
+      packageHandle = (dependencies.createReadOnlyPackage || createReadOnlyPrivateRecordPackage)(caseName);
+      const result = await executeProviderReadOnlyPreflight(rawInput, {
+        fetchImpl: dependencies.fetchImpl || globalThis.fetch,
+        timeoutFactory: dependencies.timeoutFactory || AbortSignal.timeout,
+        clock: dependencies.clock || (() => new Date().toISOString()),
+        nowMs: dependencies.nowMs || (() => Date.now()),
+        inspectReplayPackage: dependencies.inspectReplayPackage || inspectWebhookFixturePackage,
+        checkpoint: async (record) =>
+          (dependencies.updateReadOnlyPackage || updateReadOnlyPrivateRecordPackage)(packageHandle, record),
+      });
+      print(formatProviderFixtureResult({ ...result, caseName }, packageHandle.directory));
+      return result.status === "COMPLETE" ? 0 : 1;
+    } catch (error) {
+      const code = safeReadOnlyErrorCode(error);
+      print(formatProviderFixtureResult({
+        status: "FAILED", caseName, result: code, requests: 0, mutationRequests: 0,
+      }, packageHandle?.directory || ""));
+      return code === "INPUT_REJECTED" ? 2 : 1;
+    } finally {
+      token = "";
+      canary = "";
+      canaryConfirmation = "";
+      name = "";
+      nameConfirmation = "";
+      phone = "";
+      phoneConfirmation = "";
+      packagePath = "";
+    }
+  }
+
   const caseName = argv[2];
   if (argv.length !== 5 || argv[0] !== "--execute" || argv[1] !== "--case" || !CASES.has(caseName) ||
       argv[3] !== "--ack" || argv[4] !== EXECUTION_ACK) {
