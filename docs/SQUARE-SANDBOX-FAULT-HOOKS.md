@@ -75,7 +75,9 @@ P-02 never falls back to process memory, the generic consumed-row hook, a repeat
 
 ## One-time legacy all-off baseline migration
 
-This migration is a separate sandbox control-plane authority, not an acceptance case and not approval for F-02. At this review, the exact current all-off target does not already exist as an uploaded Worker version. The three surfaces below are implemented for a future owner-approved window, but none has been run live.
+This migration is a separate sandbox control-plane authority, not an acceptance case and not approval for F-02. During the owner-approved August 21, 2026 preparation-only window of 14:00–14:30 UTC, exactly one current all-off target was uploaded at 14:14:35 UTC. The preparation command returned `STATUS=REJECTED RESULT=TARGET_PREPARE_REJECTED_LEGACY_TRAFFIC_CONFIRMED`; it was not retried. Independent post-upload and readiness checks confirmed that one retained in-window target inactive at 0% and the exact legacy source as the sole 100% allocation, and the distinct read-only surface returned `STATUS=READY RESULT=READY_SANDBOX_LEGACY_TO_CURRENT_ALL_OFF_MIGRATION`. No traffic switch or final migration authority followed.
+
+Pinned Wrangler `4.124.0` output/parser review identified the bounded false-negative cause: successful upload output includes a D1 binding `preview_database_id` UUID before the labeled `Worker Version ID`, while the historical parser scanned every UUID and required exactly one. The historical catch collapsed the inner failure code, so this is an evidence-backed pinned-output/parser-contract finding rather than a claim that the terminal rejection exposed the inner error. The reviewed parser now accepts only one valid labeled Worker version ID. That correction does not rewrite the historical rejection.
 
 The exact audited legacy source is already all-off. Its metadata must match the current checked all-off configuration in every handler, variable, resource binding and standing-secret name except one: `SQUARE_SANDBOX_FAULTS_ENABLED` is absent from the legacy source and is exactly `"false"` in the current target. A source with any other difference is rejected. The source must own 100% of sandbox traffic, have no control profile or temporary fault secret, and remain active throughout target preparation and the read-only readiness check.
 
@@ -83,7 +85,7 @@ This one-time authority may only upload one unpublished exact current all-off ta
 
 Before preparation, the separate private migration record must name the one UTC window, business owner/final `GO` or `NO-GO` authority, migration operator, ambiguity-rollback operator, evidence custodian, independent reviewer and temporary Queues Read credential/revocation owner. It must bind the privately reviewed source and future target evidence, preauthorize exact-legacy rollback on ambiguity and require post-migration all-off verification. A Project 2 case activation signature cannot substitute for any of these migration decisions.
 
-First, after separate owner approval, prepare the target:
+For a new clean preparation path with no retained-target exception, first obtain separate owner approval and prepare the target. Do not invoke this action again for the retained August 21 target:
 
 ```sh
 node scripts/manage-square-sandbox-fault-window.mjs \
@@ -96,11 +98,15 @@ node scripts/manage-square-sandbox-fault-window.mjs \
   --ack-historical-versions-retained
 ```
 
-The hidden prompt order is exact account ID, reviewed full commit and exact active legacy source UUID. The action verifies the local/repository boundary, authenticated sandbox account, exact legacy metadata and legacy 100% traffic before upload. It then uploads and exact-verifies one current all-off version while leaving legacy traffic and all secret values unchanged. Require only:
+The hidden prompt order is exact account ID, reviewed full commit and exact active legacy source UUID. The action verifies the local/repository boundary, authenticated sandbox account, exact legacy metadata and legacy 100% traffic before upload. It then uploads and exact-verifies one current all-off version while leaving legacy traffic and all secret values unchanged. Its reviewed bounded-convergence contract permits at most one upload in the invocation. Only after that same invocation parses one distinct uploaded target UUID may one transient `VERSION_METADATA_UNAVAILABLE` or `TRAFFIC_STATUS_UNAVAILABLE` trigger an exact immutable source/target/traffic reread. An exact reread may return the normal preparation result; semantic drift, missing identity or any non-exact state never converges. There is no later retained-target reread mode and no second upload. Require only:
 
 `STATUS=PREPARED RESULT=SANDBOX_CURRENT_ALL_OFF_TARGET_READY TARGET_VERSION=<uuid>`
 
 Preparation is not readiness and does not change traffic. Record the returned target UUID privately, then run the distinct read-only gate:
+
+Any other preparation result remains rejected. Preserve it and do not retry blindly. The August 21 action retained one exact target but returned `TARGET_PREPARE_REJECTED_LEGACY_TRAFFIC_CONFIRMED`; that historical result must never be rewritten as `PREPARED`. The retained target can enter later review only when the private default-NO-GO migration record binds combined command/session and version evidence identifying the one in-window upload and no second in-window upload, proves that retained target is exact and inactive at the required recorded checkpoints, proves the exact legacy source was the sole 100% allocation at those checkpoints, records no retry, carries scoped independent reviewer signoff, captures the separate exact `READY` result and records explicit owner `RETAINED_PREPARATION_EXCEPTION_ACCEPTED`. That label is record-only, is not operator output and grants neither final deployment nor case authority.
+
+If the original preparation-only window has expired, final deployment requires a new owner-approved window, a fresh exact source/target inspection and a fresh read-only readiness result. Do not infer final authority from the earlier preparation approval or exception acceptance.
 
 ```sh
 node scripts/manage-square-sandbox-fault-window.mjs \

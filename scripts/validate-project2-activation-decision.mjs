@@ -56,6 +56,7 @@ const MIGRATION_REQUIRED_SECTIONS = Object.freeze([
   "Decision authority",
   "Private evidence references",
   "Preparation authority",
+  "Retained preparation exception acceptance",
   "Final deployment readiness and authority",
   "Exact rollback authority",
   "Post-migration verification and closure",
@@ -99,7 +100,9 @@ const MIGRATION_REQUIRED_SECTION_TERMS = Object.freeze({
   "Private evidence references": [
     /reference only/i, /Authenticated sandbox account/, /Reviewed full commit/,
     /Exact legacy source metadata and 100% traffic allocation/,
-    /Prepared target metadata and unpublished state/, /Read-only migration-readiness result/,
+    /Prepared target metadata and unpublished state/,
+    /Normal preparation result or retained-preparation exception package, as applicable/,
+    /Read-only migration-readiness result/,
     /Queue, webhook\/outbox, subscription and ingress readiness evidence/,
     /Final strict check, observer baseline and monitored all-off closure evidence/,
   ],
@@ -109,6 +112,25 @@ const MIGRATION_REQUIRED_SECTION_TERMS = Object.freeze({
     /Owner preparation decision: `GO` or `NO-GO`/, /STATUS=PREPARED RESULT=SANDBOX_CURRENT_ALL_OFF_TARGET_READY/,
     /Preparation success is not migration readiness/, /is not final deployment authority/,
   ],
+  "Retained preparation exception acceptance": [
+    /Normal preparation success remains only `STATUS=PREPARED RESULT=SANDBOX_CURRENT_ALL_OFF_TARGET_READY/,
+    /STATUS=REJECTED RESULT=TARGET_PREPARE_REJECTED_LEGACY_TRAFFIC_CONFIRMED/,
+    /rejection must remain preserved verbatim/, /must not be retried/,
+    /No preparation retry and no second target upload occurred/,
+    /Exact owner-approved preparation window and preparation-only scope/,
+    /one-upload bounded-convergence/, /same preparation invocation/,
+    /VERSION_METADATA_UNAVAILABLE/, /TRAFFIC_STATUS_UNAVAILABLE/, /semantic drift never converges/,
+    /today's historical rejection must remain preserved/,
+    /identifies the one in-window upload and no second in-window upload/,
+    /one retained in-window target is current all-off, distinct and at 0% traffic/,
+    /exact legacy source was the sole 100% traffic allocation at every required recorded checkpoint/,
+    /Independent reviewer confirms the preparation action and captured evidence show no action-caused traffic, secret, case, provider, Queue, D1, Apps or production mutation/,
+    /STATUS=READY RESULT=READY_SANDBOX_LEGACY_TO_CURRENT_ALL_OFF_MIGRATION/,
+    /RETAINED_PREPARATION_EXCEPTION_ACCEPTED/, /is not final deployment `GO`/,
+    /Owner exception decision: `RETAINED_PREPARATION_EXCEPTION_ACCEPTED` or `REJECTED`, with UTC time/,
+    /later final-deployment decision requires a new unexpired private window record/,
+    /references the preserved preparation package, repeats the exact source\/target inspection and obtains a fresh read-only readiness result/,
+  ],
   "Final deployment readiness and authority": [
     /--check-legacy-baseline-migration/,
     /STATUS=READY RESULT=READY_SANDBOX_LEGACY_TO_CURRENT_ALL_OFF_MIGRATION/,
@@ -117,6 +139,8 @@ const MIGRATION_REQUIRED_SECTION_TERMS = Object.freeze({
     /No case or provider request authorized or in progress/, /Window remains unexpired/,
     /Owner final deployment decision: `GO` or `NO-GO`/,
     /--execute --migrate-legacy-baseline-to-current-all-off/,
+    /Normal `PREPARED` result or every retained-preparation exception gate is accepted and privately referenced/,
+    /`RETAINED_PREPARATION_EXCEPTION_ACCEPTED` is a prerequisite record label only/,
   ],
   "Exact rollback authority": [
     /preauthorize immediate ambiguity rollback/, /exact audited legacy all-off source/,
@@ -146,6 +170,7 @@ const MIGRATION_REQUIRED_SECTION_TERMS = Object.freeze({
   ],
   "Final signatures": [
     /Preparation-stage signatures/, /Business owner preparation decision/,
+    /Retained preparation exception decision, if applicable/,
     /Final deployment signatures/, /Business owner final deployment decision/,
     /Post-migration closure signatures/, /Temporary Queue credential revocation independently verified/,
     /Business owner closure signature and decision/,
@@ -376,7 +401,7 @@ function validateMigrationDefaultNoGo(source, errors) {
   for (const required of [
     /This default-NO-GO record covers exactly one supervised UTC window for the one-time Project 2 sandbox migration/,
     /Complete a private copy; keep this repository template blank/,
-    /Every applicable `\[REVIEW\/FILL\]` field, both decision stages, rollback preauthorization and all required signatures must be complete/,
+    /Every applicable `\[REVIEW\/FILL\]` field, both decision stages, any retained-preparation exception acceptance, rollback preauthorization and all required signatures must be complete/,
     /Any blank, conflict, expired window, changed prerequisite or ambiguity remains `NO-GO`/,
     /must remain `NOT APPROVED` through inactive-target preparation and readiness/,
     /only the owner's final deployment `GO` inside the unchanged window may change it to `APPROVED FOR THIS WINDOW`/,
@@ -565,6 +590,51 @@ function assertUnsafeMigrationMutationsFail(source, knownDocTargets) {
     )],
     ["MIGRATION_REVIEW_FILL_MISSING_PREPARATION_AUTHORITY",
       replaceSectionPlaceholders(source, "Preparation authority")],
+    ["MIGRATION_REVIEW_FILL_MISSING_RETAINED_PREPARATION_EXCEPTION_ACCEPTANCE",
+      replaceSectionPlaceholders(source, "Retained preparation exception acceptance")],
+    ["MIGRATION_SECTION_CONTRACT_PRIVATE_EVIDENCE_REFERENCES",
+      source.replace(
+        "Normal preparation result or retained-preparation exception package, as applicable",
+        "Preparation evidence package",
+      )],
+    ["MIGRATION_SECTION_CONTRACT_RETAINED_PREPARATION_EXCEPTION_ACCEPTANCE",
+      source.replace(
+        "Exact owner-approved preparation window and preparation-only scope",
+        "Preparation window reference",
+      )],
+    ["MIGRATION_SECTION_CONTRACT_RETAINED_PREPARATION_EXCEPTION_ACCEPTANCE",
+      source.replace(" or `REJECTED`, with UTC time", " or `REJECTED`")],
+    ["MIGRATION_SECTION_CONTRACT_RETAINED_PREPARATION_EXCEPTION_ACCEPTANCE",
+      source.replace(
+        "references the preserved preparation package, repeats the exact source/target inspection and obtains a fresh read-only readiness result",
+        "references the preserved preparation package",
+      )],
+    ["MIGRATION_SECTION_CONTRACT_FINAL_DEPLOYMENT_READINESS_AND_AUTHORITY",
+      source.replace(
+        "Normal `PREPARED` result or every retained-preparation exception gate is accepted and privately referenced",
+        "Preparation evidence is reviewed",
+      )],
+    ["MIGRATION_SECTION_CONTRACT_FINAL_SIGNATURES",
+      source.replace(
+        "Retained preparation exception decision, if applicable",
+        "Preparation evidence decision, if applicable",
+      )],
+    ["MIGRATION_SECTION_CONTRACT_RETAINED_PREPARATION_EXCEPTION_ACCEPTANCE",
+      source.replaceAll("TARGET_PREPARE_REJECTED_LEGACY_TRAFFIC_CONFIRMED",
+        "SANDBOX_CURRENT_ALL_OFF_TARGET_READY")],
+    ["MIGRATION_SECTION_CONTRACT_RETAINED_PREPARATION_EXCEPTION_ACCEPTANCE",
+      source.replace("No preparation retry and no second target upload occurred",
+        "Preparation outcome reviewed")],
+    ["MIGRATION_SECTION_CONTRACT_RETAINED_PREPARATION_EXCEPTION_ACCEPTANCE",
+      source.replace("same preparation invocation", "later preparation invocation")],
+    ["MIGRATION_SECTION_CONTRACT_RETAINED_PREPARATION_EXCEPTION_ACCEPTANCE",
+      source.replace("identifies the one in-window upload and no second in-window upload",
+        "identifies an uploaded target")],
+    ["MIGRATION_SECTION_CONTRACT_RETAINED_PREPARATION_EXCEPTION_ACCEPTANCE",
+      source.replace("the preparation action and captured evidence show no action-caused",
+        "the reviewer assumes no")],
+    ["MIGRATION_SECTION_CONTRACT_RETAINED_PREPARATION_EXCEPTION_ACCEPTANCE",
+      source.replaceAll("RETAINED_PREPARATION_EXCEPTION_ACCEPTED", "PREPARATION_REVIEWED")],
     ["MIGRATION_SECTION_CONTRACT_FINAL_DEPLOYMENT_READINESS_AND_AUTHORITY",
       source.replace("Main Queue and DLQ are both reported empty", "Queue state reviewed")],
     ["MIGRATION_SECTION_CONTRACT_EXACT_ROLLBACK_AUTHORITY",
@@ -647,7 +717,8 @@ try {
 }
 
 process.stdout.write("Project 2 decision validation passed: the one-case and one-window baseline-migration records " +
-  "remain default NOT APPROVED with required REVIEW/FILL authority, preparation, final-deploy, rollback, " +
+  "remain default NOT APPROVED with required REVIEW/FILL authority, preparation, retained-exception acceptance, " +
+  "separate final-deploy, rollback, " +
   "standalone exact-legacy recovery, readiness, monitored closure, credential-revocation and signature fields; " +
   "no private material, safe relative links, production OAuth-only/no-personal-token boundary and " +
   "proposed-but-unapproved R2 storage.\n");

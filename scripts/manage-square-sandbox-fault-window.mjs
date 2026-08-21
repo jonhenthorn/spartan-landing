@@ -873,8 +873,19 @@ function parseJson(text, code) {
 }
 
 function versionIdFromOutput(text) {
-  const matches = [...String(text).matchAll(/[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}/ig)]
-    .map((match) => match[0].toLowerCase());
+  const labeled = [...String(text).matchAll(
+    /^[^\S\r\n]*Worker Version ID:[^\S\r\n]*(\S+)[^\S\r\n]*\r?$/gm,
+  )];
+  if (labeled.length !== 1 || !UUID.test(labeled[0][1])) {
+    fail("VERSION_ID_UNAVAILABLE", 3);
+  }
+  return labeled[0][1].toLowerCase();
+}
+
+function secretMutationVersionIdFromOutput(text) {
+  const matches = [...String(text).matchAll(
+    /[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}/ig,
+  )].map((match) => match[0].toLowerCase());
   const unique = [...new Set(matches)];
   if (unique.length !== 1) fail("VERSION_ID_UNAVAILABLE", 3);
   return unique[0];
@@ -1361,6 +1372,37 @@ async function confirmLegacyTrafficWithImmutableControl(run, accountId, sourceVe
   }
 }
 
+async function confirmPreparedCurrentAllOffTargetWithImmutableControl(
+  run, accountId, sourceVersion, targetVersion,
+) {
+  const temporary = createRollbackControlConfig();
+  try {
+    const configArgs = ["--config", temporary.path, "--name", WORKER];
+    const target = await remoteJson(run, accountId, [
+      "versions", "view", targetVersion, ...configArgs, "--json",
+    ], "VERSION_METADATA_UNAVAILABLE");
+    assertVersionMetadata(target, {
+      expectedId: targetVersion,
+      expectedVars: IMMUTABLE_ALL_OFF_VARS,
+      expectedSecrets: STANDING_SECRET_NAMES,
+    });
+    const source = await remoteJson(run, accountId, [
+      "versions", "view", sourceVersion, ...configArgs, "--json",
+    ], "VERSION_METADATA_UNAVAILABLE");
+    assertVersionMetadata(source, {
+      expectedId: sourceVersion,
+      expectedVars: LEGACY_ALL_OFF_VARS,
+      expectedSecrets: STANDING_SECRET_NAMES,
+    });
+    const traffic = await remoteJson(run, accountId, [
+      "deployments", "status", ...configArgs, "--json",
+    ], "TRAFFIC_STATUS_UNAVAILABLE");
+    assertTraffic(traffic, sourceVersion);
+  } finally {
+    temporary.cleanup();
+  }
+}
+
 async function rollbackLegacyMigrationWithImmutableControl(
   run, accountId, sourceVersion, targetVersion,
 ) {
@@ -1657,7 +1699,7 @@ async function prepareF04Chain(run, prompt, print) {
         "SECRET_STAGE_STATE_UNCERTAIN");
         const captured = `${secretResult.stdout}\n${secretResult.stderr}`;
         if (containsAny(captured, Object.values(secrets))) fail("SECRET_OUTPUT_DETECTED", 3);
-        const candidateId = versionIdFromOutput(captured);
+        const candidateId = secretMutationVersionIdFromOutput(captured);
         if ([inputs.baselineVersion, ...candidateIds].some((id) => id.toLowerCase() === candidateId)) {
           fail("VERSION_ID_UNAVAILABLE", 3);
         }
@@ -1848,7 +1890,7 @@ async function prepareCandidate(run, prompt, print, {
       ), { input: secretJson, env: cloudflareEnv(inputs.accountId) }, "SECRET_STAGE_STATE_UNCERTAIN");
       const captured = `${secretResult.stdout}\n${secretResult.stderr}`;
       if (containsAny(captured, Object.values(secrets))) fail("SECRET_OUTPUT_DETECTED", 3);
-      candidateVersionId = versionIdFromOutput(captured);
+      candidateVersionId = secretMutationVersionIdFromOutput(captured);
     }
     const candidateVersion = await getVersion(run, inputs.accountId, candidateVersionId);
     assertVersionMetadata(candidateVersion, {
@@ -2035,6 +2077,29 @@ async function prepareCurrentAllOffTarget(run, prompt, print) {
     ].includes(error.code)) {
       throw error;
     }
+    let exactPreparedTargetConfirmed = false;
+    const transientPostUploadRead = error instanceof OperatorError && [
+      "VERSION_METADATA_UNAVAILABLE", "TRAFFIC_STATUS_UNAVAILABLE",
+    ].includes(error.code);
+    if (transientPostUploadRead && UUID.test(targetVersion) &&
+        targetVersion.toLowerCase() !== inputs.sourceVersion.toLowerCase()) {
+      try {
+        await confirmPreparedCurrentAllOffTargetWithImmutableControl(
+          run, inputs.accountId, inputs.sourceVersion, targetVersion,
+        );
+        exactPreparedTargetConfirmed = true;
+      } catch (confirmationError) {
+        if (confirmationError instanceof OperatorError && [
+          "TEMP_CONFIG_DRIFT_REMOVED", "TEMP_CONFIG_CLEANUP_REJECTED",
+        ].includes(confirmationError.code)) {
+          throw confirmationError;
+        }
+      }
+    }
+    if (exactPreparedTargetConfirmed) {
+      print(`STATUS=PREPARED RESULT=SANDBOX_CURRENT_ALL_OFF_TARGET_READY TARGET_VERSION=${targetVersion}`);
+      return;
+    }
     let legacyTrafficConfirmed = false;
     try {
       await confirmLegacyTrafficWithImmutableControl(
@@ -2129,7 +2194,9 @@ async function cleanupCandidate(run, prompt, print) {
         "versions", "secret", "delete", name, "--config", CONFIG, "--name", WORKER,
         "--message", `SANDBOX ONLY - remove temporary ${name}`,
       ), { input: "", env: cloudflareEnv(inputs.accountId) }, "SECRET_CLEANUP_STATE_UNCERTAIN");
-      finalVersionId = versionIdFromOutput(`${deletion.stdout}\n${deletion.stderr}`);
+      finalVersionId = secretMutationVersionIdFromOutput(
+        `${deletion.stdout}\n${deletion.stderr}`,
+      );
     }
     metadata = await getVersion(run, inputs.accountId, finalVersionId);
     assertVersionMetadata(metadata, {

@@ -4,7 +4,7 @@ Last reviewed: August 21, 2026
 
 Decision status: **NOT APPROVED**
 
-This default-NO-GO record covers exactly one supervised UTC window for the one-time Project 2 sandbox migration from the exact audited legacy all-off source to one exact prepared current all-off target. Complete a private copy; keep this repository template blank. Every applicable `[REVIEW/FILL]` field, both decision stages, rollback preauthorization and all required signatures must be complete before the corresponding action. Any blank, conflict, expired window, changed prerequisite or ambiguity remains `NO-GO`.
+This default-NO-GO record covers exactly one supervised UTC window for the one-time Project 2 sandbox migration from the exact audited legacy all-off source to one exact prepared current all-off target. Complete a private copy; keep this repository template blank. Every applicable `[REVIEW/FILL]` field, both decision stages, any retained-preparation exception acceptance, rollback preauthorization and all required signatures must be complete before the corresponding action. Any blank, conflict, expired window, changed prerequisite or ambiguity remains `NO-GO`.
 
 The top decision status governs the final traffic assignment and must remain `NOT APPROVED` through inactive-target preparation and readiness. In the private copy, only the owner's final deployment `GO` inside the unchanged window may change it to `APPROVED FOR THIS WINDOW`; any changed gate returns it to `NOT APPROVED`.
 
@@ -59,6 +59,7 @@ Record references to the private evidence only; never copy the underlying accoun
 | Reviewed full commit and clean local source | `[REVIEW/FILL — reference only; no value]` |
 | Exact legacy source metadata and 100% traffic allocation | `[REVIEW/FILL — reference only; no value]` |
 | Prepared target metadata and unpublished state | `[REVIEW/FILL — reference only; no value]` |
+| Normal preparation result or retained-preparation exception package, as applicable | `[REVIEW/FILL — reference only; no value]` |
 | Read-only migration-readiness result | `[REVIEW/FILL — reference only; no value]` |
 | Queue, webhook/outbox, subscription and ingress readiness evidence | `[REVIEW/FILL — reference only; no value]` |
 | Temporary Queues Read issuance, custody and revocation evidence | `[REVIEW/FILL — reference only; no value]` |
@@ -81,6 +82,29 @@ Preparation may begin only after the business owner records a preparation-stage 
 
 Require only `STATUS=PREPARED RESULT=SANDBOX_CURRENT_ALL_OFF_TARGET_READY TARGET_VERSION=<uuid>` as technical preparation success. Preparation success is not migration readiness, is not final deployment authority and does not change this record's later final-deploy decision from `NO-GO`.
 
+If the action reports any other result after an upload may have occurred, stop and preserve its complete output. Do not retry preparation. A retained target may proceed only through the narrow acceptance section below; the rejected result never becomes technical preparation success.
+
+## Retained preparation exception acceptance
+
+Normal preparation success remains only `STATUS=PREPARED RESULT=SANDBOX_CURRENT_ALL_OFF_TARGET_READY TARGET_VERSION=<uuid>`. A retained preparation exception is available solely when one owner-approved preparation action uploaded one exact target during its recorded window but returned `STATUS=REJECTED RESULT=TARGET_PREPARE_REJECTED_LEGACY_TRAFFIC_CONFIRMED` during post-upload verification. The rejection must remain preserved verbatim and the action must not be retried.
+
+This exception does not rename the rejected operator result, grant readiness, authorize traffic or change the top decision status. The reviewed one-upload bounded-convergence behavior applies only inside the same preparation invocation after that invocation parses one distinct uploaded target UUID: one transient `VERSION_METADATA_UNAVAILABLE` or `TRAFFIC_STATUS_UNAVAILABLE` may trigger an exact immutable reread, and only an exact reread may return the normal `PREPARED` result. It is not a later retained-target reread mode; semantic drift never converges, and today's historical rejection must remain preserved. The retained target may enter final-deployment review only after every field below is completed in the private record and the owner explicitly records `RETAINED_PREPARATION_EXCEPTION_ACCEPTED`.
+
+| Retained-exception gate | Owner/reviewer record |
+| --- | --- |
+| Exact owner-approved preparation window and preparation-only scope | `[REVIEW/FILL]` |
+| Combined command/session and version evidence identifies the one in-window upload and no second in-window upload | `[REVIEW/FILL]` |
+| Complete `TARGET_PREPARE_REJECTED_LEGACY_TRAFFIC_CONFIRMED` output preserved verbatim | `[REVIEW/FILL]` |
+| No preparation retry and no second target upload occurred | `[REVIEW/FILL]` |
+| Independent exact inspection proves the one retained in-window target is current all-off, distinct and at 0% traffic | `[REVIEW/FILL]` |
+| Independent exact inspection proves the exact legacy source was the sole 100% traffic allocation at every required recorded checkpoint | `[REVIEW/FILL]` |
+| Independent reviewer confirms the preparation action and captured evidence show no action-caused traffic, secret, case, provider, Queue, D1, Apps or production mutation | `[REVIEW/FILL]` |
+| Separate read-only check returned `STATUS=READY RESULT=READY_SANDBOX_LEGACY_TO_CURRENT_ALL_OFF_MIGRATION` | `[REVIEW/FILL]` |
+| Owner exception decision: `RETAINED_PREPARATION_EXCEPTION_ACCEPTED` or `REJECTED`, with UTC time | `[REVIEW/FILL]` |
+| Owner confirms exception acceptance is not final deployment `GO` and grants no case authority | `[REVIEW/FILL]` |
+
+If the preparation-only window closes before final deployment, that window remains closed. A later final-deployment decision requires a new unexpired private window record that references the preserved preparation package, repeats the exact source/target inspection and obtains a fresh read-only readiness result. An earlier preparation `GO` or exception acceptance cannot be stretched into final authority.
+
 ## Final deployment readiness and authority
 
 After preparation, bind the exact target evidence privately and run the distinct read-only `--check-legacy-baseline-migration`. Require only `STATUS=READY RESULT=READY_SANDBOX_LEGACY_TO_CURRENT_ALL_OFF_MIGRATION`. Readiness is not deployment authority.
@@ -91,6 +115,7 @@ Immediately before the final decision and deployment, independently reconfirm ev
 | --- | --- |
 | Exact legacy source remains at 100% sandbox traffic | `[REVIEW/FILL]` |
 | Exact prepared target remains distinct, unpublished and exact current all-off | `[REVIEW/FILL]` |
+| Normal `PREPARED` result or every retained-preparation exception gate is accepted and privately referenced | `[REVIEW/FILL]` |
 | Read-only migration readiness result is current and privately referenced | `[REVIEW/FILL]` |
 | Main Queue and DLQ are both reported empty | `[REVIEW/FILL]` |
 | Zero nonterminal webhook/outbox work | `[REVIEW/FILL]` |
@@ -103,7 +128,7 @@ Immediately before the final decision and deployment, independently reconfirm ev
 | Owner final deployment decision: `GO` or `NO-GO`, with UTC time | `[REVIEW/FILL]` |
 | Migration operator, rollback operator and independent reviewer final signatures | `[REVIEW/FILL]` |
 
-A final `GO` authorizes only the exact `--execute --migrate-legacy-baseline-to-current-all-off` vector in the linked fault-window guide and only one 100% sandbox traffic assignment from the recorded exact source to the recorded exact target.
+A final `GO` authorizes only the exact `--execute --migrate-legacy-baseline-to-current-all-off` vector in the linked fault-window guide and only one 100% sandbox traffic assignment from the recorded exact source to the recorded exact target. `RETAINED_PREPARATION_EXCEPTION_ACCEPTED` is a prerequisite record label only and can never substitute for that final `GO`.
 
 ## Exact rollback authority
 
@@ -180,6 +205,7 @@ It also does not change the one-case activation record from `NOT APPROVED`. Afte
 | Business owner preparation decision: `GO` or `NO-GO` | `[REVIEW/FILL]` |
 | Preparation operator accepts exact inactive-target scope | `[REVIEW/FILL]` |
 | Independent reviewer confirms preparation prerequisites | `[REVIEW/FILL]` |
+| Retained preparation exception decision, if applicable | `[REVIEW/FILL]` |
 | Evidence custodian accepts preparation evidence | `[REVIEW/FILL]` |
 
 ### Final deployment signatures

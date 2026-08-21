@@ -308,7 +308,11 @@ function makeRunner({
       if (state.failUpload) {
         return { code: 1, stdout: "", stderr: "fixture ambiguous upload" };
       }
-      return { code: 0, stdout: `Worker Version ID: ${id}\n`, stderr: "" };
+      return {
+        code: 0,
+        stdout: `preview_database_id = "${driverTest.D1_ID}"\nWorker Version ID: ${id}\n`,
+        stderr: "",
+      };
     }
     if (cli[0] === "versions" && cli[1] === "secret" && cli[2] === "bulk") {
       const id = state.secretIds.shift();
@@ -358,6 +362,19 @@ function makeRunner({
     return { code: 99, stdout: "", stderr: "unexpected fixture command" };
   };
   return { run, state };
+}
+
+function interceptRunner(runner, intercept) {
+  return {
+    state: runner.state,
+    run: async (command, args, options = {}) => {
+      const result = await runner.run(command, args, options);
+      const replacement = await intercept({
+        command, args, options, result, state: runner.state,
+      });
+      return replacement ?? result;
+    },
+  };
 }
 
 async function invokeMain(args, prompt, runner, dependencies = {}) {
@@ -411,6 +428,25 @@ function legacyMigrationVersions({
   };
 }
 
+function isWranglerCall(args, ...prefix) {
+  return prefix.every((value, index) => args[index + 2] === value);
+}
+
+function assertSinglePreparationUpload(runner) {
+  assert.equal(
+    runner.state.calls.filter((call) => isWranglerCall(call.args, "versions", "upload")).length,
+    1,
+  );
+  assert.equal(
+    runner.state.calls.some((call) => isWranglerCall(call.args, "versions", "deploy")),
+    false,
+  );
+  assert.equal(
+    runner.state.calls.some((call) => isWranglerCall(call.args, "versions", "secret")),
+    false,
+  );
+}
+
 function f04ChainPrompt({ commit = true } = {}) {
   return [
     ACCOUNT, ...(commit ? [COMMIT] : []), BASELINE,
@@ -448,6 +484,26 @@ check("empty and plan modes are inert and process-free", async () => {
     "every migration authority, recovery and closure step must precede case preparation",
   );
   assert.equal(runner.state.calls.length, 0);
+});
+
+check("version upload output accepts exactly one labeled Worker version ID", () => {
+  assert.equal(driverTest.versionIdFromOutput([
+    `preview_database_id = "${driverTest.D1_ID}"`,
+    "unrelated provider output 99999999-9999-4999-8999-999999999999",
+    ` \tWorker Version ID: \t${UPLOAD.toUpperCase()} \r`,
+    "",
+  ].join("\n")), UPLOAD);
+
+  for (const output of [
+    `preview_database_id = "${driverTest.D1_ID}"\ncreated ${UPLOAD}\n`,
+    `Worker Version ID: not-a-uuid\n`,
+    `Worker Version ID: ${UPLOAD}\nWorker Version ID: ${CANDIDATE}\n`,
+  ]) {
+    assert.throws(
+      () => driverTest.versionIdFromOutput(output),
+      (error) => error?.message === "VERSION_ID_UNAVAILABLE" && error?.exitCode === 3,
+    );
+  }
 });
 
 check("execute mutations require the complete fixed acknowledgement vector", async () => {
@@ -688,6 +744,308 @@ check("legacy migration preparation uploads one current target without traffic o
   assert.equal(ambiguous.state.calls.some((call) => call.args.includes("deploy")), false);
   assert.equal(ambiguous.state.calls.some((call) => call.args.includes("secret")), false);
   assert.equal(ambiguous.state.trafficId, BASELINE);
+});
+
+check("legacy migration preparation converges after one transient target-view failure", async () => {
+  const base = makeRunner({
+    versions: legacyMigrationVersions({ includeTarget: false }),
+    uploadIds: [UPLOAD],
+  });
+  let targetViews = 0;
+  const runner = interceptRunner(base, ({ args }) => {
+    if (isWranglerCall(args, "versions", "view", UPLOAD)) {
+      targetViews += 1;
+      if (targetViews === 1) return { code: 1, stdout: "", stderr: "transient target view" };
+    }
+    return null;
+  });
+  const result = await invokeMain(
+    driverTest.PREPARE_CURRENT_ALL_OFF_TARGET_ARGS,
+    promptFrom(legacyMigrationPrompt({ target: false })), runner,
+  );
+  assert.equal(result.status, 0, result.output.join("\n"));
+  assert.deepEqual(result.output, [
+    `STATUS=PREPARED RESULT=SANDBOX_CURRENT_ALL_OFF_TARGET_READY TARGET_VERSION=${UPLOAD}`,
+  ]);
+  assert.equal(targetViews, 2, "one failed view followed by one exact catch-path reread");
+  assertSinglePreparationUpload(runner);
+  const reread = runner.state.calls.filter((call) =>
+    isWranglerCall(call.args, "versions", "view", UPLOAD))[1];
+  const rereadConfig = reread.args[reread.args.indexOf("--config") + 1];
+  assert.ok(rereadConfig.startsWith(`${tmpdir()}/spartan-square-rollback-control-`));
+  assert.equal(existsSync(rereadConfig), false);
+  assert.equal(runner.state.trafficId, BASELINE);
+});
+
+check("legacy migration preparation converges after one transient post-upload traffic read", async () => {
+  const base = makeRunner({
+    versions: legacyMigrationVersions({ includeTarget: false }),
+    uploadIds: [UPLOAD],
+  });
+  let trafficReads = 0;
+  const runner = interceptRunner(base, ({ args }) => {
+    if (isWranglerCall(args, "deployments", "status")) {
+      trafficReads += 1;
+      if (trafficReads === 2) return { code: 1, stdout: "", stderr: "transient traffic read" };
+    }
+    return null;
+  });
+  const result = await invokeMain(
+    driverTest.PREPARE_CURRENT_ALL_OFF_TARGET_ARGS,
+    promptFrom(legacyMigrationPrompt({ target: false })), runner,
+  );
+  assert.equal(result.status, 0, result.output.join("\n"));
+  assert.deepEqual(result.output, [
+    `STATUS=PREPARED RESULT=SANDBOX_CURRENT_ALL_OFF_TARGET_READY TARGET_VERSION=${UPLOAD}`,
+  ]);
+  assert.equal(trafficReads, 3, "source precheck, failed post-upload read and one exact reread");
+  assertSinglePreparationUpload(runner);
+  const reread = runner.state.calls.filter((call) =>
+    isWranglerCall(call.args, "deployments", "status"))[2];
+  const rereadConfig = reread.args[reread.args.indexOf("--config") + 1];
+  assert.ok(rereadConfig.startsWith(`${tmpdir()}/spartan-square-rollback-control-`));
+  assert.equal(existsSync(rereadConfig), false);
+  assert.equal(runner.state.trafficId, BASELINE);
+});
+
+check("legacy migration preparation never retries an upload with a lost, unlabeled, malformed, multiple or unknown target ID", async () => {
+  const responseLoss = makeRunner({
+    versions: legacyMigrationVersions({ includeTarget: false }),
+    uploadIds: [UPLOAD],
+    failUpload: true,
+  });
+  const unlabeledBase = makeRunner({
+    versions: legacyMigrationVersions({ includeTarget: false }),
+    uploadIds: [UPLOAD],
+  });
+  const unlabeled = interceptRunner(unlabeledBase, ({ args }) =>
+    isWranglerCall(args, "versions", "upload")
+      ? {
+        code: 0,
+        stdout: `preview_database_id = "${driverTest.D1_ID}"\ncreated version ${UPLOAD}\n`,
+        stderr: "",
+      }
+      : null);
+  const malformedBase = makeRunner({
+    versions: legacyMigrationVersions({ includeTarget: false }),
+    uploadIds: [UPLOAD],
+  });
+  const malformed = interceptRunner(malformedBase, ({ args }) =>
+    isWranglerCall(args, "versions", "upload")
+      ? { code: 0, stdout: "Worker Version ID: not-a-uuid\n", stderr: "" }
+      : null);
+  const multipleBase = makeRunner({
+    versions: legacyMigrationVersions({ includeTarget: false }),
+    uploadIds: [UPLOAD],
+  });
+  const multiple = interceptRunner(multipleBase, ({ args }) =>
+    isWranglerCall(args, "versions", "upload")
+      ? {
+        code: 0,
+        stdout: `Worker Version ID: ${UPLOAD}\nWorker Version ID: ${CANDIDATE}\n`,
+        stderr: "",
+      }
+      : null);
+  const unknownBase = makeRunner({
+    versions: legacyMigrationVersions({ includeTarget: false }),
+    uploadIds: [UPLOAD],
+  });
+  const unknown = interceptRunner(unknownBase, ({ args, state }) => {
+    if (isWranglerCall(args, "versions", "upload")) state.versions.delete(UPLOAD);
+    return null;
+  });
+
+  for (const [name, runner, expectedTargetViews] of [
+    ["response loss", responseLoss, 0],
+    ["unlabeled target", unlabeled, 0],
+    ["malformed target", malformed, 0],
+    ["multiple labeled targets", multiple, 0],
+    ["unknown parsed target", unknown, 2],
+  ]) {
+    const result = await invokeMain(
+      driverTest.PREPARE_CURRENT_ALL_OFF_TARGET_ARGS,
+      promptFrom(legacyMigrationPrompt({ target: false })), runner,
+    );
+    assert.equal(result.status, 2, `${name}: ${result.output.join("\n")}`);
+    assert.deepEqual(result.output, [
+      "STATUS=REJECTED RESULT=TARGET_PREPARE_REJECTED_LEGACY_TRAFFIC_CONFIRMED",
+    ], name);
+    assertSinglePreparationUpload(runner);
+    assert.equal(runner.state.calls.filter((call) =>
+      isWranglerCall(call.args, "versions", "view", UPLOAD)).length, expectedTargetViews, name);
+    assert.equal(runner.state.trafficId, BASELINE, name);
+  }
+});
+
+check("legacy migration preparation reread rejects metadata drift and non-sole or unavailable traffic", async () => {
+  const exactBase = () => makeRunner({
+    versions: legacyMigrationVersions({ includeTarget: false }),
+    uploadIds: [UPLOAD],
+  });
+
+  const targetVarsBase = exactBase();
+  const targetVarsDrift = interceptRunner(targetVarsBase, ({ args, state }) => {
+    if (isWranglerCall(args, "versions", "upload")) {
+      state.versions.set(UPLOAD, fixtureVersion(UPLOAD, {
+        ...BASE_VARS,
+        SQUARE_OFFER_ENABLED: "true",
+      }));
+    }
+    return null;
+  });
+
+  const targetSecretDrift = makeRunner({
+    versions: legacyMigrationVersions({ includeTarget: false }),
+    uploadIds: [UPLOAD],
+    nextUploadSecrets: driverTest.STANDING_SECRET_NAMES.slice(0, -1),
+  });
+
+  const sourceDriftBase = exactBase();
+  let sourceDriftTargetViews = 0;
+  const sourceDrift = interceptRunner(sourceDriftBase, ({ args, state }) => {
+    if (isWranglerCall(args, "versions", "upload")) {
+      state.versions.set(BASELINE, fixtureVersion(BASELINE, {
+        ...LEGACY_BASE_VARS,
+        SQUARE_WEBHOOK_ENABLED: "true",
+      }));
+    }
+    if (isWranglerCall(args, "versions", "view", UPLOAD) &&
+        sourceDriftTargetViews++ === 0) {
+      return { code: 1, stdout: "", stderr: "transient target view" };
+    }
+    return null;
+  });
+
+  const splitBase = exactBase();
+  const splitTraffic = interceptRunner(splitBase, ({ args, state }) => {
+    if (isWranglerCall(args, "versions", "upload")) {
+      state.trafficVersions = [
+        { version_id: BASELINE, percentage: 50 },
+        { version_id: UPLOAD, percentage: 50 },
+      ];
+    }
+    return null;
+  });
+
+  const thirdBase = exactBase();
+  const thirdTraffic = interceptRunner(thirdBase, ({ args, state }) => {
+    if (isWranglerCall(args, "versions", "upload")) {
+      state.trafficId = CANDIDATE;
+      state.trafficVersions = null;
+    }
+    return null;
+  });
+
+  const unavailableBase = exactBase();
+  let unavailableTrafficReads = 0;
+  const unavailableTraffic = interceptRunner(unavailableBase, ({ args }) => {
+    if (isWranglerCall(args, "deployments", "status") &&
+        ++unavailableTrafficReads > 1) {
+      return { code: 1, stdout: "", stderr: "traffic evidence unavailable" };
+    }
+    return null;
+  });
+
+  for (const [name, runner, expectedResult, expectedTargetViews] of [
+    ["target variable drift", targetVarsDrift,
+      "TARGET_PREPARE_REJECTED_LEGACY_TRAFFIC_CONFIRMED", 1],
+    ["target secret drift", targetSecretDrift,
+      "TARGET_PREPARE_REJECTED_LEGACY_TRAFFIC_CONFIRMED", 1],
+    ["source metadata drift", sourceDrift, "LEGACY_TRAFFIC_UNCONFIRMED", 2],
+    ["split traffic", splitTraffic, "LEGACY_TRAFFIC_UNCONFIRMED", 1],
+    ["third-version traffic", thirdTraffic, "LEGACY_TRAFFIC_UNCONFIRMED", 1],
+    ["unavailable traffic evidence", unavailableTraffic, "LEGACY_TRAFFIC_UNCONFIRMED", 2],
+  ]) {
+    const result = await invokeMain(
+      driverTest.PREPARE_CURRENT_ALL_OFF_TARGET_ARGS,
+      promptFrom(legacyMigrationPrompt({ target: false })), runner,
+    );
+    assert.equal(result.status, expectedResult === "LEGACY_TRAFFIC_UNCONFIRMED" ? 3 : 2,
+      `${name}: ${result.output.join("\n")}`);
+    assert.deepEqual(result.output, [`STATUS=REJECTED RESULT=${expectedResult}`], name);
+    assertSinglePreparationUpload(runner);
+    assert.equal(runner.state.calls.filter((call) =>
+      isWranglerCall(call.args, "versions", "view", UPLOAD)).length,
+    expectedTargetViews, `${name}: only read-unavailability permits a catch-path target reread`);
+  }
+});
+
+check("legacy migration preparation never masks observed semantic drift with a later exact read", async () => {
+  const metadataBase = makeRunner({
+    versions: legacyMigrationVersions({ includeTarget: false }),
+    uploadIds: [UPLOAD],
+  });
+  let metadataTargetViews = 0;
+  const metadataRace = interceptRunner(metadataBase, ({ args }) => {
+    if (isWranglerCall(args, "versions", "view", UPLOAD) &&
+        metadataTargetViews++ === 0) {
+      return {
+        code: 0,
+        stdout: JSON.stringify(fixtureVersion(UPLOAD, {
+          ...BASE_VARS,
+          SQUARE_OFFER_ENABLED: "true",
+        })),
+        stderr: "",
+      };
+    }
+    return null;
+  });
+  const metadataResult = await invokeMain(
+    driverTest.PREPARE_CURRENT_ALL_OFF_TARGET_ARGS,
+    promptFrom(legacyMigrationPrompt({ target: false })), metadataRace,
+  );
+  assert.equal(metadataResult.status, 2, metadataResult.output.join("\n"));
+  assert.deepEqual(metadataResult.output, [
+    "STATUS=REJECTED RESULT=TARGET_PREPARE_REJECTED_LEGACY_TRAFFIC_CONFIRMED",
+  ]);
+  assert.equal(metadataTargetViews, 1,
+    "semantic target drift must not trigger an exact-target reread");
+  assert.doesNotThrow(() => driverTest.assertVersionMetadata(
+    metadataRace.state.versions.get(UPLOAD), {
+      expectedId: UPLOAD,
+      expectedVars: BASE_VARS,
+      expectedSecrets: driverTest.STANDING_SECRET_NAMES,
+    },
+  ));
+  assertSinglePreparationUpload(metadataRace);
+
+  for (const [name, observedVersions] of [
+    ["split traffic", [
+      { version_id: BASELINE, percentage: 50 },
+      { version_id: UPLOAD, percentage: 50 },
+    ]],
+    ["third-version traffic", [{ version_id: CANDIDATE, percentage: 100 }]],
+  ]) {
+    const base = makeRunner({
+      versions: legacyMigrationVersions({ includeTarget: false }),
+      uploadIds: [UPLOAD],
+    });
+    let trafficReads = 0;
+    const runner = interceptRunner(base, ({ args }) => {
+      if (isWranglerCall(args, "deployments", "status") && ++trafficReads === 2) {
+        return {
+          code: 0,
+          stdout: JSON.stringify({ versions: observedVersions }),
+          stderr: "",
+        };
+      }
+      return null;
+    });
+    const result = await invokeMain(
+      driverTest.PREPARE_CURRENT_ALL_OFF_TARGET_ARGS,
+      promptFrom(legacyMigrationPrompt({ target: false })), runner,
+    );
+    assert.equal(result.status, 2, `${name}: ${result.output.join("\n")}`);
+    assert.deepEqual(result.output, [
+      "STATUS=REJECTED RESULT=TARGET_PREPARE_REJECTED_LEGACY_TRAFFIC_CONFIRMED",
+    ], name);
+    assert.equal(trafficReads, 3,
+      `${name}: later exact source read may classify rejection but never convergence`);
+    assert.equal(runner.state.calls.filter((call) =>
+      isWranglerCall(call.args, "versions", "view", UPLOAD)).length, 1,
+    `${name}: semantic traffic drift must not trigger an exact-target reread`);
+    assertSinglePreparationUpload(runner);
+  }
 });
 
 check("legacy migration readiness is read-only and rejects a missing or same target", async () => {
