@@ -5494,7 +5494,7 @@ check("O-01 active exact leases defer and every expired related lease sticky-sto
 check("O-01 clocks, object bounds, and broker-attempt boundaries are exact and bounded", async () => {
   for (const [name, mutate] of [
     ["ancient seed", (row) => { row.created_at = o01TestTime(-1_800_001); }],
-    ["future seed", (row) => { row.updated_at = o01TestTime(6_000); }],
+    ["future seed", (row) => { row.updated_at = new Date(Date.now() + 60_000).toISOString(); }],
     ["noncanonical seed", (row) => { row.updated_at = "2026-08-20T06:00:00Z"; }],
     ["missing seed time", (row) => { delete row.created_at; }],
   ]) {
@@ -5511,7 +5511,7 @@ check("O-01 clocks, object bounds, and broker-attempt boundaries are exact and b
   }
 
   for (const [name, timestamp] of [
-    ["future stage", o01TestTime(6_000)],
+    ["future stage", new Date(Date.now() + 60_000).toISOString()],
     ["noncanonical stage", "2026-08-20T06:00:00Z"],
     ["missing stage", undefined],
   ]) {

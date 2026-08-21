@@ -30,10 +30,10 @@ const EXPECTED_PACKAGES = Object.freeze({
 });
 const EXPECTED_NPM_VERSION = "10.9.2";
 const CI_WORKFLOW_PATH = ".github/workflows/validate.yml";
-const EXPECTED_CI_WORKFLOW_SHA256 = "df0fe797abb9da9803495e4b2ce92953682be481bbc0cd9d55968b1751fe0094";
+const EXPECTED_CI_WORKFLOW_SHA256 = "578348303568621b0e55ff78c3a94c052872149548b00661043102ecf1762cf9";
 const EXPECTED_CI_ACTIONS = Object.freeze([
-  "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
-  "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+  "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
+  "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
 ]);
 
 function fail(code) {
