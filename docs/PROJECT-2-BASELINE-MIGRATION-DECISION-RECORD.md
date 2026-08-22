@@ -4,6 +4,12 @@ Last reviewed: August 21, 2026
 
 Decision status: **NOT APPROVED**
 
+Template lifecycle: **CLOSED — DO NOT REUSE**
+
+The separately completed one-time baseline migration is retained in its private signed record and summarized only with non-private fixed/count/time evidence in the linked owner guide and worksheet. This blank repository template remains fail-closed and cannot be reopened, copied or reused to authorize another migration. The `NOT APPROVED` status above is the safety state of this retained blank template; it does not rewrite the completed private closure. Any future baseline change requires a new, separately named owner-approved record with a new scope, window, evidence references and signatures.
+
+The imperative language below is retained only as the historical control template used for the closed window. It describes what was required then and is not an instruction to prepare, deploy, recover or repeat a migration now.
+
 This default-NO-GO record covers exactly one supervised UTC window for the one-time Project 2 sandbox migration from the exact audited legacy all-off source to one exact prepared current all-off target. Complete a private copy; keep this repository template blank. Every applicable `[REVIEW/FILL]` field, both decision stages, any retained-preparation exception acceptance, rollback preauthorization and all required signatures must be complete before the corresponding action. Any blank, conflict, expired window, changed prerequisite or ambiguity remains `NO-GO`.
 
 The top decision status governs the final traffic assignment and must remain `NOT APPROVED` through inactive-target preparation and readiness. In the private copy, only the owner's final deployment `GO` inside the unchanged window may change it to `APPROVED FOR THIS WINDOW`; any changed gate returns it to `NOT APPROVED`.

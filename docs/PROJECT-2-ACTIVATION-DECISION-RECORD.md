@@ -61,10 +61,11 @@ Record each decision separately. `NOT APPLICABLE` requires a reason in the priva
 | Route sandbox traffic only to the exact reviewed candidate stage | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
 | Send or replay only the selected case request | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
 | If F-02: run the default-off exact-one-request coordinator and sandbox-only canary gate | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
+| If F-02: run the coordinator's aggregate read-only Queue and D1 evidence checks | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
 
 Temporary provider authorization must follow the linked least-scope boundary, remain separate from the standing connector and be fully revoked after any result.
 
-If the selected case is F-02, the coordinator must privately bind the approved candidate, synthetic submission ID and coupon to this one window. It may send only consent `no`, must require the candidate's remotely verified canary before transport and must accept only one exact HTTP `400` / `CONSENT_REQUIRED` response. A missing completion handshake, second callback, unexpected response or sent-but-unconfirmed request is not retry authority: it requires immediate rollback. Shared evidence may retain only fixed result/checkpoint names, HTTP `400`, request count `1`, bounded time and aggregate zero-delta/Queue evidence. It must not retain the canary, coupon, URL, request/response body, header, cookie, credential or version ID. This sandbox-only preflight does not change the common production request order, and F-02 does not authorize Square, Apps, Queue or D1 activity.
+If the selected case is F-02, the coordinator must privately bind the approved candidate, synthetic submission ID and coupon to this one window. It may send only consent `no`, must require the candidate's remotely verified canary before transport and must accept only one exact HTTP `400` / `CONSENT_REQUIRED` response. A missing completion handshake, second callback, unexpected response or sent-but-unconfirmed request is not retry authority: it requires immediate rollback. The F-02 request path performs no Turnstile, provider, Apps or Square call and no Queue or D1 mutation. The coordinator separately performs only the aggregate read-only Queue and D1 evidence checks approved in this record; those checks are evidence collection, not request-path business activity, and they do not authorize message inspection or a write. Shared evidence may retain only fixed result/checkpoint names, HTTP `400`, request count `1`, bounded time and aggregate zero-delta/Queue evidence. It must not retain the canary, coupon, URL, request/response body, header, cookie, credential or version ID. This sandbox-only preflight does not change the common production request order.
 
 ## Queue credentials
 
@@ -78,6 +79,23 @@ Queue access is separate from provider and deployment authority. Do not record c
 
 Whole-Queue purge, arbitrary replay, message editing and D1 editing are never authorized by this record.
 
+For F-02, complete every field below with a non-identifying private reference only. Do not copy the credential value, account value, Queue ID or operational URL into this record or shared evidence.
+
+| Temporary Queues Read custody field | Private owner record reference |
+| --- | --- |
+| Exact sandbox account restriction | `[REVIEW/FILL — reference only; no value]` |
+| Exact `Queues Read` scope and explicit absence of `Queues Write` | `[REVIEW/FILL — reference only; no value]` |
+| Credential issuance UTC time | `[REVIEW/FILL — reference only; no value]` |
+| Credential expiry UTC time and TTL | `[REVIEW/FILL — reference only; no value]` |
+| Named credential custodian | `[REVIEW/FILL — reference only; no value]` |
+| Named revocation owner | `[REVIEW/FILL — reference only; no value]` |
+| Credential revocation UTC time | `[REVIEW/FILL — reference only; no value]` |
+| Post-revocation token verification rejected with fixed HTTP `401` evidence | `[REVIEW/FILL — reference only; no value]` |
+| Post-revocation main Queue and DLQ metrics reads both rejected with fixed HTTP `401` evidence | `[REVIEW/FILL — reference only; no value]` |
+| Working-session credential material cleared without retaining the value | `[REVIEW/FILL — reference only; no value]` |
+
+The three post-revocation unusability checks are evidence of the retired temporary credential only. They must not include its value, account or Queue identifiers, response bodies or raw authorization headers.
+
 ## Alert delivery
 
 External alert delivery, recipient changes and test messages are excluded and require a separate operations decision.
@@ -90,6 +108,11 @@ Backup storage, recurring exports, restore testing, retention changes and deleti
 
 - Final owner acknowledgement that backup and deletion-manifest lanes remain unchanged: `[REVIEW/FILL]`
 - Evidence-retention period for this sandbox case: `[REVIEW/FILL]`
+- Retention decision owner: `[REVIEW/FILL]`
+- Disposal-review owner and authority reference; no deletion is authorized here: `[REVIEW/FILL]`
+- Scheduled retention/disposal review UTC time or trigger: `[REVIEW/FILL]`
+
+The permitted evidence remains preserved until the named retention decision owner and disposal-review owner complete the later review. Disposal cannot rewrite a stop or inconclusive result, remove evidence needed for unresolved review or substitute for the separately excluded deletion-manifest authority.
 
 ## Rollback authority
 
@@ -112,6 +135,23 @@ A `GO` preauthorizes the rollback operator to stop traffic, restore the reviewed
 
 ## Evidence and signoff
 
+Raw coordinator, operator and Wrangler transcripts are private evidence. Candidate preparation, deployment and rollback output may contain a version UUID or other operational metadata and must also remain private. Do not copy raw terminal output, raw Wrangler JSON or candidate/rollback identifiers into the shared record. The shared record is a sanitized extract containing only approved fixed checkpoint/result names, HTTP and request counts, bounded UTC times and aggregate read-only Queue/D1 zero-delta evidence, linked to private material by non-identifying reference labels.
+
+### F-02 bounded shared-evidence chronology
+
+Complete this table only for F-02. Each row records a fixed code or fixed category plus its UTC time; it never records a canary, coupon, URL, version, credential, request/response body, header, cookie or private locator.
+
+| Fixed shared checkpoint or closure category | Fixed/count/time-only shared record |
+| --- | --- |
+| Coordinator start | `[REVIEW/FILL]` |
+| `READY_OFFER_ISOLATION_DEPLOY_QUEUES_REPORTED_EMPTY` | `[REVIEW/FILL]` |
+| Fixed candidate-traffic activation result, without candidate UUID | `[REVIEW/FILL]` |
+| `READY_F02_ONE_REQUEST_CANDIDATE_ACTIVE` | `[REVIEW/FILL]` |
+| `OBSERVED_F02_REQUEST_COMPLETION_HANDSHAKE`, HTTP `400`, requests `1` | `[REVIEW/FILL]` |
+| Terminal fixed pass, stop or inconclusive result | `[REVIEW/FILL]` |
+| Exact rollback and all-off verification | `[REVIEW/FILL]` |
+| Cleanup, credential revocation and three-check unusability proof | `[REVIEW/FILL]` |
+
 ### Custody and closure record
 
 | Evidence or temporary material | Custodian/owner | Required closure |
@@ -122,6 +162,7 @@ A `GO` preauthorizes the rollback operator to stop traffic, restore the reviewed
 | Queue credentials | `[REVIEW/FILL]` | Revocation confirmed: `[REVIEW/FILL]` |
 | Temporary Apps and fault-window material | `[REVIEW/FILL]` | Disabled/removed as required: `[REVIEW/FILL]` |
 | F-02 fixed completion handshake and aggregate zero-delta record, if applicable | `[REVIEW/FILL]` | Exact-one request and bounded shared evidence confirmed: `[REVIEW/FILL]` |
+| Raw coordinator/operator/Wrangler transcripts and candidate/rollback outputs | `[REVIEW/FILL]` | Private custody and sanitized shared extract confirmed: `[REVIEW/FILL]` |
 | Shared evidence record | `[REVIEW/FILL]` | Contains only allowed fixed codes, counts and times: `[REVIEW/FILL]` |
 
 ### Final pre-run signatures
@@ -140,6 +181,7 @@ A `GO` preauthorizes the rollback operator to stop traffic, restore the reviewed
 | --- | --- |
 | Case result: pass, stop or inconclusive; UTC end time | `[REVIEW/FILL]` |
 | If F-02: one request, completion handshake and no-retry-on-ambiguity closure | `[REVIEW/FILL]` |
+| If F-02: fixed/count/time-only causal checkpoint chronology complete | `[REVIEW/FILL]` |
 | Exact rollback and all-off verification complete | `[REVIEW/FILL]` |
 | Temporary cleanup and credential revocation complete | `[REVIEW/FILL]` |
 | Evidence transferred to the named custodian | `[REVIEW/FILL]` |

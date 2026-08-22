@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { writeSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 import {
@@ -110,11 +111,13 @@ export async function sendF02DeclinedConsent({
   couponCode,
   fetchImpl = globalThis.fetch,
   timeoutMs = REQUEST_TIMEOUT_MS,
+  onRequestAttempted,
 } = {}) {
   if (!CANARY.test(String(candidateCanary || "")) ||
       !CANARY.test(String(submissionId || "")) || candidateCanary !== submissionId ||
       !COUPON.test(String(couponCode || "")) || typeof fetchImpl !== "function" ||
-      !Number.isInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > REQUEST_TIMEOUT_MS) {
+      !Number.isInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > REQUEST_TIMEOUT_MS ||
+      (onRequestAttempted !== undefined && typeof onRequestAttempted !== "function")) {
     return Object.freeze({
       result_code: "INPUT_REJECTED", http_status: 0, request_count: 0,
       canary_before_consent: "UNCONFIRMED",
@@ -126,6 +129,7 @@ export async function sendF02DeclinedConsent({
   try {
     const signal = AbortSignal.timeout(timeoutMs);
     requestAttempted = true;
+    if (onRequestAttempted) onRequestAttempted();
     response = await fetchImpl(OFFER_URL, {
       method: "POST",
       headers: {
@@ -178,11 +182,13 @@ export async function executeF02Window({
   watchImpl = watchOfferIsolation,
   fetchImpl = globalThis.fetch,
   onCheckpoint,
+  onRequestAttempted,
 } = {}) {
   if (!UUID.test(String(candidateVersionId || "")) || !CANARY.test(String(submissionId || "")) ||
       !COUPON.test(String(couponCode || "")) || confirmation !== CONFIRMATION ||
       typeof captureImpl !== "function" || typeof watchImpl !== "function" ||
-      typeof fetchImpl !== "function" || (onCheckpoint !== undefined && typeof onCheckpoint !== "function")) {
+      typeof fetchImpl !== "function" || (onCheckpoint !== undefined && typeof onCheckpoint !== "function") ||
+      (onRequestAttempted !== undefined && typeof onRequestAttempted !== "function")) {
     return fixedResult("STOPPED", "INPUT_REJECTED");
   }
 
@@ -201,7 +207,7 @@ export async function executeF02Window({
           });
         }
         requestEvidence = await sendF02DeclinedConsent({
-          candidateCanary, submissionId, couponCode, fetchImpl,
+          candidateCanary, submissionId, couponCode, fetchImpl, onRequestAttempted,
         });
         return requestEvidence;
       },
@@ -326,6 +332,8 @@ export async function runF02DriverMain(argv = process.argv.slice(2), dependencie
     ...(dependencies.captureImpl !== undefined ? { captureImpl: dependencies.captureImpl } : {}),
     ...(dependencies.watchImpl !== undefined ? { watchImpl: dependencies.watchImpl } : {}),
     ...(dependencies.fetchImpl !== undefined ? { fetchImpl: dependencies.fetchImpl } : {}),
+    ...(dependencies.onRequestAttempted !== undefined
+      ? { onRequestAttempted: dependencies.onRequestAttempted } : {}),
     onCheckpoint: dependencies.onCheckpoint === undefined
       ? ((checkpoint) => print(JSON.stringify(checkpoint))) : dependencies.onCheckpoint,
   });
@@ -333,24 +341,97 @@ export async function runF02DriverMain(argv = process.argv.slice(2), dependencie
   return result.status === "COMPLETE" ? 0 : 1;
 }
 
+function createF02ProcessState() {
+  let requestCount = 0;
+  let terminalClaimed = false;
+  return Object.freeze({
+    markRequestAttempted() {
+      requestCount = 1;
+    },
+    requestCount() {
+      return requestCount;
+    },
+    claimTerminal() {
+      if (terminalClaimed) return false;
+      terminalClaimed = true;
+      return true;
+    },
+  });
+}
+
+function emitF02ProcessTerminal(state, line, writeLineSync) {
+  if (!state.claimTerminal()) return false;
+  try { writeLineSync(line); } catch {}
+  return true;
+}
+
+function interruptF02Process(state, signalCode, dependencies = {}) {
+  const restoreTerminalImpl = dependencies.restoreTerminalImpl || restoreTerminal;
+  const writeLineSync = dependencies.writeLineSync || ((line) => {
+    writeSync(process.stdout.fd, `${line}\n`);
+  });
+  const exitImpl = dependencies.exitImpl || ((code) => process.exit(code));
+  try { restoreTerminalImpl(); } catch {}
+  emitF02ProcessTerminal(
+    state,
+    formatF02DriverResult(
+      fixedResult("STOPPED", "STOP_F02_DRIVER_INTERRUPTED", 0, state.requestCount()),
+    ),
+    writeLineSync,
+  );
+  exitImpl(128 + signalCode);
+}
+
+function installF02SignalHandlers(state, processImpl = process) {
+  const restoreOnExit = () => restoreTerminal();
+  const onSigint = () => interruptF02Process(state, 2);
+  const onSigterm = () => interruptF02Process(state, 15);
+  processImpl.once("exit", restoreOnExit);
+  processImpl.once("SIGINT", onSigint);
+  processImpl.once("SIGTERM", onSigterm);
+  return () => {
+    processImpl.off("SIGINT", onSigint);
+    processImpl.off("SIGTERM", onSigterm);
+  };
+}
+
 export const __test = Object.freeze({
   CONFIRMATION,
   EXECUTE_ARGS,
   OFFER_URL,
   SANDBOX_ORIGIN,
+  createF02ProcessState,
+  installF02SignalHandlers,
+  interruptF02Process,
 });
 
 const invokedPath = process.argv[1] ? pathToFileURL(process.argv[1]).href : "";
 if (invokedPath === import.meta.url) {
-  const exitForSignal = (signalCode) => {
-    restoreTerminal();
-    process.exit(128 + signalCode);
+  const processState = createF02ProcessState();
+  const writeLineSync = (line) => {
+    try { writeSync(process.stdout.fd, `${line}\n`); } catch {}
   };
-  process.once("exit", restoreTerminal);
-  process.once("SIGINT", () => exitForSignal(2));
-  process.once("SIGTERM", () => exitForSignal(15));
-  runF02DriverMain().then((code) => { process.exitCode = code; }).catch(() => {
-    process.stdout.write(`${formatF02DriverResult(fixedResult("STOPPED", "STOP_F02_DRIVER_FAILED"))}\n`);
+  const printProcessLine = (line) => {
+    if (String(line).startsWith("STATUS=")) {
+      emitF02ProcessTerminal(processState, line, writeLineSync);
+      return;
+    }
+    process.stdout.write(`${line}\n`);
+  };
+  const removeSignalHandlers = installF02SignalHandlers(processState);
+  runF02DriverMain(process.argv.slice(2), {
+    onRequestAttempted: () => processState.markRequestAttempted(),
+    print: printProcessLine,
+  }).then((code) => {
+    process.exitCode = code;
+  }).catch(() => {
+    emitF02ProcessTerminal(
+      processState,
+      formatF02DriverResult(
+        fixedResult("STOPPED", "STOP_F02_DRIVER_FAILED", 0, processState.requestCount()),
+      ),
+      writeLineSync,
+    );
     process.exitCode = 1;
-  });
+  }).finally(removeSignalHandlers);
 }

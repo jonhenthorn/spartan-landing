@@ -8,6 +8,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const RECORD_PATH = "docs/PROJECT-2-ACTIVATION-DECISION-RECORD.md";
 const MIGRATION_RECORD_PATH = "docs/PROJECT-2-BASELINE-MIGRATION-DECISION-RECORD.md";
 const ROLLOUT_PATH = "docs/SQUARE-CONNECTOR-ROLLOUT.md";
+const FAULT_HOOKS_PATH = "docs/SQUARE-SANDBOX-FAULT-HOOKS.md";
+const ACCEPTANCE_PATH = "docs/SQUARE-SANDBOX-NEGATIVE-RECOVERY-ACCEPTANCE.md";
+const OWNER_GUIDE_PATH = "docs/PROJECT-2-OWNER-GUIDE.md";
 const STATUS_LINE = "Decision status: **NOT APPROVED**";
 const PLACEHOLDER_PATTERN = /\[REVIEW\/FILL(?:[^\]]*)\]/;
 const REQUIRED_SECTIONS = Object.freeze([
@@ -41,11 +44,26 @@ const REQUIRED_SECTION_TERMS = Object.freeze({
     /exact-one-request coordinator/i, /sandbox-only canary gate/i,
     /common production request order/i, /sent-but-unconfirmed request/i,
     /requires immediate rollback/i, /fixed result\/checkpoint names/i,
+    /aggregate read-only Queue and D1 evidence checks/i,
+    /F-02 request path performs no Turnstile, provider, Apps or Square call/i,
+    /no Queue or D1 mutation/i, /evidence collection, not request-path business activity/i,
   ],
-  "Queue credentials": [/Queues Read/, /Queues Write/, /DLQ inspect\/redrive/, /Revocation owner/i],
+  "Queue credentials": [
+    /Queues Read/, /Queues Write/, /DLQ inspect\/redrive/, /Revocation owner/i,
+    /Exact sandbox account restriction/, /Exact `Queues Read` scope/, /explicit absence of `Queues Write`/,
+    /Credential issuance UTC time/, /Credential expiry UTC time and TTL/,
+    /Named credential custodian/, /Credential revocation UTC time/,
+    /token verification rejected with fixed HTTP `401` evidence/,
+    /main Queue and DLQ metrics reads both rejected with fixed HTTP `401` evidence/,
+    /Working-session credential material cleared/, /three post-revocation unusability checks/,
+    /complete every field below with a non-identifying private reference only/i,
+  ],
   "Alert delivery": [/excluded/i, /separate operations decision/i, /remains unchanged/i],
   "Backup and deletion-manifest custody": [
     /excluded/i, /deletion-manifest/i, /evidence-retention period/i, /remain unchanged/i,
+    /Retention decision owner/, /Disposal-review owner and authority reference/,
+    /Scheduled retention\/disposal review UTC time or trigger/,
+    /cannot rewrite a stop or inconclusive result/,
   ],
   "Rollback authority": [
     /Immediate rollback/i, /preauthorize/i, /Rollback operator/i, /preserves evidence/i,
@@ -53,6 +71,12 @@ const REQUIRED_SECTION_TERMS = Object.freeze({
   "Evidence and signoff": [
     /Custody and closure record/, /revocation/i, /Final pre-run signatures/, /Final post-run signatures/,
     /fixed completion handshake/i, /one request, completion handshake and no-retry-on-ambiguity closure/i,
+    /Raw coordinator, operator and Wrangler transcripts are private evidence/,
+    /Candidate preparation, deployment and rollback output/, /sanitized extract/,
+    /bounded UTC times/, /non-identifying reference labels/,
+    /READY_OFFER_ISOLATION_DEPLOY_QUEUES_REPORTED_EMPTY/,
+    /READY_F02_ONE_REQUEST_CANDIDATE_ACTIVE/, /OBSERVED_F02_REQUEST_COMPLETION_HANDSHAKE/,
+    /fixed\/count\/time-only causal checkpoint chronology complete/,
   ],
 });
 const MIGRATION_REQUIRED_SECTIONS = Object.freeze([
@@ -189,6 +213,30 @@ const REQUIRED_ROLLOUT_CONTRACTS = Object.freeze([
   /R2 enablement, bucket\/account custody, lifecycle application and recurring export authority are \*\*not approved\*\* and remain unimplemented\./,
   /The current one-case sandbox decision record requires these lanes to remain unchanged; a separate operations owner decision must approve them before implementation\./,
 ]);
+const REQUIRED_F02_GOVERNANCE_CONTRACTS = Object.freeze({
+  faultHooks: Object.freeze([
+    /previously reviewed default-off controller build is deployed only as the current all-off sandbox baseline/,
+    /newer F-02 hardening in this draft is not deployed/,
+    /no F-02 or other live-case candidate, profile, canary or temporary control is active, armed or approved/i,
+    /complete coordinator\/operator shell transcript private/,
+    /shared F-02 record may extract only the coordinator's fixed checkpoints and terminal result/,
+    /F-02 request path performs no Turnstile, provider, Apps or Square call and no Queue or D1 mutation/,
+    /coordinator separately performs only the approved aggregate read-only Queue and D1 evidence checks/,
+  ]),
+  acceptance: Object.freeze([
+    /F-02 coordinator instead pins the reviewed public sandbox origin in code, never prints it/,
+    /one-time baseline migration deployed the then-reviewed default-off controller build only as the current all-off sandbox baseline/,
+    /newer F-02 hardening in this draft is not deployed/,
+    /No live-case candidate, control profile, canary or temporary control is active or armed/,
+    /F-02 request itself performs no Turnstile, provider, Apps or Square call and no Queue or D1 mutation/,
+    /coordinator separately performs the approved aggregate read-only Queue and D1 checks/,
+    /raw coordinator\/operator\/Wrangler transcript and candidate\/rollback outputs private/,
+  ]),
+  ownerGuide: Object.freeze([
+    /request path must stop before Turnstile, Square, Apps or provider calls and before any Queue or D1 mutation/,
+    /coordinator separately performs only the approved aggregate read-only Queue and D1 evidence checks/,
+  ]),
+});
 
 function addError(errors, code) {
   if (!errors.includes(code)) errors.push(code);
@@ -230,6 +278,9 @@ function validateDefaultNoGo(source, errors) {
     /does not authorize production, a second case, real-customer use, alert delivery, backups/,
   ]) {
     if (!required.test(source)) addError(errors, "DEFAULT_NO_GO_CONTRACT_INCOMPLETE");
+  }
+  if (/F-02 does not authorize Square, Apps, Queue or D1 activity/.test(source)) {
+    addError(errors, "F02_ACTIVATION_READ_ONLY_AUTHORIZATION_CONTRADICTION_PRESENT");
   }
 }
 
@@ -403,6 +454,13 @@ function validateMigrationDefaultNoGo(source, errors) {
     addError(errors, "MIGRATION_COMPLETED_APPROVAL_PRESENT");
   }
   for (const required of [
+    /Template lifecycle: \*\*CLOSED — DO NOT REUSE\*\*/,
+    /separately completed one-time baseline migration is retained in its private signed record/,
+    /blank repository template remains fail-closed and cannot be reopened, copied or reused/,
+    /`NOT APPROVED` status above is the safety state of this retained blank template/,
+    /Any future baseline change requires a new, separately named owner-approved record/,
+    /imperative language below is retained only as the historical control template used for the closed window/,
+    /is not an instruction to prepare, deploy, recover or repeat a migration now/,
     /This default-NO-GO record covers exactly one supervised UTC window for the one-time Project 2 sandbox migration/,
     /Complete a private copy; keep this repository template blank/,
     /Every applicable `\[REVIEW\/FILL\]` field, both decision stages, any retained-preparation exception acceptance, rollback preauthorization and all required signatures must be complete/,
@@ -542,6 +600,42 @@ function validateRolloutContract(source) {
   return errors;
 }
 
+function validateF02GovernanceDocs(faultHooks, acceptance, ownerGuide) {
+  const errors = [];
+  const docs = [
+    { code: "FAULT_HOOKS", contracts: "faultHooks", source: faultHooks },
+    { code: "ACCEPTANCE", contracts: "acceptance", source: acceptance },
+    { code: "OWNER_GUIDE", contracts: "ownerGuide", source: ownerGuide },
+  ];
+  for (const { code, source } of docs) {
+    if (typeof source !== "string" || source.length < 1 || source.length > 512 * 1024 ||
+        source.includes("\0")) {
+      addError(errors, `F02_${code}_SIZE_OR_ENCODING_INVALID`);
+    }
+  }
+  if (errors.length > 0) return errors;
+
+  for (const { code, contracts, source } of docs) {
+    if (REQUIRED_F02_GOVERNANCE_CONTRACTS[contracts].some((contract) => !contract.test(source))) {
+      addError(errors, `F02_${code}_GOVERNANCE_CONTRACT_MISSING`);
+    }
+  }
+  if (/implemented and locally testable; not deployed, armed or approved for a live sandbox case/i.test(faultHooks) ||
+      /Nothing has been deployed or armed\. The current live Worker therefore still has no controller primitive\./.test(acceptance)) {
+    addError(errors, "F02_DEPLOYED_BASELINE_STATUS_CONTRADICTION_PRESENT");
+  }
+  if (/checked-in request drivers read URLs and signing material from hidden interactive prompts/i.test(acceptance)) {
+    addError(errors, "F02_REQUEST_DRIVER_PRIVACY_DESCRIPTION_STALE");
+  }
+  if (/without Turnstile\/provider\/D1\/Queue work/.test(acceptance)) {
+    addError(errors, "F02_ACCEPTANCE_READ_ONLY_BOUNDARY_CONTRADICTION_PRESENT");
+  }
+  if (/stop before Turnstile, Square, Apps, Queue or D1 activity/.test(ownerGuide)) {
+    addError(errors, "F02_OWNER_GUIDE_READ_ONLY_BOUNDARY_CONTRADICTION_PRESENT");
+  }
+  return errors;
+}
+
 function replaceSectionPlaceholders(source, heading) {
   const startMarker = `## ${heading}\n`;
   const start = source.indexOf(startMarker);
@@ -562,6 +656,32 @@ function assertUnsafeMutationsFail(source, knownDocTargets) {
     )],
     ["REVIEW_FILL_MISSING_RUNTIME_SQUARE_AUTHORIZATION",
       replaceSectionPlaceholders(source, "Runtime Square authorization")],
+    ["SECTION_CONTRACT_TEMPORARY_SANDBOX_AUTHORIZATION", source.replace(
+      "The F-02 request path performs no Turnstile, provider, Apps or Square call and no Queue or D1 mutation.",
+      "The F-02 request path is reviewed.",
+    )],
+    ["F02_ACTIVATION_READ_ONLY_AUTHORIZATION_CONTRADICTION_PRESENT",
+      `${source}\nF-02 does not authorize Square, Apps, Queue or D1 activity.\n`],
+    ["SECTION_CONTRACT_QUEUE_CREDENTIALS", source.replace(
+      "| Exact sandbox account restriction |",
+      "| Sandbox account reviewed |",
+    )],
+    ["SECTION_CONTRACT_QUEUE_CREDENTIALS", source.replace(
+      "Post-revocation main Queue and DLQ metrics reads both rejected with fixed HTTP `401` evidence",
+      "Post-revocation Queue checks reviewed",
+    )],
+    ["SECTION_CONTRACT_BACKUP_AND_DELETION_MANIFEST_CUSTODY", source.replace(
+      "Disposal-review owner and authority reference; no deletion is authorized here",
+      "Evidence disposal reviewed",
+    )],
+    ["SECTION_CONTRACT_EVIDENCE_AND_SIGNOFF", source.replace(
+      "Raw coordinator, operator and Wrangler transcripts are private evidence.",
+      "Raw transcripts are reviewed.",
+    )],
+    ["SECTION_CONTRACT_EVIDENCE_AND_SIGNOFF", source.replace(
+      "`OBSERVED_F02_REQUEST_COMPLETION_HANDSHAKE`, HTTP `400`, requests `1`",
+      "Request completion reviewed",
+    )],
     ["EMAIL_MATERIAL_PRESENT", `${source}\nApproval email: owner@example.com\n`],
     ["PRIVATE_URL_MATERIAL_PRESENT", `${source}\nPrivate URL: https://private.example/decision\n`],
     ["UUID_LIKE_MATERIAL_PRESENT", `${source}\nPrivate ID: 123e4567-e89b-c2d3-f456-426614174000\n`],
@@ -588,6 +708,18 @@ function assertUnsafeMigrationMutationsFail(source, knownDocTargets) {
       source.replace(STATUS_LINE, "Decision status: **APPROVED**")],
     ["MIGRATION_COMPLETED_APPROVAL_PRESENT", `${source}\nOwner approval: GO\n`],
     ["MIGRATION_COMPLETED_APPROVAL_PRESENT", `${source}\n- [x] Final deployment approval\n`],
+    ["MIGRATION_DEFAULT_NO_GO_CONTRACT_INCOMPLETE", source.replace(
+      "Template lifecycle: **CLOSED — DO NOT REUSE**",
+      "Template lifecycle: open for reuse",
+    )],
+    ["MIGRATION_DEFAULT_NO_GO_CONTRACT_INCOMPLETE", source.replace(
+      "Any future baseline change requires a new, separately named owner-approved record",
+      "A future baseline change may reuse this record",
+    )],
+    ["MIGRATION_DEFAULT_NO_GO_CONTRACT_INCOMPLETE", source.replace(
+      "The imperative language below is retained only as the historical control template used for the closed window.",
+      "The instructions below remain available for another window.",
+    )],
     ["MIGRATION_COMPLETED_OR_MALFORMED_TABLE_FIELD", source.replace(
       "| Exact UTC window start and end | `[REVIEW/FILL — reference only; no value]` |",
       "| Exact UTC window start and end | `RECORDED` |",
@@ -685,6 +817,58 @@ function assertUnsafeRolloutMutationsFail(source) {
   }
 }
 
+function assertUnsafeF02GovernanceMutationsFail(faultHooks, acceptance, ownerGuide) {
+  const cases = [
+    ["F02_FAULT_HOOKS_GOVERNANCE_CONTRACT_MISSING", {
+      faultHooks: faultHooks.replace(
+        "previously reviewed default-off controller build is deployed only as the current all-off sandbox baseline",
+        "controller code is locally ready",
+      ), acceptance, ownerGuide,
+    }],
+    ["F02_DEPLOYED_BASELINE_STATUS_CONTRADICTION_PRESENT", {
+      faultHooks,
+      acceptance: `${acceptance}\nNothing has been deployed or armed. The current live Worker therefore still has no controller primitive.\n`,
+      ownerGuide,
+    }],
+    ["F02_REQUEST_DRIVER_PRIVACY_DESCRIPTION_STALE", {
+      faultHooks,
+      acceptance: `${acceptance}\nThe checked-in request drivers read URLs and signing material from hidden interactive prompts.\n`,
+      ownerGuide,
+    }],
+    ["F02_ACCEPTANCE_READ_ONLY_BOUNDARY_CONTRADICTION_PRESENT", {
+      faultHooks,
+      acceptance: `${acceptance}\nThe F-02 proof completes without Turnstile/provider/D1/Queue work.\n`,
+      ownerGuide,
+    }],
+    ["F02_OWNER_GUIDE_READ_ONLY_BOUNDARY_CONTRADICTION_PRESENT", {
+      faultHooks, acceptance,
+      ownerGuide: `${ownerGuide}\nF-02 must stop before Turnstile, Square, Apps, Queue or D1 activity.\n`,
+    }],
+    ["F02_ACCEPTANCE_GOVERNANCE_CONTRACT_MISSING", {
+      faultHooks,
+      acceptance: acceptance.replace(
+        "raw coordinator/operator/Wrangler transcript and candidate/rollback outputs private",
+        "run transcript reviewed",
+      ),
+      ownerGuide,
+    }],
+    ["F02_OWNER_GUIDE_GOVERNANCE_CONTRACT_MISSING", {
+      faultHooks, acceptance,
+      ownerGuide: ownerGuide.replace(
+        "coordinator separately performs only the approved aggregate read-only Queue and D1 evidence checks",
+        "coordinator performs the case checks",
+      ),
+    }],
+  ];
+  for (const [expected, candidate] of cases) {
+    assert.notDeepEqual(candidate, { faultHooks, acceptance, ownerGuide },
+      `unsafe F-02 governance self-test did not mutate source: ${expected}`);
+    assert.ok(validateF02GovernanceDocs(
+      candidate.faultHooks, candidate.acceptance, candidate.ownerGuide,
+    ).includes(expected), `unsafe F-02 governance self-test escaped validation: ${expected}`);
+  }
+}
+
 function fail(errors) {
   process.stderr.write(`Project 2 activation decision validation stopped: ${errors.join(",")}\n`);
   process.exit(1);
@@ -693,28 +877,39 @@ function fail(errors) {
 let source;
 let migrationSource;
 let rolloutSource;
+let faultHooksSource;
+let acceptanceSource;
+let ownerGuideSource;
 let docEntries;
 try {
-  [source, migrationSource, rolloutSource, docEntries] = await Promise.all([
+  [
+    source, migrationSource, rolloutSource, faultHooksSource, acceptanceSource, ownerGuideSource,
+    docEntries,
+  ] = await Promise.all([
     readFile(path.resolve(ROOT, RECORD_PATH), "utf8"),
     readFile(path.resolve(ROOT, MIGRATION_RECORD_PATH), "utf8"),
     readFile(path.resolve(ROOT, ROLLOUT_PATH), "utf8"),
+    readFile(path.resolve(ROOT, FAULT_HOOKS_PATH), "utf8"),
+    readFile(path.resolve(ROOT, ACCEPTANCE_PATH), "utf8"),
+    readFile(path.resolve(ROOT, OWNER_GUIDE_PATH), "utf8"),
     readdir(path.resolve(ROOT, "docs"), { withFileTypes: true }),
   ]);
 } catch {
-  fail(["DECISION_RECORD_MIGRATION_RECORD_ROLLOUT_OR_DOC_INVENTORY_MISSING"]);
+  fail(["DECISION_RECORD_MIGRATION_RECORD_ROLLOUT_F02_GOVERNANCE_OR_DOC_INVENTORY_MISSING"]);
 }
 const knownDocTargets = new Set(docEntries.filter((entry) => entry.isFile()).map((entry) => entry.name));
 const errors = [
   ...validateDecisionRecord(source, knownDocTargets),
   ...validateMigrationRecord(migrationSource, knownDocTargets),
   ...validateRolloutContract(rolloutSource),
+  ...validateF02GovernanceDocs(faultHooksSource, acceptanceSource, ownerGuideSource),
 ];
 if (errors.length > 0) fail(errors);
 try {
   assertUnsafeMutationsFail(source, knownDocTargets);
   assertUnsafeMigrationMutationsFail(migrationSource, knownDocTargets);
   assertUnsafeRolloutMutationsFail(rolloutSource);
+  assertUnsafeF02GovernanceMutationsFail(faultHooksSource, acceptanceSource, ownerGuideSource);
 } catch (error) {
   const detail = String(error?.message || "UNKNOWN").toUpperCase().replaceAll(/[^A-Z0-9]+/g, "_").slice(0, 120);
   fail([`UNSAFE_MUTATION_SELF_TEST_FAILED_${detail}`]);
@@ -723,13 +918,19 @@ try {
 process.stdout.write("Project 2 decision validation passed: the one-case and one-window baseline-migration records " +
   "remain default NOT APPROVED with required REVIEW/FILL authority, preparation, retained-exception acceptance, " +
   "separate final-deploy, rollback, " +
-  "standalone exact-legacy recovery, readiness, monitored closure, credential-revocation and signature fields; " +
+  "standalone exact-legacy recovery, closed-template non-reuse, readiness, monitored closure, " +
+  "reference-only Queue credential custody, F-02 causal timestamps, private raw evidence, sanitized shared evidence " +
+  "and signature fields; " +
   "no private material, safe relative links, production OAuth-only/no-personal-token boundary and " +
-  "proposed-but-unapproved R2 storage.\n");
+  "proposed-but-unapproved R2 storage; deployed all-off controller status and the F-02 request/read-only boundary " +
+  "are consistent across the owner guide and technical procedures.\n");
 
 export const __test = Object.freeze({
+  ACCEPTANCE_PATH,
+  FAULT_HOOKS_PATH,
   MIGRATION_RECORD_PATH,
   MIGRATION_RECOVERY_COMMAND_BLOCK,
+  OWNER_GUIDE_PATH,
   RECORD_PATH,
   REQUIRED_ROLLOUT_CONTRACTS,
   REQUIRED_LINKS,
@@ -737,6 +938,7 @@ export const __test = Object.freeze({
   ROLLOUT_PATH,
   STATUS_LINE,
   validateDecisionRecord,
+  validateF02GovernanceDocs,
   validateMigrationRecord,
   validateRolloutContract,
 });
