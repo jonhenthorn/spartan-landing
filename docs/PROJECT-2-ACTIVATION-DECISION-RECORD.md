@@ -60,8 +60,11 @@ Record each decision separately. `NOT APPLICABLE` requires a reason in the priva
 | Prepare the exact unpublished sandbox candidate or candidate chain | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
 | Route sandbox traffic only to the exact reviewed candidate stage | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
 | Send or replay only the selected case request | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
+| If F-02: run the default-off exact-one-request coordinator and sandbox-only canary gate | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
 
 Temporary provider authorization must follow the linked least-scope boundary, remain separate from the standing connector and be fully revoked after any result.
+
+If the selected case is F-02, the coordinator must privately bind the approved candidate, synthetic submission ID and coupon to this one window. It may send only consent `no`, must require the candidate's remotely verified canary before transport and must accept only one exact HTTP `400` / `CONSENT_REQUIRED` response. A missing completion handshake, second callback, unexpected response or sent-but-unconfirmed request is not retry authority: it requires immediate rollback. Shared evidence may retain only fixed result/checkpoint names, HTTP `400`, request count `1`, bounded time and aggregate zero-delta/Queue evidence. It must not retain the canary, coupon, URL, request/response body, header, cookie, credential or version ID. This sandbox-only preflight does not change the common production request order, and F-02 does not authorize Square, Apps, Queue or D1 activity.
 
 ## Queue credentials
 
@@ -103,7 +106,7 @@ A `GO` preauthorizes the rollback operator to stop traffic, restore the reviewed
 2. Give private inputs to the custodian and issue only approved temporary credentials.
 3. Confirm the all-off baseline, rollback readiness, isolation and linked worksheet prerequisites.
 4. Hold the final `GO`/`NO-GO`; any changed prerequisite returns to `NO-GO`.
-5. Run only the selected case and retain only permitted bounded evidence.
+5. Run only the selected case and retain only permitted bounded evidence. For F-02, start the exact-one-request coordinator before candidate deployment; deploy only after its read-only readiness checkpoint, and never send the request manually or retry an ambiguous send.
 6. Roll back after pass or stop, clean up and revoke temporary authorizations.
 7. Reconcile all-off state, transfer evidence and obtain independent review before another case.
 
@@ -118,6 +121,7 @@ A `GO` preauthorizes the rollback operator to stop traffic, restore the reviewed
 | Read-only and mutating provider authorizations | `[REVIEW/FILL]` | Full revocation and unusability proof confirmed: `[REVIEW/FILL]` |
 | Queue credentials | `[REVIEW/FILL]` | Revocation confirmed: `[REVIEW/FILL]` |
 | Temporary Apps and fault-window material | `[REVIEW/FILL]` | Disabled/removed as required: `[REVIEW/FILL]` |
+| F-02 fixed completion handshake and aggregate zero-delta record, if applicable | `[REVIEW/FILL]` | Exact-one request and bounded shared evidence confirmed: `[REVIEW/FILL]` |
 | Shared evidence record | `[REVIEW/FILL]` | Contains only allowed fixed codes, counts and times: `[REVIEW/FILL]` |
 
 ### Final pre-run signatures
@@ -135,6 +139,7 @@ A `GO` preauthorizes the rollback operator to stop traffic, restore the reviewed
 | Closure item | Recorded result |
 | --- | --- |
 | Case result: pass, stop or inconclusive; UTC end time | `[REVIEW/FILL]` |
+| If F-02: one request, completion handshake and no-retry-on-ambiguity closure | `[REVIEW/FILL]` |
 | Exact rollback and all-off verification complete | `[REVIEW/FILL]` |
 | Temporary cleanup and credential revocation complete | `[REVIEW/FILL]` |
 | Evidence transferred to the named custodian | `[REVIEW/FILL]` |

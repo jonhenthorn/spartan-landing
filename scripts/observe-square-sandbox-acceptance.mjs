@@ -3140,14 +3140,19 @@ async function readQueueState(credential, now, fetchImpl) {
 }
 
 async function prepareReadContext(dependencies = {}) {
-  const commandRunner = dependencies.commandRunner || defaultCommandRunner;
-  const fetchImpl = dependencies.fetchImpl || globalThis.fetch;
-  const env = dependencies.env || process.env;
+  if (!dependencies || typeof dependencies !== "object" || Array.isArray(dependencies)) {
+    stop("STOP_DEPENDENCY_INVALID");
+  }
+  const commandRunner = dependencies.commandRunner === undefined
+    ? defaultCommandRunner : dependencies.commandRunner;
+  const fetchImpl = dependencies.fetchImpl === undefined ? globalThis.fetch : dependencies.fetchImpl;
+  const env = dependencies.env === undefined ? process.env : dependencies.env;
+  if (!env || typeof env !== "object" || Array.isArray(env)) stop("STOP_DEPENDENCY_INVALID");
   const configText = assertPinnedConfigText(dependencies.configText ?? readPinnedConfig());
   const expectedBoundary = parseExpectedBoundary(configText);
   const credential = queueCredential(env);
   sanitizedCommandEnvironment(env, credential.accountId);
-  const now = dependencies.now || Date.now;
+  const now = dependencies.now === undefined ? Date.now : dependencies.now;
   if (typeof now !== "function" || typeof commandRunner !== "function" || typeof fetchImpl !== "function") {
     stop("STOP_DEPENDENCY_INVALID");
   }
@@ -4483,7 +4488,9 @@ export async function watchO01(baseline, dependencies = {}, options = {}) {
 }
 
 async function pause(dependencies, milliseconds) {
-  const sleep = dependencies.sleep || ((delay) => new Promise((resolve) => setTimeout(resolve, delay)));
+  const sleep = dependencies.sleep === undefined
+    ? ((delay) => new Promise((resolve) => setTimeout(resolve, delay))) : dependencies.sleep;
+  if (typeof sleep !== "function") stop("STOP_DEPENDENCY_INVALID");
   await sleep(milliseconds);
 }
 
@@ -5669,6 +5676,11 @@ export async function watchOfferIsolation(baseline, dependencies = {}, options =
   if (!VERSION_UUID.test(candidateVersionId) || candidateVersionId === baseline.version_id) {
     stop("STOP_OFFER_ISOLATION_CANDIDATE_VERSION_REQUIRED");
   }
+  const executeF02Request = dependencies.executeF02Request;
+  if (caseId === "F02" && typeof executeF02Request !== "function") {
+    stop("STOP_F02_REQUEST_COORDINATOR_REQUIRED");
+  }
+  if (caseId !== "F02" && executeF02Request !== undefined) stop("STOP_DEPENDENCY_INVALID");
   const timeout = options.timeoutMs ?? OFFER_ISOLATION_TIMEOUT_MS;
   const initialPoll = options.initialPollMs ?? OFFER_ISOLATION_INITIAL_POLL_INTERVAL_MS;
   const poll = options.pollMs ?? OFFER_ISOLATION_POLL_INTERVAL_MS;
@@ -5765,6 +5777,32 @@ export async function watchOfferIsolation(baseline, dependencies = {}, options =
 
     if (caseId === "F02") {
       if (current.phase !== null) stop("STOP_OFFER_ISOLATION_CASE_CHECKPOINT_SKIPPED");
+      await fullStable(
+        current.dynamic, "STOP_OFFER_ISOLATION_F02_PRE_REQUEST_NOT_STABLE",
+      );
+      await emitOfferIsolationCheckpoint(
+        dependencies, "READY_F02_ONE_REQUEST_CANDIDATE_ACTIVE",
+      );
+      let requestEvidence;
+      try {
+        requestEvidence = await executeF02Request(Object.freeze({
+          candidateCanary: handoff.canary,
+        }));
+      } catch {
+        stop("STOP_F02_REQUEST_COORDINATOR_FAILED");
+      }
+      if (!plainRecord(requestEvidence) ||
+          JSON.stringify(Object.keys(requestEvidence).sort()) !== JSON.stringify([
+            "canary_before_consent", "http_status", "request_count", "result_code",
+          ]) ||
+          requestEvidence.result_code !== "F02_CANARY_DECLINED_CONSENT_CONFIRMED" ||
+          requestEvidence.http_status !== 400 || requestEvidence.request_count !== 1 ||
+          requestEvidence.canary_before_consent !== "CONFIRMED") {
+        stop("STOP_F02_REQUEST_EVIDENCE_INVALID");
+      }
+      await emitOfferIsolationCheckpoint(
+        dependencies, "OBSERVED_F02_REQUEST_COMPLETION_HANDSHAKE",
+      );
       const stable = await confirm(
         current.dynamic, actionDwell, "STOP_OFFER_ISOLATION_F02_ZERO_DELTA_NOT_STABLE",
       );
@@ -5772,11 +5810,16 @@ export async function watchOfferIsolation(baseline, dependencies = {}, options =
       await fullStable(stable.dynamic, "STOP_OFFER_ISOLATION_F02_ZERO_DELTA_NOT_STABLE");
       return Object.freeze({
         ok: true,
-        result_code: "OBSERVED_F02_DECLINED_CONSENT_NO_LOCAL_DELTA_STABLE",
+        result_code: "PASS_F02_CANARY_DECLINED_CONSENT_NO_LOCAL_DELTA",
         acceptance_case: "F02",
+        request_completion_handshake: "CONFIRMED",
+        sender_result: "F02_CANARY_DECLINED_CONSENT_CONFIRMED",
+        http_status: 400,
+        request_count: 1,
+        canary_before_consent: "CONFIRMED",
         monitored_zero_delta_stable: true,
-        request_evidence: "NOT_OBSERVED",
-        queue_evidence: "REPORTED_EMPTY_AT_BASELINE_AND_TERMINAL",
+        provider_and_apps_evidence: "NOT_OBSERVED",
+        queue_evidence: "REPORTED_EMPTY_AT_BASELINE_AND_POST_REQUEST_TERMINAL",
         polls,
         elapsed_ms: context.now() - startedAt,
       });
@@ -6883,9 +6926,11 @@ function millisecondsToSettledCron(nowMs) {
 export async function verifyCleanup(dependencies = {}, options = {}) {
   const before = await captureSnapshot(dependencies);
   assertCleanupState(before);
+  const now = dependencies.now === undefined ? Date.now : dependencies.now;
+  if (typeof now !== "function") stop("STOP_DEPENDENCY_INVALID");
   const waitMs = options.testOnlyAllowShortWait === true
     ? options.waitMs
-    : millisecondsToSettledCron((dependencies.now || Date.now)());
+    : millisecondsToSettledCron(now());
   if (!Number.isSafeInteger(waitMs) || waitMs < 0 || waitMs > CRON_INTERVAL_MS + CRON_SETTLE_MS) {
     stop("STOP_CLEANUP_WAIT_INVALID");
   }

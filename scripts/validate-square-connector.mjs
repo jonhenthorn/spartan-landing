@@ -1363,6 +1363,13 @@ check("canary defaults fail closed and allow exactly the labeled owner submissio
     body: JSON.stringify({ submission_id: "submission-other1", coupon_code: "SPN50-TEST", square_profile_consent: "yes", turnstile_token: "turnstile-token-good" }),
   }), env, {});
   assert.equal(rejected.status, 404); assert.equal(db.claims.length, 0);
+  const productionConsentFirst = await worker.fetch(new Request("https://spartandrink.com/api/square/offer", {
+    method: "POST", headers: { Origin: "https://spartandrink.com", "Sec-Fetch-Site": "same-origin", "Content-Type": "application/json" },
+    body: JSON.stringify({ submission_id: "submission-other1", coupon_code: "SPN50-TEST", square_profile_consent: "no", turnstile_token: "declined-before-turnstile" }),
+  }), env, {});
+  assert.equal(productionConsentFirst.status, 400);
+  assert.deepEqual(await productionConsentFirst.json(), { ok: false, error_code: "CONSENT_REQUIRED" });
+  assert.equal(db.claims.length, 0, "production keeps consent-before-canary behavior unchanged");
 });
 
 check("existing and ambiguous Square customers require a clean linked-order check before eligibility", async () => {

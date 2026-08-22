@@ -75,7 +75,9 @@ P-02 never falls back to process memory, the generic consumed-row hook, a repeat
 
 ## One-time legacy all-off baseline migration
 
-This migration is a separate sandbox control-plane authority, not an acceptance case and not approval for F-02. During the owner-approved August 21, 2026 preparation-only window of 14:00–14:30 UTC, exactly one current all-off target was uploaded at 14:14:35 UTC. The preparation command returned `STATUS=REJECTED RESULT=TARGET_PREPARE_REJECTED_LEGACY_TRAFFIC_CONFIRMED`; it was not retried. Independent post-upload and readiness checks confirmed that one retained in-window target inactive at 0% and the exact legacy source as the sole 100% allocation, and the distinct read-only surface returned `STATUS=READY RESULT=READY_SANDBOX_LEGACY_TO_CURRENT_ALL_OFF_MIGRATION`. No traffic switch or final migration authority followed.
+This migration is a separate sandbox control-plane authority, not an acceptance case and not approval for F-02. During the owner-approved August 21, 2026 preparation-only window of 14:00–14:30 UTC, exactly one current all-off target was uploaded at 14:14:35 UTC. The preparation command returned `STATUS=REJECTED RESULT=TARGET_PREPARE_REJECTED_LEGACY_TRAFFIC_CONFIRMED`; it was not retried. Independent post-upload and readiness checks confirmed that one retained in-window target inactive at 0% and the exact legacy source as the sole 100% allocation, and the distinct read-only surface returned `STATUS=READY RESULT=READY_SANDBOX_LEGACY_TO_CURRENT_ALL_OFF_MIGRATION`.
+
+In the separately approved August 21, 2026, 8:41–9:11 p.m. Central final-deployment window, the exact retained target became the sole 100% sandbox baseline and returned `STATUS=COMPLETE RESULT=SANDBOX_LEGACY_TO_CURRENT_ALL_OFF_MIGRATION_CONFIRMED`. The normal strict check returned `STATUS=COMPLETE RESULT=READ_ONLY_BASELINE_VERIFIED` before and after credential revocation. The new private observer baseline and the monitored five-minute-boundary closure returned `PASS_BASELINE_CAPTURED` and `PASS_CLEANUP_MONITORED_STATE_STABLE`; both Queues stayed empty, both historical versions remained retained, and the temporary Queues Read credential was deleted and rejected by its verification and both Queue endpoints. Independent technical review, private evidence custody and business-owner closure all recorded `PASS`. No rollback or prohibited action occurred. That completed migration still provides no F-02, other-case or production authority.
 
 Pinned Wrangler `4.124.0` output/parser review identified the bounded false-negative cause: successful upload output includes a D1 binding `preview_database_id` UUID before the labeled `Worker Version ID`, while the historical parser scanned every UUID and required exactly one. The historical catch collapsed the inner failure code, so this is an evidence-backed pinned-output/parser-contract finding rather than a claim that the terminal rejection exposed the inner error. The reviewed parser now accepts only one valid labeled Worker version ID. That correction does not rewrite the historical rejection.
 
@@ -307,7 +309,7 @@ The watcher refuses an arbitrary historical shape: it requires the supplied UUID
 
 The compatibility action names `--prepare-candidate`, `--deploy-candidate` and `--deploy-offer-candidate` remain recognized in the operator so an old full vector fails closed, but their allowed-mode sets are empty. They are mutation-inert reserved surfaces, not current preparation or deployment procedures: after the bounded public baseline/version inputs and mode are read, every configured mode returns `CASE_MODE_ACKNOWLEDGEMENTS_REQUIRED` before canary, digest, secret, temporary-file, Wrangler or traffic access. Do not invoke or document an acceptance case through them. All current profiles use the dedicated actions below. Those dedicated actions share the same temporary-renderer, child-environment, metadata-verification and exact-rollback protections; the focused validator exercises those protections through the fixed offer-isolation artifact and every dedicated profile.
 
-F-02, F-03 and R-01 use the distinct non-injecting `OFFER_ROUTE_ISOLATION` profile. Its candidate has the same complete runnable offer matrix, but `SQUARE_SANDBOX_FAULTS_ENABLED=false`; the public profile still exactly equals the hidden mode. It admits only query-free owner-harness GET and offer POST, never calls an injector or consumes a control row, and blocks webhook/pass/config/other fetch, Queue and scheduled invocation before normal work. Use only the fixed-mode helper above and these distinct operator actions:
+F-02, F-03 and R-01 use the distinct non-injecting `OFFER_ROUTE_ISOLATION` profile. Its candidate has the same complete runnable offer matrix, but `SQUARE_SANDBOX_FAULTS_ENABLED=false`; the public profile still exactly equals the hidden mode. It admits only query-free owner-harness GET and an offer POST carrying the exact configured canary, never calls an injector or consumes a control row, and blocks a non-canary offer, webhook/pass/config/other fetch, Queue and scheduled invocation before normal work. This canary-before-consent gate exists only in the sandbox wrapper; the common production offer route retains its existing consent-before-canary order. Use only the fixed-mode helper above and these distinct operator actions:
 
 ```sh
 node scripts/manage-square-sandbox-fault-window.mjs \
@@ -317,14 +319,30 @@ node scripts/manage-square-sandbox-fault-window.mjs \
   --ack-hidden-secret-input --ack-rollback-version-ready
 ```
 
-Before deployment, keep the original all-off baseline JSON private and start the case-bound read-only watcher with the exact prepared candidate UUID:
+Before deployment, keep the original all-off baseline private and start the case-bound controller with the exact prepared candidate UUID. F-03 and R-01 continue to use the standalone read-only watcher:
 
 ```sh
 <original-all-off-baseline.json node scripts/observe-square-sandbox-acceptance.mjs \
-  --execute-read-only watch-offer-isolation <F02|F03|R01> <candidate-uuid>
+  --execute-read-only watch-offer-isolation <F03|R01> <candidate-uuid>
 ```
 
-The watcher pre-verifies that exact unpublished `OFFER_ROUTE_ISOLATION` candidate, its canary/resource/secret boundary, the original active baseline, exact Queue topology, both Queues reported empty and the bounded D1 baseline before emitting `READY_OFFER_ISOLATION_DEPLOY_QUEUES_REPORTED_EMPTY`. Only after that exact readiness line may the operator supply its corresponding acknowledgement and deploy:
+F-02 must instead use the default-inert one-process coordinator below. It captures a fresh all-off baseline, starts the same read-only candidate watcher and holds the approved private submission/coupon pair only in memory. Do not use the standalone `watch-offer-isolation F02` command or a manual browser request; the former returns `STOP_F02_REQUEST_COORDINATOR_REQUIRED` before remote reads and the latter cannot satisfy acceptance.
+
+```sh
+node scripts/run-square-sandbox-f02.mjs \
+  --execute \
+  --ack-sandbox-only \
+  --ack-owner-approved-f02 \
+  --ack-exact-one-canary \
+  --ack-one-consent-no-request \
+  --ack-queues-read-only \
+  --ack-no-provider-apps-queue-or-d1-mutation \
+  --ack-immediate-rollback-after-result-or-stop
+```
+
+Its hidden prompt order is exact candidate UUID, approved synthetic submission ID, approved synthetic coupon code and fixed confirmation `RUN_F02_DECLINED_CONSENT_ONCE`. It never reads those values from arguments or prints them.
+
+The watcher pre-verifies that exact unpublished `OFFER_ROUTE_ISOLATION` candidate, its canary/resource/secret boundary, the original active baseline, exact Queue topology, both Queues reported empty and the bounded D1 baseline before emitting `READY_OFFER_ISOLATION_DEPLOY_QUEUES_REPORTED_EMPTY`. Only after that exact readiness line may the operator supply its corresponding acknowledgement and deploy. For F-02, the coordinator then waits for the exact candidate at 100%, emits `READY_F02_ONE_REQUEST_CANDIDATE_ACTIVE`, compares its hidden submission ID to the remotely verified candidate canary, sends exactly one fixed sandbox POST with no query, redirect or retry, and requires exact HTTP `400` plus `{ok:false,error_code:"CONSENT_REQUIRED"}` before emitting `OBSERVED_F02_REQUEST_COMPLETION_HANDSHAKE` and starting the post-request stable checks.
 
 ```sh
 node scripts/manage-square-sandbox-fault-window.mjs \
@@ -342,7 +360,9 @@ node scripts/manage-square-sandbox-fault-window.mjs \
 
 The prepare action keeps baseline traffic and may return only fixed `STATUS=PREPARED RESULT=SANDBOX_OFFER_ISOLATION_CANDIDATE_READY CANDIDATE_VERSION=<uuid>` on success. The deploy action may return only fixed `STATUS=COMPLETE RESULT=SANDBOX_OFFER_ISOLATION_TRAFFIC_ACTIVE` on success; it does not run the case. Missing readiness acknowledgement rejects before any prompt or child process.
 
-The case-specific prerequisites are still external: F-02 needs only the approved canary pair and sends consent `no`; F-03 needs the separately authorized exact two-match provider fixture; R-01 needs one already-`READY` synthetic claim and a fresh host-scoped Turnstile result. The deploy action and watcher do not create those fixtures or run or observe the request/provider calls. Pair the separately recorded bounded HTTP result with the watcher result. F-02 returns `OBSERVED_F02_DECLINED_CONSENT_NO_LOCAL_DELTA_STABLE` only after stable monitored zero local delta and reports request evidence `NOT_OBSERVED`. F-03 emits `OBSERVED_F03_STAFF_LOOKUP_REQUIRED_STABLE`; send the one approved repeat only after that checkpoint, then require terminal `PASS_F03_AMBIGUOUS_MATCH_REPEAT_NO_SECOND_DELTA`, which reports provider and repeat-request evidence `NOT_OBSERVED`. R-01 requires terminal `PASS_R01_READY_REPLAY_ONE_FRESH_PASS`; that aggregate result proves one fresh canonical live pass paired to a retained exact `READY` claim, but it does not attribute the D1 claim to the private canary or prove the replay request occurred. Every terminal result retains both Queues reported empty at its bounded checkpoints. After the required result, or after any `STOP`, timeout, drift or ambiguity, immediately use the common exact rollback from that named candidate and then baseline-only cleanup; never treat a `READY_` or intermediate `OBSERVED_` line as final acceptance.
+The case-specific prerequisites are still external: F-02 needs the approved private canary pair, the exact-one-request coordinator authority and no provider/Apps authority; F-03 needs the separately authorized exact two-match provider fixture; R-01 needs one already-`READY` synthetic claim and a fresh host-scoped Turnstile result. The deploy action does not create those fixtures. F-02 terminal success is `PASS_F02_CANARY_DECLINED_CONSENT_NO_LOCAL_DELTA` and requires the direct fixed sender evidence, one in-memory completion handshake, stable monitored zero local delta and both Queues reported empty at baseline and post-request terminal. Provider and Apps activity remain explicitly `NOT_OBSERVED`; the exact route ordering and zero local delta establish the permitted pre-provider boundary. A transport timeout or other sent-but-unconfirmed result is ambiguous: never retry it, and immediately roll back. F-03 emits `OBSERVED_F03_STAFF_LOOKUP_REQUIRED_STABLE`; send the one approved repeat only after that checkpoint, then require terminal `PASS_F03_AMBIGUOUS_MATCH_REPEAT_NO_SECOND_DELTA`, which reports provider and repeat-request evidence `NOT_OBSERVED`. R-01 requires terminal `PASS_R01_READY_REPLAY_ONE_FRESH_PASS`; that aggregate result proves one fresh canonical live pass paired to a retained exact `READY` claim, but it does not attribute the D1 claim to the private canary or prove the replay request occurred. Every terminal result retains both Queues reported empty at its bounded checkpoints. After the required result, or after any `STOP`, timeout, drift or ambiguity, immediately use the common exact rollback from that named candidate and then baseline-only cleanup; never treat a `READY_` or intermediate `OBSERVED_` line as final acceptance.
+
+The former `OBSERVED_F02_DECLINED_CONSENT_NO_LOCAL_DELTA_STABLE` code is retired historical diagnostic evidence. It could prove a stable zero-delta interval without proving that the request occurred, so current code must not emit it and no current F-02 procedure may accept it. This intentional contract break prevents an earlier diagnostic record from being promoted into the new causally attested F-02 pass.
 
 ### Three-candidate provider-outage chain (`F-04`)
 

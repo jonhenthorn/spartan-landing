@@ -8172,7 +8172,8 @@ async function preflight(env, context = {}) {
     const admittedFetch = context.kind === "fetch" && (
       context.hasQuery === false && (
         (context.method === "GET" && context.pathname === "/sandbox/owner-offer-test") ||
-        (context.method === "POST" && context.pathname === "/api/square/offer")
+        (context.method === "POST" && context.pathname === "/api/square/offer" &&
+          timingSafeEqual(context.offerSubmissionId, canary))
       )
     );
     if (!offerSelectorReady(canary) || !timingSafeEqual(targetDigest, expectedTarget) || !admittedFetch) {

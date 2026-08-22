@@ -3443,7 +3443,12 @@ check("armed offer faults admit only the owner harness GET and exact offer POST 
   }), true);
   assert.equal(await sandboxFaultController.preflight(env, {
     kind: "fetch", method: "POST", pathname: "/api/square/offer", hasQuery: false,
+    offerSubmissionId: "synthetic-case-offer-001",
   }), true);
+  await assert.rejects(() => sandboxFaultController.preflight(env, {
+    kind: "fetch", method: "POST", pathname: "/api/square/offer", hasQuery: false,
+    offerSubmissionId: "synthetic-case-offer-other",
+  }), /SANDBOX_FAULT_PREFLIGHT_REJECTED/);
 
   const rejected = [
     ["GET", "/api/square/offer"],
@@ -3471,7 +3476,16 @@ check("armed offer faults admit only the owner harness GET and exact offer POST 
   assert.equal(harness.status, 200);
   const offer = await sandboxWorker.fetch(new Request("https://sandbox-validation.workers.dev/api/square/offer", {
     method: "POST",
-    headers: { Origin: "https://sandbox-validation.workers.dev" },
+    headers: {
+      Origin: "https://sandbox-validation.workers.dev",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      submission_id: "synthetic-case-offer-001",
+      coupon_code: "OWNERTEST-001",
+      square_profile_consent: "no",
+      turnstile_token: "declined-before-turnstile",
+    }),
   }), env, {});
   assert.equal(offer.status, 503);
   assert.deepEqual(await offer.json(), { ok: false, error_code: "OFFER_DISABLED" });
@@ -3488,6 +3502,7 @@ check("offer route isolation is query-free, non-injecting, and blocks every non-
   }), true);
   assert.equal(await sandboxFaultController.preflight(env, {
     kind: "fetch", method: "POST", pathname: "/api/square/offer", hasQuery: false,
+    offerSubmissionId: "synthetic-case-offer-001",
   }), true);
 
   for (const mode of [
@@ -3520,6 +3535,27 @@ check("offer route isolation is query-free, non-injecting, and blocks every non-
     }
   });
   assert.equal(rejectedLogs.length, rejectedFetches.length);
+
+  const invalidOfferBodies = [undefined, "{", "x".repeat((8 * 1024) + 1)];
+  const invalidBodyLogs = await captureConsole(async () => {
+    for (const body of invalidOfferBodies) {
+      const response = await sandboxWorker.fetch(new Request(
+        "https://sandbox-validation.workers.dev/api/square/offer",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          ...(body === undefined ? {} : { body }),
+        },
+      ), env, {});
+      assert.equal(response.status, 503);
+      assert.deepEqual(await response.json(), {
+        ok: false, error_code: "SANDBOX_FAULT_PREFLIGHT_REJECTED",
+      });
+    }
+  });
+  assert.equal(invalidBodyLogs.length, invalidOfferBodies.length,
+    "missing, malformed and oversized offer bodies each fail before base work");
+  assert.equal(env.DB.attempts, 0);
 
   let acked = 0; let retried = 0; let waits = 0;
   await assert.rejects(() => sandboxWorker.queue({ messages: [{
@@ -3565,6 +3601,32 @@ check("declined consent through offer isolation stops before Turnstile, Apps, Sq
     ), env, {});
     assert.equal(response.status, 400);
     assert.deepEqual(await response.json(), { ok: false, error_code: "CONSENT_REQUIRED" });
+    const [nonCanaryLog] = await captureConsole(async () => {
+      const nonCanary = await sandboxWorker.fetch(new Request(
+        "https://sandbox-validation.workers.dev/api/square/offer",
+        {
+          method: "POST",
+          headers: {
+            Origin: "https://sandbox-validation.workers.dev",
+            "Sec-Fetch-Site": "same-origin",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            submission_id: "synthetic-case-offer-other",
+            coupon_code: "OWNERTEST-001",
+            square_profile_consent: "no",
+            turnstile_token: "declined-before-turnstile",
+          }),
+        },
+      ), env, {});
+      assert.equal(nonCanary.status, 503);
+      assert.deepEqual(await nonCanary.json(), {
+        ok: false, error_code: "SANDBOX_FAULT_PREFLIGHT_REJECTED",
+      });
+    });
+    assert.deepEqual(nonCanaryLog, [
+      "error", "square_sandbox_fault_preflight_rejected", "SANDBOX_FAULT_PREFLIGHT_REJECTED",
+    ]);
     assert.deepEqual({ providerCalls, queueCalls, d1Writes: env.DB.attempts }, {
       providerCalls: 0, queueCalls: 0, d1Writes: 0,
     });
@@ -3586,6 +3648,7 @@ check("public profile, hidden mode, and injection discriminator must agree befor
     const env = { ...validIsolation, ...mutation };
     await assert.rejects(() => sandboxFaultController.preflight(env, {
       kind: "fetch", method: "POST", pathname: "/api/square/offer", hasQuery: false,
+      offerSubmissionId: "synthetic-case-offer-001",
     }), /SANDBOX_FAULT_PREFLIGHT_REJECTED/);
     assert.equal(validIsolation.DB.attempts, 0);
   }
@@ -3593,6 +3656,7 @@ check("public profile, hidden mode, and injection discriminator must agree befor
   const injecting = await armF04(baseSandboxEnv(), "SQUARE_SEARCH_OUTAGE", "synthetic-case-offer-001");
   assert.equal(await sandboxFaultController.preflight(injecting, {
     kind: "fetch", method: "POST", pathname: "/api/square/offer", hasQuery: false,
+    offerSubmissionId: "synthetic-case-offer-001",
   }), true);
   for (const mutation of [
     { SQUARE_SANDBOX_CONTROL_PROFILE: "" },
@@ -3601,6 +3665,7 @@ check("public profile, hidden mode, and injection discriminator must agree befor
   ]) {
     await assert.rejects(() => sandboxFaultController.preflight({ ...injecting, ...mutation }, {
       kind: "fetch", method: "POST", pathname: "/api/square/offer", hasQuery: false,
+      offerSubmissionId: "synthetic-case-offer-001",
     }), /SANDBOX_FAULT_PREFLIGHT_REJECTED/);
   }
   assert.equal(injecting.DB.attempts, 0);
@@ -6955,6 +7020,7 @@ check("armed invocation separation and exact Queue targeting fail closed", async
   const offer = await armF04(baseSandboxEnv(), "SQUARE_SEARCH_OUTAGE", "synthetic-case-offer-001");
   assert.equal(await sandboxFaultController.preflight(offer, {
     kind: "fetch", method: "POST", pathname: "/api/square/offer", hasQuery: false,
+    offerSubmissionId: "synthetic-case-offer-001",
   }), true);
   await assert.rejects(
     () => sandboxFaultController.preflight(offer, {

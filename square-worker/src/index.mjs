@@ -123,6 +123,7 @@ export function createSandboxWorker(controller) {
         let method = "OTHER";
         let pathname = "OTHER";
         let hasQuery = true;
+        let offerSubmissionId = "";
         try {
           const url = new URL(request.url);
           if (request.method === "GET" || request.method === "POST") method = request.method;
@@ -130,8 +131,17 @@ export function createSandboxWorker(controller) {
             pathname = url.pathname;
           }
           hasQuery = url.search !== "";
+          if (method === "POST" && pathname === "/api/square/offer" && hasQuery === false) {
+            const body = await readJson(request.clone(), MAX_JSON_BYTES);
+            if (body && typeof body === "object" && !Array.isArray(body) &&
+                typeof body.submission_id === "string") {
+              offerSubmissionId = body.submission_id;
+            }
+          }
         } catch {}
-        await controller.preflight(env, { kind: "fetch", method, pathname, hasQuery });
+        await controller.preflight(env, {
+          kind: "fetch", method, pathname, hasQuery, offerSubmissionId,
+        });
       } catch (error) {
         console.error("square_sandbox_fault_preflight_rejected", safeErrorCode(error));
         return errorJson("SANDBOX_FAULT_PREFLIGHT_REJECTED", 503);

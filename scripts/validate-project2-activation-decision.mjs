@@ -38,6 +38,9 @@ const REQUIRED_SECTION_TERMS = Object.freeze({
   "Temporary sandbox authorization": [
     /read-only provider authorization/i, /mutating provider authorization/i, /Apps journey readiness/i,
     /sandbox candidate/i, /least[- ]scope/i, /fully revoked/i,
+    /exact-one-request coordinator/i, /sandbox-only canary gate/i,
+    /common production request order/i, /sent-but-unconfirmed request/i,
+    /requires immediate rollback/i, /fixed result\/checkpoint names/i,
   ],
   "Queue credentials": [/Queues Read/, /Queues Write/, /DLQ inspect\/redrive/, /Revocation owner/i],
   "Alert delivery": [/excluded/i, /separate operations decision/i, /remains unchanged/i],
@@ -49,6 +52,7 @@ const REQUIRED_SECTION_TERMS = Object.freeze({
   ],
   "Evidence and signoff": [
     /Custody and closure record/, /revocation/i, /Final pre-run signatures/, /Final post-run signatures/,
+    /fixed completion handshake/i, /one request, completion handshake and no-retry-on-ambiguity closure/i,
   ],
 });
 const MIGRATION_REQUIRED_SECTIONS = Object.freeze([

@@ -18,6 +18,7 @@ import {
   watchReplaySeed,
   watchReplayTerminal,
 } from "./observe-square-sandbox-acceptance.mjs";
+import { sendF02DeclinedConsent } from "./run-square-sandbox-f02.mjs";
 
 const configText = readFileSync("square-worker/wrangler.sandbox.toml", "utf8");
 const expected = __test.parseExpectedBoundary(configText);
@@ -1082,6 +1083,16 @@ for (const driftedConfig of [
   })), "STOP_LOCAL_CONFIG_HASH_MISMATCH");
   assert.deepEqual(driftCommandCalls, []);
   assert.deepEqual(driftFetchCalls, []);
+}
+
+for (const invalidDependencies of [
+  null,
+  baseDeps({ commandRunner: null }),
+  baseDeps({ fetchImpl: null }),
+  baseDeps({ env: null }),
+  baseDeps({ now: null }),
+]) {
+  await fixedFailure(() => captureSnapshot(invalidDependencies), "STOP_DEPENDENCY_INVALID");
 }
 
 const invalidQueueCredentialCases = Object.freeze([
@@ -4399,6 +4410,7 @@ function makeOfferIsolationWatchFixture({
   const calls = [];
   const fetchCalls = [];
   const checkpoints = [];
+  const requestCalls = [];
   const dependencies = baseDeps({
     commandRunner: makeRunner({
       calls,
@@ -4427,11 +4439,23 @@ function makeOfferIsolationWatchFixture({
     now: () => fixtureNow,
     sleep: async (delay) => { fixtureNow += delay; },
     onCheckpoint: async (checkpoint) => { checkpoints.push(checkpoint); },
+    ...(caseId === "F02" ? {
+      executeF02Request: async ({ candidateCanary }) => {
+        requestCalls.push(candidateCanary);
+        return {
+          result_code: "F02_CANARY_DECLINED_CONSENT_CONFIRMED",
+          http_status: 400,
+          request_count: 1,
+          canary_before_consent: "CONFIRMED",
+        };
+      },
+    } : {}),
   });
   return {
     calls,
     fetchCalls,
     checkpoints,
+    requestCalls,
     dependencies,
     options: {
       caseId,
@@ -4453,21 +4477,78 @@ const offerIsolationF02Result = await watchOfferIsolation(
 );
 assert.deepEqual(offerIsolationF02Result, {
   ok: true,
-  result_code: "OBSERVED_F02_DECLINED_CONSENT_NO_LOCAL_DELTA_STABLE",
+  result_code: "PASS_F02_CANARY_DECLINED_CONSENT_NO_LOCAL_DELTA",
   acceptance_case: "F02",
+  request_completion_handshake: "CONFIRMED",
+  sender_result: "F02_CANARY_DECLINED_CONSENT_CONFIRMED",
+  http_status: 400,
+  request_count: 1,
+  canary_before_consent: "CONFIRMED",
   monitored_zero_delta_stable: true,
-  request_evidence: "NOT_OBSERVED",
-  queue_evidence: "REPORTED_EMPTY_AT_BASELINE_AND_TERMINAL",
-  polls: 3,
+  provider_and_apps_evidence: "NOT_OBSERVED",
+  queue_evidence: "REPORTED_EMPTY_AT_BASELINE_AND_POST_REQUEST_TERMINAL",
+  polls: 4,
   elapsed_ms: 1,
 });
 assert.deepEqual(offerIsolationF02Run.checkpoints, [
   { ok: true, result_code: "READY_OFFER_ISOLATION_DEPLOY_QUEUES_REPORTED_EMPTY" },
+  { ok: true, result_code: "READY_F02_ONE_REQUEST_CANDIDATE_ACTIVE" },
+  { ok: true, result_code: "OBSERVED_F02_REQUEST_COMPLETION_HANDSHAKE" },
 ]);
-assert.equal(offerIsolationF02Run.calls.length, 25,
+assert.deepEqual(offerIsolationF02Run.requestCalls, [offerIsolationCanary]);
+assert.equal(offerIsolationF02Run.calls.length, 34,
   "successful F02 watch stays within its fixed command ceiling");
-assert.equal(offerIsolationF02Run.fetchCalls.length, 8,
-  "successful F02 watch performs two bounded Queue snapshots");
+assert.equal(offerIsolationF02Run.fetchCalls.length, 12,
+  "successful F02 watch performs predeploy, active-pre-request and terminal Queue snapshots");
+
+const offerIsolationF02Composed = makeOfferIsolationWatchFixture({ caseId: "F02" });
+let offerIsolationF02ComposedFetches = 0;
+offerIsolationF02Composed.dependencies.executeF02Request = ({ candidateCanary }) =>
+  sendF02DeclinedConsent({
+    candidateCanary,
+    submissionId: offerIsolationCanary,
+    couponCode: "OWNERTEST-001",
+    fetchImpl: async () => {
+      offerIsolationF02ComposedFetches += 1;
+      return jsonResponse({ ok: false, error_code: "CONSENT_REQUIRED" }, 400);
+    },
+  });
+const offerIsolationF02ComposedResult = await watchOfferIsolation(
+  offerIsolationBaseline,
+  offerIsolationF02Composed.dependencies,
+  offerIsolationF02Composed.options,
+);
+assert.equal(offerIsolationF02ComposedResult.result_code,
+  "PASS_F02_CANARY_DECLINED_CONSENT_NO_LOCAL_DELTA");
+assert.equal(offerIsolationF02ComposedFetches, 1,
+  "the real watcher and sender compose into exactly one mocked transport request");
+
+const offerIsolationF02PostRequestQueueDrift = makeOfferIsolationWatchFixture({
+  caseId: "F02",
+  mainMetrics: [
+    metricPayload(),
+    metricPayload(),
+    metricPayload({ count: 1, bytes: 10, oldestMs: baseNow }),
+  ],
+});
+let offerIsolationF02PostDriftFetches = 0;
+offerIsolationF02PostRequestQueueDrift.dependencies.executeF02Request = ({ candidateCanary }) =>
+  sendF02DeclinedConsent({
+    candidateCanary,
+    submissionId: offerIsolationCanary,
+    couponCode: "OWNERTEST-001",
+    fetchImpl: async () => {
+      offerIsolationF02PostDriftFetches += 1;
+      return jsonResponse({ ok: false, error_code: "CONSENT_REQUIRED" }, 400);
+    },
+  });
+await fixedFailure(() => watchOfferIsolation(
+  offerIsolationBaseline,
+  offerIsolationF02PostRequestQueueDrift.dependencies,
+  offerIsolationF02PostRequestQueueDrift.options,
+), "STOP_OFFER_ISOLATION_UNRELATED_WORK_DETECTED");
+assert.equal(offerIsolationF02PostDriftFetches, 1,
+  "post-request Queue drift stops after exactly one request and never retries");
 
 const offerIsolationF03Run = makeOfferIsolationWatchFixture({ caseId: "F03" });
 const offerIsolationF03Result = await watchOfferIsolation(
@@ -4524,7 +4605,73 @@ assert.doesNotMatch(JSON.stringify({
     ...offerIsolationF03Run.checkpoints,
     ...offerIsolationR01Run.checkpoints,
   ],
-}), /claim_id|customer_id|submission_id|reference_id|state_key|token_hash|digest|secret|payload|url|canary|version/i);
+}), /claim_id|customer_id|submission_id|reference_id|state_key|token_hash|digest|secret|payload|url|version_id/i);
+assert.equal(JSON.stringify({
+  f02: offerIsolationF02Result,
+  checkpoints: offerIsolationF02Run.checkpoints,
+}).includes(offerIsolationCanary), false);
+assert.equal(JSON.stringify({
+  f02: offerIsolationF02Result,
+  f03: offerIsolationF03Result,
+  r01: offerIsolationR01Result,
+  checkpoints: [
+    ...offerIsolationF02Run.checkpoints,
+    ...offerIsolationF03Run.checkpoints,
+    ...offerIsolationR01Run.checkpoints,
+  ],
+}).includes(offerIsolationCanary), false);
+
+const offerIsolationF02NoCoordinator = makeOfferIsolationWatchFixture({ caseId: "F02" });
+delete offerIsolationF02NoCoordinator.dependencies.executeF02Request;
+await fixedFailure(() => watchOfferIsolation(
+  offerIsolationBaseline,
+  offerIsolationF02NoCoordinator.dependencies,
+  offerIsolationF02NoCoordinator.options,
+), "STOP_F02_REQUEST_COORDINATOR_REQUIRED");
+assert.deepEqual(offerIsolationF02NoCoordinator.calls, [],
+  "F02 without the direct request coordinator performs no remote reads");
+
+const offerIsolationF02BadEvidence = makeOfferIsolationWatchFixture({ caseId: "F02" });
+offerIsolationF02BadEvidence.dependencies.executeF02Request = async ({ candidateCanary }) => {
+  offerIsolationF02BadEvidence.requestCalls.push(candidateCanary);
+  return {
+    result_code: "F02_CANARY_DECLINED_CONSENT_CONFIRMED",
+    http_status: 400,
+    request_count: 0,
+    canary_before_consent: "CONFIRMED",
+  };
+};
+await fixedFailure(() => watchOfferIsolation(
+  offerIsolationBaseline,
+  offerIsolationF02BadEvidence.dependencies,
+  offerIsolationF02BadEvidence.options,
+), "STOP_F02_REQUEST_EVIDENCE_INVALID");
+assert.deepEqual(offerIsolationF02BadEvidence.requestCalls, [offerIsolationCanary]);
+
+const offerIsolationF02RequestFailure = makeOfferIsolationWatchFixture({ caseId: "F02" });
+offerIsolationF02RequestFailure.dependencies.executeF02Request = async () => {
+  throw new Error("private transport detail must be collapsed");
+};
+await fixedFailure(() => watchOfferIsolation(
+  offerIsolationBaseline,
+  offerIsolationF02RequestFailure.dependencies,
+  offerIsolationF02RequestFailure.options,
+), "STOP_F02_REQUEST_COORDINATOR_FAILED");
+
+const offerIsolationF02PreRequestQueueDrift = makeOfferIsolationWatchFixture({
+  caseId: "F02",
+  mainMetrics: [metricPayload(), metricPayload({ count: 1, bytes: 10, oldestMs: baseNow })],
+});
+await fixedFailure(() => watchOfferIsolation(
+  offerIsolationBaseline,
+  offerIsolationF02PreRequestQueueDrift.dependencies,
+  offerIsolationF02PreRequestQueueDrift.options,
+), "STOP_OFFER_ISOLATION_UNRELATED_WORK_DETECTED");
+assert.deepEqual(offerIsolationF02PreRequestQueueDrift.requestCalls, [],
+  "active-candidate Queue drift stops before the one request callback");
+assert.deepEqual(offerIsolationF02PreRequestQueueDrift.checkpoints, [
+  { ok: true, result_code: "READY_OFFER_ISOLATION_DEPLOY_QUEUES_REPORTED_EMPTY" },
+]);
 
 const offerIsolationWrongProfile = makeOfferIsolationWatchFixture({
   candidateVersion: offerIsolationVersionPayload({ profile: "F04_OFFER_RECOVERY_ISOLATION" }),
@@ -4691,7 +4838,8 @@ await fixedFailure(() => watchOfferIsolation(
 ), "STOP_OFFER_ISOLATION_WATCH_TIMEOUT");
 assert.equal(offerIsolationConfirmationTimeout.calls.filter(
   (call) => call.operation === "d1_offer_isolation",
-).length, 2, "offer-isolation confirmation timeout crosses no additional D1 read boundary");
+).length, 3,
+  "offer-isolation confirmation timeout includes the active pre-request checkpoint but no post-dwell read");
 
 const offerIsolationStalled = makeOfferIsolationWatchFixture({
   caseId: "F03",
@@ -5796,7 +5944,9 @@ assert.match(source, /PASS_F04_PROVIDER_OUTAGE_RECOVERED_READY/);
 assert.match(source, /F04_MAX_POLLS = 190/);
 assert.match(source, /watch-f04/);
 assert.match(source, /READY_OFFER_ISOLATION_DEPLOY_QUEUES_REPORTED_EMPTY/);
-assert.match(source, /OBSERVED_F02_DECLINED_CONSENT_NO_LOCAL_DELTA_STABLE/);
+assert.match(source, /READY_F02_ONE_REQUEST_CANDIDATE_ACTIVE/);
+assert.match(source, /OBSERVED_F02_REQUEST_COMPLETION_HANDSHAKE/);
+assert.match(source, /PASS_F02_CANARY_DECLINED_CONSENT_NO_LOCAL_DELTA/);
 assert.match(source, /OBSERVED_F03_STAFF_LOOKUP_REQUIRED_STABLE/);
 assert.match(source, /PASS_F03_AMBIGUOUS_MATCH_REPEAT_NO_SECOND_DELTA/);
 assert.match(source, /PASS_R01_READY_REPLAY_ONE_FRESH_PASS/);
