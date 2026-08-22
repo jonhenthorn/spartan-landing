@@ -38,6 +38,45 @@ Open the deployed `/exec` URL with no lead fields. Before the refreshed website 
 
 `worker_json_configured` proves only that a secret of the minimum length exists in Apps Script Properties; it never reveals the secret. The internal discovery contract version proves only that this handler recognizes signed discovery requests. `owner_notifications_configured` means owner delivery is enabled, the required properties are complete, and the exact configured `SHEET_NAME` tab currently resolves. It does not prove that the current account owns an operational trigger; use `diagnoseOwnerNotifications()` for that. Health proves which handler answers the endpoint. It does not prove that a POST reaches the intended Sheet, that the Worker secret matches, that Brevo can deliver the confirmation message, or that the browser result flow works.
 
+### Default-off signed operations health
+
+The private `spartan-ops-apps-health-v1-2026-08-18` contract gives the isolated operations monitor a metadata-only view of this handler without sharing a customer-form or Square-connector secret. It is off unless `OPS_HEALTH_ENABLED` is exact `true`. A valid request must be an ASCII `application/x-www-form-urlencoded` POST of no more than 2 KiB with these seven fields once each, with no extras, in this exact order:
+
+1. `response_mode=ops_health_json`
+2. `operation=ops_health`
+3. `ops_health_contract_version=spartan-ops-apps-health-v1-2026-08-18`
+4. `source_environment_code=sandbox` or `production`, matching `OPS_HEALTH_ENVIRONMENT`
+5. `request_timestamp`, exactly ten digits and no more than 300 seconds before or after Apps Script time
+6. `request_nonce`, a lowercase RFC 4122 version-4 UUID
+7. `request_signature`, a lowercase 64-character HMAC-SHA256 hex signature
+
+The request signature covers the first six fields as canonical `key=encodeURIComponent(value)` pairs joined by `&`. The response has an independent signature over every field before `response_signature`, in the fixed order defined by `OPS_HEALTH_RESPONSE_SIGNED_FIELDS`. The monitor must reject a response with a missing field, extra field, changed order, stale timestamp echo, changed nonce echo, invalid state or invalid signature.
+
+The nonce binds a response to its specific request; it is not a durable one-time replay ledger. An identical valid signed request may be accepted again during the 300-second freshness window, but it can only repeat the same metadata-only inspection and cannot write to the Sheet, properties, cache or a provider.
+
+A valid authenticated request receives one of three signed inspection states:
+
+- `DISABLED`: health inspection is off; all five component states are `NOT_CHECKED`.
+- `COMPLETE`: the read-only metadata inspection completed. Lead and journey-ledger states are `READY` or `NOT_READY`; Worker JSON is `CONFIGURED` or `NOT_CONFIGURED`; owner notifications and Square journey are `READY`, `DISABLED` or `MISCONFIGURED`.
+- `FAILED`: the authenticated request was valid but the configured environment did not match or the metadata inspection could not complete; all component states are `NOT_CHECKED`.
+
+Malformed, duplicate, oversized, stale, unsigned or incorrectly signed requests receive only the generic unsigned `ops_health_request_rejected` response. Validation and authentication happen before any Sheet access. A successful inspection reads only safe Script Property states, the configured lead-tab header metadata and the two exact journey-ledger schemas and formatting states. It never returns or logs property values, Sheet/tab names, IDs, row counts, customer data or exception details; calls no mail, Brevo or Square provider; and performs no Sheet, property, cache or other write. The public GET health response and every existing form, discovery and Square connector contract remain separate and unchanged.
+
+Run `node scripts/validate-apps-health.mjs` from the repository root before any reviewed Apps Script release. It proves exact request and response ordering/signatures, the inclusive ±300-second freshness boundary, strict content/body/duplicate handling, separate-secret enforcement, authentication-before-Sheet access, repeat-request read-only behavior, two batched ledger-format reads per inspection, all signed inspection states and the no-write/no-log/no-provider/no-PII boundary.
+
+### Verified sandbox Apps-health deployment — August 19, 2026
+
+- The existing sandbox web-app deployment continues to serve optimized Version `4` without changing its deployment, execute-as owner or `Anyone` access. Final state is `OPS_HEALTH_ENABLED=false`, `OPS_HEALTH_ENVIRONMENT=sandbox`, and no `OPS_HEALTH_SHARED_SECRET`, so no signed health inspection can run.
+- The v1 health contract marker remains present, while the public GET still returns the existing v3.2 form-service contract. Historically, the August 18 run returned two valid `DISABLED` responses, then stopped at a `5016 ms` enabled-inspection deadline. The immediate `3878 ms` healthy repeat did not override that stop.
+- The earlier August 19 follow-up passed a credential-inert interval and two signed `DISABLED` responses in `1791 ms` and `1009 ms`. It stopped before health enablement when automation output disclosed private Apps configuration. The exposed sandbox connector signing secret was replaced in Apps and the disabled connector. Healthy, forced-environment, mismatch and recovery phases were not run in that attempt.
+- Cleanup for that stopped attempt removed the dedicated health property and both Worker health secrets, returned every operations flag to false and produced a final all-off no-write cron. A later exact-selector attempt stopped before any credential was saved or sent; its unsaved row and unused temporary credential were removed. No Sheet value, customer data, mail, Brevo, Square business record or production state changed.
+- The Version 4 exact-semantic optimization reuses write-secret values already read for credential-separation checks, skips owner/Square properties while those optional lanes are disabled, and enumerates workbook tabs once for the lead and both ledger checks. It retains the complete used-range formula scan and every allocated-row identifier-format check. The validator locks the exact property/read plan, one tab enumeration, zero `getSheetByName()` calls, no data-row value reads and future unused-row format drift remaining `NOT_READY`.
+- A later historical enabled Worker run at `06:30` ended `APPS_HEALTH_SECOND_HOP_UNAVAILABLE` in `2966 ms`, while the Apps execution UI showed Version 4 `doPost` completed in `2.069 s`. That difference did not prove a signed response reached the Worker, so the worksheet hard stop and cleanup ran immediately.
+- The fixed-code second-hop split was subsequently committed and deployed inertly as operations Worker version `d90fcd45-ac10-4800-b14b-c4bd882df554`. All six operations flags remained false, no operations secrets were installed, and the next scheduled interval proved no writes.
+- A fresh historical credential-local attempt produced signed `DISABLED` diagnostic evidence in `5422 ms` and `1585 ms`. Diagnostic mode cannot satisfy acceptance; the `5422 ms` result was outside the then-current strict `<5000 ms` SLO. The first strict normal probe then failed at `5011 ms`, and the run stopped before any Worker health secret was added or any capability flag was enabled. Cleanup removed its dedicated credential and private URL entries; its final checkpoint was 22 monitor runs, three incidents, one open Apps warning at occurrence one, and zero deliveries, backups or restores.
+- Option B commit `b87fa08b4e8e1e4fcf2462bc1d82cfdbbe4fea5d` subsequently passed the complete sandbox worksheet: signed-disabled direct probes were `2090 ms` and `933 ms`, and five `11:50`–`12:10` UTC scheduled observations were each below `8000 ms` with warning occurrence one through five; healthy direct probes were `3107 ms` and `2432 ms`, with a `12:15` clear; signed failure was `1601 ms` direct and present at `12:20`, followed by `5667 ms` healthy and a `12:25` clear; mismatch candidate `f52ec4f4-d4c5-4753-a7e2-169928a35998` returned the expected mismatch in `3966 ms` and critical at `12:30`, followed by normal healthy in `4617 ms` and a `12:35` clear; source-off version `f3df1f27-d217-48a4-9926-0aabb15b0561` produced connector-only clears at `12:40` and `12:45`. Cleanup deleted the URL in version `cc8350a0` and shared secret in version `2e636c1f`, removed the Apps health property, restored false/sandbox, and removed the temporary Keychain items, clipboard value, helper binary and temporary directory. Final all-off Worker `12bd4dc9-3ed7-47e0-9c48-0c33d8a5c166` is scheduled-only schema 4 with the exact sandbox D1 bindings, all six flags false and no secrets; its `12:50` cron wrote nothing. Final D1 evidence is 34 runs, five incidents, zero active incidents, and zero deliveries, backups or restores. Connector `0ff5a2ab-2f2c-4872-a624-29d976ab54de` and its aggregates, production and business state were unchanged.
+- Only the sandbox Apps-health lane is complete. Production Apps-health activation, Queue acceptance, alerts, backups and restores remain separate approval gates. The complete historical and accepted-run evidence is recorded in `docs/APPS-HEALTH-SANDBOX-ACCEPTANCE.md`.
+
 ### Verified production snapshot — August 10, 2026
 
 - The existing web-app URL serves Apps Script Version 11 and reports `spartan-forms-v3.1-2026-08-10`.
@@ -62,6 +101,14 @@ Open **Apps Script -> Project settings -> Script properties** and set:
 - `BREVO_DOI_TEMPLATE_ID`: the positive numeric ID of the active Brevo double-opt-in confirmation template.
 - `OWNER_NOTIFICATION_ENABLED`: leave `false` through code paste, mail authorization, deployment, and the no-send configuration diagnostic. Enable it only for the controlled labeled delivery test and later operation. Only exact `true` enables delivery.
 - `OWNER_NOTIFICATION_EMAIL`: the single owner-controlled mailbox that should receive counts-only submission alerts. Use `bixbynutrition@gmail.com` for the current Spartan business inbox unless ownership changes.
+- `OPS_HEALTH_ENABLED`: leave exact `false` through code deployment, dedicated-secret setup and the separate sandbox monitor preflight. Only exact `true` runs the signed metadata inspection; authenticated requests still receive a signed `DISABLED` result while it is false.
+- `OPS_HEALTH_ENVIRONMENT`: exact `sandbox` or `production`. It must match the signed request's `source_environment_code`; a mismatch returns a signed `FAILED` state without a Sheet inspection.
+- `OPS_HEALTH_SHARED_SECRET`: a dedicated random secret of at least 32 bytes matching only the isolated operations monitor. It must differ from both `WORKER_SHARED_SECRET` and `SQUARE_CONNECTOR_SHARED_SECRET`; reusing either write-capable secret makes the health endpoint reject every request. Never place it in page code, GitHub, screenshots, Sheet cells, analytics or shell history.
+- `SQUARE_JOURNEY_ENABLED`: leave exact `false` through code deployment, connector infrastructure setup, sandbox testing and the owner-canary preflight. Only exact `true` enables the private signed Square prepare/finalize/event handlers.
+- `SQUARE_CONNECTOR_SHARED_SECRET`: a separate random secret of at least 32 bytes matching the isolated Square Worker. Never reuse `WORKER_SHARED_SECRET`, an API token or the pass/hash key.
+- `SQUARE_LOCATION_ID`: the verified Spartan location ID. The current reviewed value is `3MDGSXS33HERT`.
+- `SQUARE_FIRST_DRINK_DISCOUNT_ID`: the verified fixed-50% discount catalog object ID. The current reviewed value is `5ZXWVO3YGDYFHPZBD5KX6JXI`.
+- `SQUARE_FIRST_VISIT_GROUP_ID`: the exact manually created eligibility group ID, verified in the intended Square environment before any write. Do not use a group name as an identifier.
 
 Both Sheet properties are mandatory. There is no active-spreadsheet or first-tab fallback. The handler also refuses to write unless the configured tab's first five header cells exactly match the historical schema. Public visitors receive only a generic error when either safety check fails.
 
@@ -70,6 +117,8 @@ Both Sheet properties are mandatory. There is no active-spreadsheet or first-tab
 `diagnoseJourneyLedgerSetup()` is an owner-run, read-only check for the two reviewed header-only tabs: `Identity Links` and `Journey Events`. It reports their exact-name, header, empty-state and formatting readiness without returning lead data or changing the workbook.
 
 `setupJourneyLedgerSheets()` is the corresponding repeat-safe initializer. It uses the same required `SPREADSHEET_ID` and `SHEET_NAME`, validates the historic lead-tab contract read-only, and then creates or initializes only the two reviewed ledger tabs. It never calls `ensureHeaders_()`, adds columns to the lead tab, appends a contact/event, changes consent/provider state, or changes spreadsheet sharing.
+
+`repairJourneyLedgerPlainTextFormatting()` is the explicit owner-run recovery for an initialized ledger whose configured identifier cells were changed to automatic formatting. It preflights both exact schemas and rejects formulas or header drift before making any change. It applies only the plain-text number format, performs no value writes or row appends, never edits the lead tab and is a verified no-op when formatting is already correct. Run `diagnoseSquareJourneyConfiguration()` afterward and require `ledger_ready=true` before re-enabling connector traffic.
 
 Safety behavior:
 
@@ -80,6 +129,20 @@ Safety behavior:
 - A second successful setup performs zero header or formatting writes.
 
 The current workbook is private and owner-only. This initializer does not attempt to remove editors or alter recovery access. Explicit per-tab protection is deferred until its access effect can be verified safely. Follow the controlled-proof and activation gates in `../docs/SQUARE-JOURNEY-PILOT.md`; merely creating these empty tabs does not authorize journey imports.
+
+## Default-off Square connector candidate
+
+The local code includes private, signed Square connector operations for one optional post-coupon profile connection. They are not used by the existing form Worker and are disabled unless `SQUARE_JOURNEY_ENABLED=true` with every matching property complete. Deploying the code with that flag false does not create a Square customer, add a group, append a journey event or expose the website option.
+
+`diagnoseSquareJourneyConfiguration()` sends no provider request and performs no write. It reports only contract/version readiness, boolean property checks and the current ledger diagnosis. Require `enabled=false`, `configured=false` and `writes_performed=0` for an inert deployment. Before a sandbox or canary write, configure the exact isolated environment, enable the flag only for the test window, and require `configured=true`, `ledger_ready=true` and the reviewed IDs.
+
+When enabled, the private operations behave as follows:
+
+- `offer_prepare` verifies an original new website claim plus the exact coupon code and records the separate Square-profile choice/version/time on that same lead row. It returns name and phone only to the signed connector; it never returns or accepts email.
+- `offer_finalize` idempotently appends the Square identity link only after the connector verifies the intended profile and eligible-group state.
+- `event_commit` appends verified ordinary purchases, one qualifying redemption and refund-review evidence. Refunds never restore eligibility, reissue a coupon or reverse the redemption snapshot automatically.
+
+The first successful prepare may append the four reviewed Square-profile-consent headers to the lead tab; it never shifts, deletes or rewrites existing columns. Finalize and event operations require the exact active `Identity Links` and `Journey Events` schemas. Keep the connector Worker and all customer-facing flags off until the separate sandbox, canary, monitoring, retention and rollback gates in `../docs/SQUARE-CONNECTOR-ROLLOUT.md` are complete. The production `/exec` URL, existing form contracts, Brevo behavior and owner-alert trigger must remain unchanged.
 
 ## Owner submission notifications
 

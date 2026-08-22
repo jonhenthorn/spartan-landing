@@ -1,0 +1,52 @@
+name = "spartan-square-ops"
+main = "src/index.mjs"
+compatibility_date = "2026-08-17"
+workers_dev = false
+
+# Scheduled-only service. Do not add a route or workers.dev exposure.
+
+[vars]
+OPS_ENVIRONMENT = "production"
+OPS_SCHEMA_VERSION = "4"
+OPS_MONITORING_ENABLED = "false"
+OPS_QUEUE_MONITORING_ENABLED = "false"
+OPS_APPS_SCRIPT_MONITORING_ENABLED = "false"
+OPS_ALERTS_ENABLED = "false"
+OPS_BACKUPS_ENABLED = "false"
+OPS_RESTORE_TESTS_ENABLED = "false"
+OPS_EXPECT_RECONCILIATION = "false"
+OPS_APPS_SOURCE_ENVIRONMENT = "production"
+OPS_EXPECT_APPS_LEAD_SHEET_STATE = "READY"
+OPS_EXPECT_APPS_JOURNEY_LEDGER_STATE = "READY"
+OPS_EXPECT_APPS_WORKER_JSON_STATE = "CONFIGURED"
+OPS_EXPECT_APPS_OWNER_NOTIFICATION_STATE = "READY"
+OPS_EXPECT_APPS_SQUARE_JOURNEY_STATE = "DISABLED"
+OPS_CLOUDFLARE_ACCOUNT_ID = "REPLACE_WITH_CLOUDFLARE_ACCOUNT_ID"
+OPS_CONNECTOR_QUEUE_ID = "REPLACE_WITH_CONNECTOR_QUEUE_ID"
+OPS_CONNECTOR_DLQ_ID = "REPLACE_WITH_CONNECTOR_DLQ_ID"
+OPS_QUEUE_WARNING_AGE_SECONDS = "600"
+OPS_QUEUE_CRITICAL_AGE_SECONDS = "1800"
+OPS_WARNING_AGE_SECONDS = "600"
+OPS_CRITICAL_AGE_SECONDS = "1800"
+OPS_RECONCILIATION_MAX_AGE_SECONDS = "1800"
+OPS_REJECTION_LOOKBACK_HOURS = "24"
+OPS_MONITOR_RETENTION_DAYS = "30"
+OPS_ALERT_DEDUPE_SECONDS = "3600"
+
+[[d1_databases]]
+binding = "OPS_DB"
+database_name = "spartan-square-ops"
+database_id = "REPLACE_WITH_OPS_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[[d1_databases]]
+binding = "CONNECTOR_DB"
+database_name = "spartan-square-connector"
+database_id = "REPLACE_WITH_CONNECTOR_D1_DATABASE_ID"
+
+[[r2_buckets]]
+binding = "BACKUP_BUCKET"
+bucket_name = "replace-with-ops-backup-bucket-name"
+
+[triggers]
+crons = ["*/5 * * * *", "15 3 * * *"]

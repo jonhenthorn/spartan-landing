@@ -1,0 +1,50 @@
+name = "spartan-square-ops-sandbox"
+main = "src/index.mjs"
+compatibility_date = "2026-08-17"
+workers_dev = false
+
+# Separate, non-inheriting sandbox configuration. It has no public route.
+
+[vars]
+OPS_ENVIRONMENT = "sandbox"
+OPS_SCHEMA_VERSION = "4"
+OPS_MONITORING_ENABLED = "false"
+OPS_QUEUE_MONITORING_ENABLED = "false"
+OPS_APPS_SCRIPT_MONITORING_ENABLED = "false"
+OPS_ALERTS_ENABLED = "false"
+OPS_BACKUPS_ENABLED = "false"
+OPS_RESTORE_TESTS_ENABLED = "false"
+OPS_EXPECT_RECONCILIATION = "false"
+OPS_APPS_SOURCE_ENVIRONMENT = "sandbox"
+OPS_EXPECT_APPS_LEAD_SHEET_STATE = "READY"
+OPS_EXPECT_APPS_JOURNEY_LEDGER_STATE = "READY"
+OPS_EXPECT_APPS_WORKER_JSON_STATE = "NOT_CONFIGURED"
+OPS_EXPECT_APPS_OWNER_NOTIFICATION_STATE = "DISABLED"
+OPS_EXPECT_APPS_SQUARE_JOURNEY_STATE = "DISABLED"
+OPS_CLOUDFLARE_ACCOUNT_ID = "b20efd8c50c039e95d591b9cec95a58b"
+OPS_CONNECTOR_QUEUE_ID = "abf546a264de4b01b13b73fee606d6c4"
+OPS_CONNECTOR_DLQ_ID = "94a08dbb85f745e8a4a7ac4e58b9e818"
+OPS_QUEUE_WARNING_AGE_SECONDS = "600"
+OPS_QUEUE_CRITICAL_AGE_SECONDS = "1800"
+OPS_WARNING_AGE_SECONDS = "600"
+OPS_CRITICAL_AGE_SECONDS = "1800"
+OPS_RECONCILIATION_MAX_AGE_SECONDS = "1800"
+OPS_REJECTION_LOOKBACK_HOURS = "24"
+OPS_MONITOR_RETENTION_DAYS = "30"
+OPS_ALERT_DEDUPE_SECONDS = "3600"
+
+[[d1_databases]]
+binding = "OPS_DB"
+database_name = "spartan-square-ops-sandbox"
+database_id = "2e2fc9f6-0a81-453b-9af6-8d4104965f8e"
+preview_database_id = "d127e091-f197-4f01-a128-bd3434336ea0"
+migrations_dir = "migrations"
+
+[[d1_databases]]
+binding = "CONNECTOR_DB"
+database_name = "spartan-square-connector-sandbox"
+database_id = "9531221e-cabe-4ed4-b7d4-f715798b8945"
+preview_database_id = "ffd69503-aa8d-4677-ac4f-8875a0860bb2"
+
+[triggers]
+crons = ["*/5 * * * *", "15 3 * * *"]
