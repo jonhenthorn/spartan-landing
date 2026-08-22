@@ -58,7 +58,7 @@ function d1Response(rows) {
   return JSON.stringify([{ success: true, results: rows }]);
 }
 
-async function assertD1RuntimeCompatibility(probes, offerIsolationQuery) {
+async function assertD1RuntimeCompatibility(probes, offerIsolationQuery, p02Query) {
   const { Miniflare, convertV4MiniflareOptions } = await import("miniflare");
   const { unstable_splitSqlQuery: splitSqlQuery } = await import("wrangler");
   const script = `
@@ -82,7 +82,7 @@ async function assertD1RuntimeCompatibility(probes, offerIsolationQuery) {
             }
             return Response.json({ ok: true, count: input.probes.length });
           }
-          if (input.kind === "offer-isolation" && typeof input.sql === "string") {
+          if (input.kind === "query" && typeof input.sql === "string") {
             const row = await env.DB.prepare(input.sql).first();
             return Response.json({ ok: true, row });
           }
@@ -122,7 +122,7 @@ async function assertD1RuntimeCompatibility(probes, offerIsolationQuery) {
     assert.equal(response.status, 200, body);
     assert.deepEqual(JSON.parse(body), { ok: true, count: schema.length });
 
-    response = await request({ kind: "offer-isolation", sql: offerIsolationQuery });
+    response = await request({ kind: "query", sql: offerIsolationQuery });
     body = await response.text();
     assert.equal(response.status, 200, body);
     const result = JSON.parse(body);
@@ -130,6 +130,18 @@ async function assertD1RuntimeCompatibility(probes, offerIsolationQuery) {
     assert.deepEqual(result.row, Object.fromEntries([
       ...__test.OFFER_ISOLATION_INTEGER_FIELDS.map((field) => [field, 0]),
       ...__test.OFFER_ISOLATION_TIME_FIELDS.map((field) => [field, ""]),
+    ]));
+
+    response = await request({ kind: "query", sql: p02Query });
+    body = await response.text();
+    assert.equal(response.status, 200, body);
+    const p02Result = JSON.parse(body);
+    assert.equal(p02Result.ok, true);
+    assert.deepEqual(p02Result.row, Object.fromEntries([
+      ...__test.P02_INTEGER_FIELDS.map((field) => [field, 0]),
+      ["webhook_buckets_json", "[]"],
+      ["claim_buckets_json", "[]"],
+      ["outbox_buckets_json", "[]"],
     ]));
   } finally {
     await runtime.dispose();
@@ -1619,7 +1631,7 @@ for (const [name, query] of productionD1Queries) {
   }
 }
 await assertD1RuntimeCompatibility(
-  [...d1PatternProbes.values()], __test.D1_OFFER_ISOLATION_QUERY,
+  [...d1PatternProbes.values()], __test.D1_OFFER_ISOLATION_QUERY, __test.D1_P02_QUERY,
 );
 for (const query of [__test.D1_DELIVERY_QUERY, __test.D1_BUSINESS_QUERY]) {
   assert.doesNotMatch(query, /\b(?:event_id|claim_id|submission_id|customer_id|payment_id|order_id|refund_id|payload_json|lease_token)\b/i);
@@ -1687,6 +1699,11 @@ assert.match(__test.D1_P02_QUERY,
   /o\.available_at = strftime\('%Y-%m-%dT%H:%M:%fZ', o\.updated_at, '\+30 seconds'\)/);
 assert.match(__test.D1_P02_QUERY,
   /o\.available_at = strftime\('%Y-%m-%dT%H:%M:%fZ', o\.updated_at, '\+60 seconds'\)/);
+assert.match(__test.D1_P02_QUERY, /p02_lineage AS MATERIALIZED/);
+assert.match(__test.D1_P02_QUERY,
+  /json_extract\(o\.payload_json,\s+'\$\.square_event_id', '\$\.square_event_type'/);
+assert.match(__test.D1_P02_QUERY,
+  /json_array\(l\.source_event_id, 'payment_completed', l\.source_occurred_at/);
 assert.throws(() => __test.compactIsoSecondPrefixPredicate("p.occurred_at; DROP TABLE purchases"),
   /SQL_TIMESTAMP_COLUMN_INVALID/);
 const isoSecondPrefixDb = new DatabaseSync(":memory:");
@@ -2205,6 +2222,28 @@ function exerciseP02AggregateSql(track) {
       parsed.source_apps_wait_pair_count, 1);
     const activeSourceField = track === "apps_first"
       ? "source_apps_pending_pair_count" : "source_apps_wait_pair_count";
+    const parsedAppsPayload = JSON.parse(appsPayload);
+    const appsPayloadRegressions = [
+      ["numeric value", { ...parsedAppsPayload, discount_amount_minor: 250 }],
+      ["wrong value", { ...parsedAppsPayload, square_event_type: "refund_completed" }],
+      ["object value", { ...parsedAppsPayload, refund_scope: {} }],
+      ["extra key", { ...parsedAppsPayload, unexpected_key: "unexpected" }],
+      ["missing key", Object.fromEntries(Object.entries(parsedAppsPayload)
+        .filter(([key]) => key !== "refund_scope"))],
+    ];
+    for (const [label, malformedPayload] of appsPayloadRegressions) {
+      db.prepare("UPDATE square_outbox SET payload_json=? WHERE outbox_id=?")
+        .run(JSON.stringify(malformedPayload), `out_apps_redeem_${claimId}`);
+      const rejected = db.prepare(__test.D1_P02_QUERY).get();
+      assert.equal(rejected.source_apps_ready_pair_count, 0,
+        `P02 Apps payload rejects ${label}`);
+      assert.equal(rejected[activeSourceField], 0,
+        `P02 Apps role rejects ${label}`);
+      assert.equal(JSON.stringify(rejected).includes(customerId), false,
+        `P02 aggregate remains private after ${label}`);
+    }
+    db.prepare("UPDATE square_outbox SET payload_json=? WHERE outbox_id=?")
+      .run(appsPayload, `out_apps_redeem_${claimId}`);
     assertMalformedOutboxFailsClosed(`out_apps_redeem_${claimId}`, [
       "source_apps_ready_pair_count", activeSourceField,
     ]);

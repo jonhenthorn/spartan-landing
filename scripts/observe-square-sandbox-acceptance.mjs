@@ -946,7 +946,7 @@ normalized_square_outbox AS (
     o.lease_token, o.lease_expires_at
   FROM square_outbox o
 ),
-p02_lineage AS (
+p02_lineage AS MATERIALIZED (
   SELECT
     w.event_id AS source_event_id,
     w.object_id AS source_payment_id,
@@ -1102,38 +1102,17 @@ p02_roles AS (
          AND julianday(o.created_at) <= julianday(o.updated_at)
          AND julianday(o.updated_at) <= julianday('now')
          AND o.payload_is_valid AND (SELECT COUNT(*) FROM json_each(o.payload_json)) = 16
-         AND json_type(o.payload_json, '$.square_event_id') = 'text'
-         AND json_type(o.payload_json, '$.square_event_type') = 'text'
-         AND json_type(o.payload_json, '$.occurred_at_utc') = 'text'
-         AND json_type(o.payload_json, '$.square_customer_id') = 'text'
-         AND json_type(o.payload_json, '$.square_payment_id') = 'text'
-         AND json_type(o.payload_json, '$.square_order_id') = 'text'
-         AND json_type(o.payload_json, '$.square_refund_id') = 'text'
-         AND json_type(o.payload_json, '$.square_location_id') = 'text'
-         AND json_type(o.payload_json, '$.discount_qualification') = 'text'
-         AND json_type(o.payload_json, '$.discount_catalog_object_id') = 'text'
-         AND json_type(o.payload_json, '$.discount_name') = 'text'
-         AND json_type(o.payload_json, '$.discount_amount_minor') = 'text'
-         AND json_type(o.payload_json, '$.net_amount_minor') = 'text'
-         AND json_type(o.payload_json, '$.refund_amount_minor') = 'text'
-         AND json_type(o.payload_json, '$.currency') = 'text'
-         AND json_type(o.payload_json, '$.refund_scope') = 'text'
-         AND json_extract(o.payload_json, '$.square_event_id') = l.source_event_id
-         AND json_extract(o.payload_json, '$.square_event_type') = 'payment_completed'
-         AND json_extract(o.payload_json, '$.occurred_at_utc') = l.source_occurred_at
-         AND json_extract(o.payload_json, '$.square_customer_id') = l.source_customer_id
-         AND json_extract(o.payload_json, '$.square_payment_id') = l.source_payment_id
-         AND json_extract(o.payload_json, '$.square_order_id') = l.source_order_id
-         AND json_extract(o.payload_json, '$.square_refund_id') = ''
-         AND json_extract(o.payload_json, '$.square_location_id') = 'L34NX9YA4PGF6'
-         AND json_extract(o.payload_json, '$.discount_qualification') = 'qualified'
-         AND json_extract(o.payload_json, '$.discount_catalog_object_id') = l.source_discount_catalog_id
-         AND json_extract(o.payload_json, '$.discount_name') = '50% Off First Drink — Enter 50%'
-         AND json_extract(o.payload_json, '$.discount_amount_minor') = CAST(l.source_discount_amount AS TEXT)
-         AND json_extract(o.payload_json, '$.net_amount_minor') = CAST(l.source_net_amount AS TEXT)
-         AND json_extract(o.payload_json, '$.refund_amount_minor') = ''
-         AND json_extract(o.payload_json, '$.currency') = l.source_currency
-         AND json_extract(o.payload_json, '$.refund_scope') = ''
+         AND json_extract(o.payload_json,
+           '$.square_event_id', '$.square_event_type', '$.occurred_at_utc',
+           '$.square_customer_id', '$.square_payment_id', '$.square_order_id',
+           '$.square_refund_id', '$.square_location_id', '$.discount_qualification',
+           '$.discount_catalog_object_id', '$.discount_name', '$.discount_amount_minor',
+           '$.net_amount_minor', '$.refund_amount_minor', '$.currency', '$.refund_scope') =
+           json_array(l.source_event_id, 'payment_completed', l.source_occurred_at,
+             l.source_customer_id, l.source_payment_id, l.source_order_id, '',
+             'L34NX9YA4PGF6', 'qualified', l.source_discount_catalog_id,
+             '50% Off First Drink — Enter 50%', CAST(l.source_discount_amount AS TEXT),
+             CAST(l.source_net_amount AS TEXT), '', l.source_currency, '')
     ) THEN 1 ELSE 0 END AS apps_done_ready,
     CASE WHEN EXISTS (
       SELECT 1 FROM normalized_square_outbox o
