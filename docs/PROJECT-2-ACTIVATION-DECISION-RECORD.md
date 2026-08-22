@@ -1,10 +1,12 @@
 # Project 2 — activation decision record
 
-Last reviewed: August 21, 2026
+Last reviewed: August 22, 2026
 
 Decision status: **NOT APPROVED**
 
 This default-NO-GO record covers exactly one Project 2 sandbox case and one supervised window. Every applicable [REVIEW/FILL] field must be completed, rollback must be preauthorized and the final pre-run decision must say `GO`. Any blank, conflict, expired window or ambiguity remains `NO-GO`.
+
+Each completed private copy binds one exact reviewed full commit, one case and one window. At the window start, the copy is frozen and usable only for the already bound in-window run; it cannot be edited or extended. At window expiry, or when that run ends in `PASS`, `STOPPED` or an inconclusive result, the copy is closed and cannot be reopened, copied or reused as authority. A retry or later case requires a fresh record, fresh exact-commit review, new unexpired window and new final `GO`. This blank repository template remains default `NOT APPROVED`; it is not evidence that any private window is open.
 
 Do not enter credentials, private identifiers, contact values, operational links, alert destinations or temporary local package locations here. Keep those only in the approved private acceptance ledger and credential stores.
 
@@ -21,13 +23,14 @@ Technical sources of truth:
 | --- | --- |
 | Exact sandbox worksheet case | `[REVIEW/FILL]` |
 | Window date and UTC start/end | `[REVIEW/FILL]` |
+| Exact reviewed full commit evidence | `[REVIEW/FILL — reference only; no value]` |
 | Technical worksheet section independently checked | `[REVIEW/FILL]` |
 | Separate legacy-to-current all-off migration and monitored closure complete, if required | `[REVIEW/FILL]` |
 | All-off baseline and exact rollback target recorded privately | `[REVIEW/FILL]` |
 | One labeled synthetic canary/fixture recorded privately | `[REVIEW/FILL]` |
 | No other case or customer traffic permitted during the window | `[REVIEW/FILL]` |
 
-This record cannot authorize the one-time legacy-to-current all-off migration. That migration requires a completed private copy of the separate default-NO-GO [baseline migration decision and closure record](PROJECT-2-BASELINE-MIGRATION-DECISION-RECORD.md). Even after migration success, this case record remains `NOT APPROVED` until every applicable field and final pre-run signature is completed for the one case/window. This record also excludes production, real customers, real money, POS-setting changes, broader activation and any case other than the one filled above.
+This record cannot authorize the one-time legacy-to-current all-off migration. That migration requires a completed private copy of the separate default-NO-GO [baseline migration decision and closure record](PROJECT-2-BASELINE-MIGRATION-DECISION-RECORD.md). Even after migration success, this case record remains `NOT APPROVED` until every applicable field and final pre-run signature is completed for the one case/window and exact reviewed full commit. Any source or dependency change after that review invalidates the decision and returns the case to `NO-GO`. This record also excludes production, real customers, real money, POS-setting changes, broader activation and any case other than the one filled above.
 
 ## Decision authority
 
@@ -65,7 +68,7 @@ Record each decision separately. `NOT APPLICABLE` requires a reason in the priva
 
 Temporary provider authorization must follow the linked least-scope boundary, remain separate from the standing connector and be fully revoked after any result.
 
-If the selected case is F-02, the coordinator must privately bind the approved candidate, synthetic submission ID and coupon to this one window. It may send only consent `no`, must require the candidate's remotely verified canary before transport and must accept only one exact HTTP `400` / `CONSENT_REQUIRED` response. A missing completion handshake, second callback, unexpected response or sent-but-unconfirmed request is not retry authority: it requires immediate rollback. The F-02 request path performs no Turnstile, provider, Apps or Square call and no Queue or D1 mutation. The coordinator separately performs only the aggregate read-only Queue and D1 evidence checks approved in this record; those checks are evidence collection, not request-path business activity, and they do not authorize message inspection or a write. Shared evidence may retain only fixed result/checkpoint names, HTTP `400`, request count `1`, bounded time and aggregate zero-delta/Queue evidence. It must not retain the canary, coupon, URL, request/response body, header, cookie, credential or version ID. This sandbox-only preflight does not change the common production request order.
+If the selected case is F-02, the coordinator must privately bind the approved candidate, synthetic submission ID and coupon to this one window. It may send only consent `no`, must require the candidate's remotely verified canary before transport and must accept only one exact HTTP `400` / `CONSENT_REQUIRED` response. A missing completion handshake, second callback, unexpected response or sent-but-unconfirmed request is not retry authority: it requires immediate rollback. The F-02 request path performs no Turnstile, provider, Apps or Square call and no Queue or D1 mutation. The coordinator separately performs only the aggregate read-only Queue and D1 evidence checks approved in this record; those checks are evidence collection, not request-path business activity, and they do not authorize message inspection or a write. Shared evidence may retain only fixed result/checkpoint names, bounded time, aggregate zero-delta/Queue evidence and either HTTP `400` / request count `1` with the fixed completion handshake, or HTTP `000` / request count `0` for a fixed pre-request stop. For the zero-request path, every candidate-traffic and request checkpoint that was not reached must be recorded exactly as `NOT REACHED`; it must never be represented as a request attempt, success or retry authority. The record must not retain the canary, coupon, URL, request/response body, header, cookie, credential or version ID. This sandbox-only preflight does not change the common production request order.
 
 ## Queue credentials
 
@@ -139,15 +142,15 @@ Raw coordinator, operator and Wrangler transcripts are private evidence. Candida
 
 ### F-02 bounded shared-evidence chronology
 
-Complete this table only for F-02. Each row records a fixed code or fixed category plus its UTC time; it never records a canary, coupon, URL, version, credential, request/response body, header, cookie or private locator.
+Complete this table only for F-02. Each row records a fixed code or fixed category plus its UTC time; it never records a canary, coupon, URL, version, credential, request/response body, header, cookie or private locator. If the coordinator stops before candidate traffic or before its fetch-attempt marker, preserve HTTP `000`, requests `0` and the fixed terminal stop, and mark each later checkpoint `NOT REACHED`. Do not invent a handshake or request.
 
 | Fixed shared checkpoint or closure category | Fixed/count/time-only shared record |
 | --- | --- |
 | Coordinator start | `[REVIEW/FILL]` |
-| `READY_OFFER_ISOLATION_DEPLOY_QUEUES_REPORTED_EMPTY` | `[REVIEW/FILL]` |
-| Fixed candidate-traffic activation result, without candidate UUID | `[REVIEW/FILL]` |
-| `READY_F02_ONE_REQUEST_CANDIDATE_ACTIVE` | `[REVIEW/FILL]` |
-| `OBSERVED_F02_REQUEST_COMPLETION_HANDSHAKE`, HTTP `400`, requests `1` | `[REVIEW/FILL]` |
+| `READY_OFFER_ISOLATION_DEPLOY_QUEUES_REPORTED_EMPTY`, or `NOT REACHED` after a prior fixed stop | `[REVIEW/FILL]` |
+| Fixed candidate-traffic activation result without candidate UUID, or `NOT REACHED` | `[REVIEW/FILL]` |
+| `READY_F02_ONE_REQUEST_CANDIDATE_ACTIVE`, or `NOT REACHED` | `[REVIEW/FILL]` |
+| `OBSERVED_F02_REQUEST_COMPLETION_HANDSHAKE`, HTTP `400`, requests `1`; or HTTP `000`, requests `0`, `NOT REACHED` | `[REVIEW/FILL]` |
 | Terminal fixed pass, stop or inconclusive result | `[REVIEW/FILL]` |
 | Exact rollback and all-off verification | `[REVIEW/FILL]` |
 | Cleanup, credential revocation and three-check unusability proof | `[REVIEW/FILL]` |
@@ -161,7 +164,7 @@ Complete this table only for F-02. Each row records a fixed code or fixed catego
 | Read-only and mutating provider authorizations | `[REVIEW/FILL]` | Full revocation and unusability proof confirmed: `[REVIEW/FILL]` |
 | Queue credentials | `[REVIEW/FILL]` | Revocation confirmed: `[REVIEW/FILL]` |
 | Temporary Apps and fault-window material | `[REVIEW/FILL]` | Disabled/removed as required: `[REVIEW/FILL]` |
-| F-02 fixed completion handshake and aggregate zero-delta record, if applicable | `[REVIEW/FILL]` | Exact-one request and bounded shared evidence confirmed: `[REVIEW/FILL]` |
+| F-02 conditional completion handshake and aggregate evidence | `[REVIEW/FILL]` | Exact-one request confirmed only if sent; otherwise HTTP `000`, requests `0` and `NOT REACHED` checkpoints confirmed: `[REVIEW/FILL]` |
 | Raw coordinator/operator/Wrangler transcripts and candidate/rollback outputs | `[REVIEW/FILL]` | Private custody and sanitized shared extract confirmed: `[REVIEW/FILL]` |
 | Shared evidence record | `[REVIEW/FILL]` | Contains only allowed fixed codes, counts and times: `[REVIEW/FILL]` |
 
@@ -180,7 +183,7 @@ Complete this table only for F-02. Each row records a fixed code or fixed catego
 | Closure item | Recorded result |
 | --- | --- |
 | Case result: pass, stop or inconclusive; UTC end time | `[REVIEW/FILL]` |
-| If F-02: one request, completion handshake and no-retry-on-ambiguity closure | `[REVIEW/FILL]` |
+| If F-02: actual request count `0` or `1`; completion handshake only if sent; `NOT REACHED` checkpoints and no-retry closure | `[REVIEW/FILL]` |
 | If F-02: fixed/count/time-only causal checkpoint chronology complete | `[REVIEW/FILL]` |
 | Exact rollback and all-off verification complete | `[REVIEW/FILL]` |
 | Temporary cleanup and credential revocation complete | `[REVIEW/FILL]` |

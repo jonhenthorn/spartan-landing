@@ -11,6 +11,8 @@ const ROLLOUT_PATH = "docs/SQUARE-CONNECTOR-ROLLOUT.md";
 const FAULT_HOOKS_PATH = "docs/SQUARE-SANDBOX-FAULT-HOOKS.md";
 const ACCEPTANCE_PATH = "docs/SQUARE-SANDBOX-NEGATIVE-RECOVERY-ACCEPTANCE.md";
 const OWNER_GUIDE_PATH = "docs/PROJECT-2-OWNER-GUIDE.md";
+const ROOT_README_PATH = "README.md";
+const SQUARE_WORKER_README_PATH = "square-worker/README.md";
 const STATUS_LINE = "Decision status: **NOT APPROVED**";
 const PLACEHOLDER_PATTERN = /\[REVIEW\/FILL(?:[^\]]*)\]/;
 const REQUIRED_SECTIONS = Object.freeze([
@@ -47,6 +49,9 @@ const REQUIRED_SECTION_TERMS = Object.freeze({
     /aggregate read-only Queue and D1 evidence checks/i,
     /F-02 request path performs no Turnstile, provider, Apps or Square call/i,
     /no Queue or D1 mutation/i, /evidence collection, not request-path business activity/i,
+    /HTTP `000` \/ request count `0` for a fixed pre-request stop/i,
+    /must be recorded exactly as `NOT REACHED`/i,
+    /must never be represented as a request attempt, success or retry authority/i,
   ],
   "Queue credentials": [
     /Queues Read/, /Queues Write/, /DLQ inspect\/redrive/, /Revocation owner/i,
@@ -70,7 +75,9 @@ const REQUIRED_SECTION_TERMS = Object.freeze({
   ],
   "Evidence and signoff": [
     /Custody and closure record/, /revocation/i, /Final pre-run signatures/, /Final post-run signatures/,
-    /fixed completion handshake/i, /one request, completion handshake and no-retry-on-ambiguity closure/i,
+    /conditional completion handshake/i, /completion handshake only if sent/i,
+    /actual request count `0` or `1`/i, /HTTP `000`, requests `0` and `NOT REACHED` checkpoints/i,
+    /Do not invent a handshake or request/i,
     /Raw coordinator, operator and Wrangler transcripts are private evidence/,
     /Candidate preparation, deployment and rollback output/, /sanitized extract/,
     /bounded UTC times/, /non-identifying reference labels/,
@@ -216,8 +223,12 @@ const REQUIRED_ROLLOUT_CONTRACTS = Object.freeze([
 const REQUIRED_F02_GOVERNANCE_CONTRACTS = Object.freeze({
   faultHooks: Object.freeze([
     /previously reviewed default-off controller build is deployed only as the current all-off sandbox baseline/,
-    /newer F-02 hardening in this draft is not deployed/,
-    /no F-02 or other live-case candidate, profile, canary or temporary control is active, armed or approved/i,
+    /newer F-02 and P-02 observer repairs in this draft are not deployed/,
+    /F02_ZERO_REQUEST_SAFE_STOP_CLOSURE_CONFIRMED/,
+    /HTTP `000` and requests `0`/,
+    /before candidate traffic or any request/,
+    /no unexpired F-02 or other case authority exists/i,
+    /expired F-02 authority cannot be reused/i,
     /complete coordinator\/operator shell transcript private/,
     /shared F-02 record may extract only the coordinator's fixed checkpoints and terminal result/,
     /F-02 request path performs no Turnstile, provider, Apps or Square call and no Queue or D1 mutation/,
@@ -226,8 +237,15 @@ const REQUIRED_F02_GOVERNANCE_CONTRACTS = Object.freeze({
   acceptance: Object.freeze([
     /F-02 coordinator instead pins the reviewed public sandbox origin in code, never prints it/,
     /one-time baseline migration deployed the then-reviewed default-off controller build only as the current all-off sandbox baseline/,
-    /newer F-02 hardening in this draft is not deployed/,
+    /newer F-02 and P-02 observer repairs in this draft are reviewed code only and are not deployed/,
     /No live-case candidate, control profile, canary or temporary control is active or armed/,
+    /F02_ZERO_REQUEST_SAFE_STOP_CLOSURE_CONFIRMED/,
+    /HTTP `000`/,
+    /requests `0`/,
+    /historical result remains `STOPPED` and unaccepted/,
+    /expired authority cannot be reused/,
+    /P-02 aggregate observer was also repaired to avoid the local D1 expression-depth ceiling/,
+    /Neither repair is deployed, neither is live-case evidence and neither grants retry, credential, traffic, request, provider, Apps, Queue, D1 or production authority/,
     /F-02 request itself performs no Turnstile, provider, Apps or Square call and no Queue or D1 mutation/,
     /coordinator separately performs the approved aggregate read-only Queue and D1 checks/,
     /raw coordinator\/operator\/Wrangler transcript and candidate\/rollback outputs private/,
@@ -237,7 +255,26 @@ const REQUIRED_F02_GOVERNANCE_CONTRACTS = Object.freeze({
     /coordinator separately performs only the approved aggregate read-only Queue and D1 evidence checks/,
     /F02_ZERO_REQUEST_SAFE_STOP_CLOSURE_CONFIRMED/,
     /result `STOPPED`, requests `0`/,
+    /all-off baseline remained the sole active baseline; no traffic rollback was required/i,
     /repair is reviewed code only: it is not deployed/,
+    /P-02 observer expression-depth limit/,
+    /P-02 repair is also reviewed code only: it is not deployed/,
+    /it is not live P-02 evidence and it grants no case, credential, traffic, request, provider, Apps, Queue, D1 or production authority/,
+  ]),
+  rootReadme: Object.freeze([
+    /previously reviewed controller build is deployed only as the current all-off sandbox baseline/,
+    /no case candidate, profile, canary or temporary control is active or armed/,
+    /newer observer repairs are not deployed/,
+  ]),
+  squareWorkerReadme: Object.freeze([
+    /exact current version and binding references remain in private evidence rather than this shared handoff/,
+    /first F-02 attempt safe-stopped during its initial aggregate read-only D1 capture/,
+    /HTTP `000` and requests `0`/,
+    /no case has been accepted/,
+    /expired authority cannot be reused/,
+    /previously reviewed controller build is deployed only as the current all-off sandbox baseline/,
+    /No case profile, candidate, canary or temporary control is active or armed/,
+    /newer F-02\/P-02 observer repairs are reviewed offline code only and have not been deployed/,
   ]),
 });
 
@@ -278,6 +315,15 @@ function validateDefaultNoGo(source, errors) {
   for (const required of [
     /This default-NO-GO record covers exactly one Project 2 sandbox case and one supervised window/,
     /Any blank, conflict, expired window or ambiguity remains `NO-GO`/,
+    /Each completed private copy binds one exact reviewed full commit, one case and one window/,
+    /At the window start, the copy is frozen and usable only for the already bound in-window run/,
+    /it cannot be edited or extended/,
+    /At window expiry, or when that run ends in `PASS`, `STOPPED` or an inconclusive result/,
+    /the copy is closed and cannot be reopened, copied or reused as authority/,
+    /A retry or later case requires a fresh record, fresh exact-commit review, new unexpired window and new final `GO`/,
+    /blank repository template remains default `NOT APPROVED`/,
+    /Exact reviewed full commit evidence \| `\[REVIEW\/FILL — reference only; no value\]`/,
+    /Any source or dependency change after that review invalidates the decision and returns the case to `NO-GO`/,
     /does not authorize production, a second case, real-customer use, alert delivery, backups/,
   ]) {
     if (!required.test(source)) addError(errors, "DEFAULT_NO_GO_CONTRACT_INCOMPLETE");
@@ -603,12 +649,16 @@ function validateRolloutContract(source) {
   return errors;
 }
 
-function validateF02GovernanceDocs(faultHooks, acceptance, ownerGuide) {
+function validateF02GovernanceDocs(
+  faultHooks, acceptance, ownerGuide, rootReadme, squareWorkerReadme,
+) {
   const errors = [];
   const docs = [
     { code: "FAULT_HOOKS", contracts: "faultHooks", source: faultHooks },
     { code: "ACCEPTANCE", contracts: "acceptance", source: acceptance },
     { code: "OWNER_GUIDE", contracts: "ownerGuide", source: ownerGuide },
+    { code: "ROOT_README", contracts: "rootReadme", source: rootReadme },
+    { code: "SQUARE_WORKER_README", contracts: "squareWorkerReadme", source: squareWorkerReadme },
   ];
   for (const { code, source } of docs) {
     if (typeof source !== "string" || source.length < 1 || source.length > 512 * 1024 ||
@@ -636,6 +686,38 @@ function validateF02GovernanceDocs(faultHooks, acceptance, ownerGuide) {
   if (/stop before Turnstile, Square, Apps, Queue or D1 activity/.test(ownerGuide)) {
     addError(errors, "F02_OWNER_GUIDE_READ_ONLY_BOUNDARY_CONTRADICTION_PRESENT");
   }
+  if (/no live case in this worksheet has been run or accepted/i.test(acceptance) ||
+      /No live case has been run\./.test(squareWorkerReadme) ||
+      /These changes are local-only and have not been deployed or armed\./.test(squareWorkerReadme) ||
+      /It is not deployed or armed\./.test(rootReadme)) {
+    addError(errors, "F02_HISTORICAL_ATTEMPT_OR_BASELINE_STATUS_STALE");
+  }
+  const governanceLines = docs.flatMap(({ source }) => source.split("\n"));
+  for (const line of governanceLines) {
+    const negated = /\b(?:no|not|never|neither|cannot|did not|unaccepted|inactive|unarmed)\b/i.test(line);
+    if (!negated && /\bF-?02\b[^\n.]{0,160}\b(?:passed|(?:result|closure)\s*(?:is|=|:)\s*`?PASS\b)/i.test(line)) {
+      addError(errors, "F02_HISTORICAL_PASS_CONTRADICTION_PRESENT");
+    }
+    if (!negated && /\b(?:prior|expired|historical)?\s*F-?02\s+(?:authorization|authority|window|record|retry)\b[^\n.]{0,120}\b(?:may|can|is|remains)\s+(?:be\s+)?(?:reused|reopened|extended|approved|authorized)\b/i.test(line)) {
+      addError(errors, "F02_RETRY_AUTHORITY_CONTRADICTION_PRESENT");
+    }
+    if (!negated && /\b(?:F-?02|P-?02)\b[^\n.]{0,160}\b(?:repair|observer|hardening)\b[^\n.]{0,120}\b(?:is|are|was|were|now|has been|have been)\s+(?:deployed|live(?:-case)? evidence)\b/i.test(line)) {
+      addError(errors, "F02_P02_REPAIR_LIVE_AUTHORITY_CONTRADICTION_PRESENT");
+    }
+    if (!negated && /\b(?:current(?:ly)?|F-?02)\b[^\n.]{0,120}\b(?:candidate|profile|canary|temporary control)\b[^\n.]{0,80}\b(?:is|are|remains?)\s+(?:currently\s+)?(?:active|armed)\b/i.test(line)) {
+      addError(errors, "F02_CURRENT_CASE_CONTROL_CONTRADICTION_PRESENT");
+    }
+  }
+  const governanceStatus = docs.map(({ source }) => source).join("\n");
+  const uuid = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+  const labeledPrivateUuid = new RegExp(
+    `\\b(?:candidate(?:\\s+(?:uuid|id|version))?|current[- ](?:all[- ]off[- ]?)?target(?:\\s+(?:uuid|id|version))?|canary(?:\\s+(?:uuid|id))?)\\s*(?:=|:|is)\\s*\`?${uuid}\\b`,
+    "i",
+  );
+  if (labeledPrivateUuid.test(governanceStatus) ||
+      /\bprivate case URL\s*(?:=|:)\s*https?:\/\//i.test(governanceStatus)) {
+    addError(errors, "F02_PRIVATE_CURRENT_MATERIAL_PRESENT");
+  }
   return errors;
 }
 
@@ -653,6 +735,22 @@ function assertUnsafeMutationsFail(source, knownDocTargets) {
     ["STATUS_NOT_DEFAULT_NOT_APPROVED", source.replace(STATUS_LINE, "Decision status: **APPROVED**")],
     ["COMPLETED_APPROVAL_PRESENT", `${source}\nOwner approval: YES\n`],
     ["COMPLETED_APPROVAL_PRESENT", `${source}\n- [x] Final approval\n`],
+    ["DEFAULT_NO_GO_CONTRACT_INCOMPLETE", source.replace(
+      "At the window start, the copy is frozen and usable only for the already bound in-window run",
+      "At the window start, the copy may be changed for the run",
+    )],
+    ["DEFAULT_NO_GO_CONTRACT_INCOMPLETE", source.replace(
+      "it cannot be edited or extended",
+      "it may be edited or extended",
+    )],
+    ["DEFAULT_NO_GO_CONTRACT_INCOMPLETE", source.replace(
+      "the copy is closed and cannot be reopened, copied or reused as authority",
+      "the copy may be reopened for later authority",
+    )],
+    ["DEFAULT_NO_GO_CONTRACT_INCOMPLETE", source.replace(
+      "| Exact reviewed full commit evidence |",
+      "| Reviewed source evidence |",
+    )],
     ["COMPLETED_OR_MALFORMED_TABLE_FIELD", source.replace(
       "| Exact sandbox worksheet case | `[REVIEW/FILL]` |",
       "| Exact sandbox worksheet case | `YES` |",
@@ -662,6 +760,10 @@ function assertUnsafeMutationsFail(source, knownDocTargets) {
     ["SECTION_CONTRACT_TEMPORARY_SANDBOX_AUTHORIZATION", source.replace(
       "The F-02 request path performs no Turnstile, provider, Apps or Square call and no Queue or D1 mutation.",
       "The F-02 request path is reviewed.",
+    )],
+    ["SECTION_CONTRACT_TEMPORARY_SANDBOX_AUTHORIZATION", source.replace(
+      "HTTP `000` / request count `0` for a fixed pre-request stop",
+      "a pre-request result",
     )],
     ["F02_ACTIVATION_READ_ONLY_AUTHORIZATION_CONTRADICTION_PRESENT",
       `${source}\nF-02 does not authorize Square, Apps, Queue or D1 activity.\n`],
@@ -684,6 +786,10 @@ function assertUnsafeMutationsFail(source, knownDocTargets) {
     ["SECTION_CONTRACT_EVIDENCE_AND_SIGNOFF", source.replace(
       "`OBSERVED_F02_REQUEST_COMPLETION_HANDSHAKE`, HTTP `400`, requests `1`",
       "Request completion reviewed",
+    )],
+    ["SECTION_CONTRACT_EVIDENCE_AND_SIGNOFF", source.replace(
+      "Exact-one request confirmed only if sent; otherwise HTTP `000`, requests `0` and `NOT REACHED` checkpoints confirmed",
+      "Request outcome reviewed",
     )],
     ["EMAIL_MATERIAL_PRESENT", `${source}\nApproval email: owner@example.com\n`],
     ["PRIVATE_URL_MATERIAL_PRESENT", `${source}\nPrivate URL: https://private.example/decision\n`],
@@ -820,13 +926,24 @@ function assertUnsafeRolloutMutationsFail(source) {
   }
 }
 
-function assertUnsafeF02GovernanceMutationsFail(faultHooks, acceptance, ownerGuide) {
+function assertUnsafeF02GovernanceMutationsFail(
+  faultHooks, acceptance, ownerGuide, rootReadme, squareWorkerReadme,
+) {
   const cases = [
     ["F02_FAULT_HOOKS_GOVERNANCE_CONTRACT_MISSING", {
       faultHooks: faultHooks.replace(
         "previously reviewed default-off controller build is deployed only as the current all-off sandbox baseline",
         "controller code is locally ready",
       ), acceptance, ownerGuide,
+    }],
+    ["F02_FAULT_HOOKS_GOVERNANCE_CONTRACT_MISSING", {
+      faultHooks: faultHooks.replace("F02_ZERO_REQUEST_SAFE_STOP_CLOSURE_CONFIRMED", "F02_REVIEWED"),
+      acceptance, ownerGuide,
+    }],
+    ["F02_FAULT_HOOKS_GOVERNANCE_CONTRACT_MISSING", {
+      faultHooks: faultHooks.replace("The expired F-02 authority cannot be reused.",
+        "The earlier authority is retained."),
+      acceptance, ownerGuide,
     }],
     ["F02_DEPLOYED_BASELINE_STATUS_CONTRADICTION_PRESENT", {
       faultHooks,
@@ -855,6 +972,22 @@ function assertUnsafeF02GovernanceMutationsFail(faultHooks, acceptance, ownerGui
       ),
       ownerGuide,
     }],
+    ["F02_ACCEPTANCE_GOVERNANCE_CONTRACT_MISSING", {
+      faultHooks,
+      acceptance: acceptance.replace(
+        "P-02 aggregate observer was also repaired to avoid the local D1 expression-depth ceiling",
+        "P-02 observer was reviewed",
+      ),
+      ownerGuide,
+    }],
+    ["F02_ACCEPTANCE_GOVERNANCE_CONTRACT_MISSING", {
+      faultHooks,
+      acceptance: acceptance.replace(
+        "historical result remains `STOPPED` and unaccepted",
+        "historical result remains rejected",
+      ),
+      ownerGuide,
+    }],
     ["F02_OWNER_GUIDE_GOVERNANCE_CONTRACT_MISSING", {
       faultHooks, acceptance,
       ownerGuide: ownerGuide.replace(
@@ -862,12 +995,82 @@ function assertUnsafeF02GovernanceMutationsFail(faultHooks, acceptance, ownerGui
         "coordinator performs the case checks",
       ),
     }],
+    ["F02_OWNER_GUIDE_GOVERNANCE_CONTRACT_MISSING", {
+      faultHooks, acceptance,
+      ownerGuide: ownerGuide.replace(
+        "P-02 repair is also reviewed code only: it is not deployed",
+        "P-02 repair is ready",
+      ),
+    }],
+    ["F02_OWNER_GUIDE_GOVERNANCE_CONTRACT_MISSING", {
+      faultHooks, acceptance,
+      ownerGuide: ownerGuide.replace(
+        "The all-off baseline remained the sole active baseline; no traffic rollback was required.",
+        "The all-off baseline was restored.",
+      ),
+    }],
+    ["F02_HISTORICAL_PASS_CONTRADICTION_PRESENT", {
+      faultHooks, acceptance: `${acceptance}\nF-02 passed.\n`, ownerGuide,
+    }],
+    ["F02_RETRY_AUTHORITY_CONTRADICTION_PRESENT", {
+      faultHooks, acceptance: `${acceptance}\nPrior F-02 authorization may be reused.\n`, ownerGuide,
+    }],
+    ["F02_P02_REPAIR_LIVE_AUTHORITY_CONTRADICTION_PRESENT", {
+      faultHooks, acceptance, ownerGuide: `${ownerGuide}\nF-02 repair is deployed.\n`,
+    }],
+    ["F02_P02_REPAIR_LIVE_AUTHORITY_CONTRADICTION_PRESENT", {
+      faultHooks, acceptance, ownerGuide: `${ownerGuide}\nP-02 observer is live evidence.\n`,
+    }],
+    ...["candidate", "profile", "canary", "temporary control"].map((subject) => [
+      "F02_CURRENT_CASE_CONTROL_CONTRADICTION_PRESENT",
+      { faultHooks: `${faultHooks}\nCurrent F-02 ${subject} is active and armed.\n`, acceptance, ownerGuide },
+    ]),
+    ...[
+      "Candidate UUID: 123e4567-e89b-42d3-a456-426614174000",
+      "Current target UUID: 223e4567-e89b-42d3-a456-426614174000",
+      "Canary UUID: 323e4567-e89b-42d3-a456-426614174000",
+    ].map((injected) => [
+      "F02_PRIVATE_CURRENT_MATERIAL_PRESENT",
+      { faultHooks, acceptance, ownerGuide: `${ownerGuide}\n${injected}\n` },
+    ]),
+    ["F02_PRIVATE_CURRENT_MATERIAL_PRESENT", {
+      faultHooks, acceptance: `${acceptance}\nPrivate case URL: https://private.example/case\n`, ownerGuide,
+    }],
+    ["F02_PRIVATE_CURRENT_MATERIAL_PRESENT", {
+      faultHooks: `${faultHooks}\nPrivate case URL: https://private.example/fault-window\n`,
+      acceptance, ownerGuide,
+    }],
+    ["F02_PRIVATE_CURRENT_MATERIAL_PRESENT", {
+      faultHooks, acceptance, ownerGuide,
+      rootReadme: `${rootReadme}\nCandidate UUID: 423e4567-e89b-42d3-a456-426614174000\n`,
+      squareWorkerReadme,
+    }],
+    ["F02_ROOT_README_GOVERNANCE_CONTRACT_MISSING", {
+      faultHooks, acceptance, ownerGuide,
+      rootReadme: rootReadme.replace(
+        "previously reviewed controller build is deployed only as the current all-off sandbox baseline",
+        "controller is ready",
+      ),
+      squareWorkerReadme,
+    }],
+    ["F02_SQUARE_WORKER_README_GOVERNANCE_CONTRACT_MISSING", {
+      faultHooks, acceptance, ownerGuide, rootReadme,
+      squareWorkerReadme: squareWorkerReadme.replace(
+        "The first F-02 attempt safe-stopped during its initial aggregate read-only D1 capture",
+        "F-02 is ready",
+      ),
+    }],
   ];
   for (const [expected, candidate] of cases) {
-    assert.notDeepEqual(candidate, { faultHooks, acceptance, ownerGuide },
+    const completeCandidate = {
+      faultHooks, acceptance, ownerGuide, rootReadme, squareWorkerReadme, ...candidate,
+    };
+    assert.notDeepEqual(completeCandidate,
+      { faultHooks, acceptance, ownerGuide, rootReadme, squareWorkerReadme },
       `unsafe F-02 governance self-test did not mutate source: ${expected}`);
     assert.ok(validateF02GovernanceDocs(
-      candidate.faultHooks, candidate.acceptance, candidate.ownerGuide,
+      completeCandidate.faultHooks, completeCandidate.acceptance, completeCandidate.ownerGuide,
+      completeCandidate.rootReadme, completeCandidate.squareWorkerReadme,
     ).includes(expected), `unsafe F-02 governance self-test escaped validation: ${expected}`);
   }
 }
@@ -883,10 +1086,13 @@ let rolloutSource;
 let faultHooksSource;
 let acceptanceSource;
 let ownerGuideSource;
+let rootReadmeSource;
+let squareWorkerReadmeSource;
 let docEntries;
 try {
   [
     source, migrationSource, rolloutSource, faultHooksSource, acceptanceSource, ownerGuideSource,
+    rootReadmeSource, squareWorkerReadmeSource,
     docEntries,
   ] = await Promise.all([
     readFile(path.resolve(ROOT, RECORD_PATH), "utf8"),
@@ -895,6 +1101,8 @@ try {
     readFile(path.resolve(ROOT, FAULT_HOOKS_PATH), "utf8"),
     readFile(path.resolve(ROOT, ACCEPTANCE_PATH), "utf8"),
     readFile(path.resolve(ROOT, OWNER_GUIDE_PATH), "utf8"),
+    readFile(path.resolve(ROOT, ROOT_README_PATH), "utf8"),
+    readFile(path.resolve(ROOT, SQUARE_WORKER_README_PATH), "utf8"),
     readdir(path.resolve(ROOT, "docs"), { withFileTypes: true }),
   ]);
 } catch {
@@ -905,14 +1113,18 @@ const errors = [
   ...validateDecisionRecord(source, knownDocTargets),
   ...validateMigrationRecord(migrationSource, knownDocTargets),
   ...validateRolloutContract(rolloutSource),
-  ...validateF02GovernanceDocs(faultHooksSource, acceptanceSource, ownerGuideSource),
+  ...validateF02GovernanceDocs(
+    faultHooksSource, acceptanceSource, ownerGuideSource, rootReadmeSource, squareWorkerReadmeSource,
+  ),
 ];
 if (errors.length > 0) fail(errors);
 try {
   assertUnsafeMutationsFail(source, knownDocTargets);
   assertUnsafeMigrationMutationsFail(migrationSource, knownDocTargets);
   assertUnsafeRolloutMutationsFail(rolloutSource);
-  assertUnsafeF02GovernanceMutationsFail(faultHooksSource, acceptanceSource, ownerGuideSource);
+  assertUnsafeF02GovernanceMutationsFail(
+    faultHooksSource, acceptanceSource, ownerGuideSource, rootReadmeSource, squareWorkerReadmeSource,
+  );
 } catch (error) {
   const detail = String(error?.message || "UNKNOWN").toUpperCase().replaceAll(/[^A-Z0-9]+/g, "_").slice(0, 120);
   fail([`UNSAFE_MUTATION_SELF_TEST_FAILED_${detail}`]);
@@ -923,10 +1135,11 @@ process.stdout.write("Project 2 decision validation passed: the one-case and one
   "separate final-deploy, rollback, " +
   "standalone exact-legacy recovery, closed-template non-reuse, readiness, monitored closure, " +
   "reference-only Queue credential custody, F-02 causal timestamps, private raw evidence, sanitized shared evidence " +
-  "and signature fields; " +
+  "and signature fields, including conditional HTTP 000/request-zero NOT REACHED closure; " +
   "no private material, safe relative links, production OAuth-only/no-personal-token boundary and " +
-  "proposed-but-unapproved R2 storage; deployed all-off controller status and the F-02 request/read-only boundary " +
-  "are consistent across the owner guide and technical procedures.\n");
+  "proposed-but-unapproved R2 storage; historical zero-request STOP, expired-record non-reuse, " +
+  "deployed all-off controller status, private current identifiers and offline-only P-02 repair authority " +
+  "are consistent across the owner guide, README handoffs and technical procedures.\n");
 
 export const __test = Object.freeze({
   ACCEPTANCE_PATH,
@@ -935,10 +1148,12 @@ export const __test = Object.freeze({
   MIGRATION_RECOVERY_COMMAND_BLOCK,
   OWNER_GUIDE_PATH,
   RECORD_PATH,
+  ROOT_README_PATH,
   REQUIRED_ROLLOUT_CONTRACTS,
   REQUIRED_LINKS,
   REQUIRED_SECTIONS,
   ROLLOUT_PATH,
+  SQUARE_WORKER_README_PATH,
   STATUS_LINE,
   validateDecisionRecord,
   validateF02GovernanceDocs,
