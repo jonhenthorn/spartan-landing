@@ -58,7 +58,7 @@ function d1Response(rows) {
   return JSON.stringify([{ success: true, results: rows }]);
 }
 
-async function assertD1RuntimeCompatibility(probes, offerIsolationQuery, p02Query) {
+async function assertD1RuntimeCompatibility(probes, productionQueries, offerIsolationQuery, p02Query) {
   const { Miniflare, convertV4MiniflareOptions } = await import("miniflare");
   const { unstable_splitSqlQuery: splitSqlQuery } = await import("wrangler");
   const script = `
@@ -69,6 +69,16 @@ async function assertD1RuntimeCompatibility(probes, offerIsolationQuery, p02Quer
           if (input.kind === "schema" && Array.isArray(input.statements)) {
             await env.DB.batch(input.statements.map((sql) => env.DB.prepare(sql)));
             return Response.json({ ok: true, count: input.statements.length });
+          }
+          if (input.kind === "batch" && Array.isArray(input.statements)) {
+            const statements = input.statements.map((statement) => {
+              if (!statement || typeof statement.sql !== "string" || !Array.isArray(statement.values)) {
+                throw new Error("invalid statement");
+              }
+              return env.DB.prepare(statement.sql).bind(...statement.values);
+            });
+            await env.DB.batch(statements);
+            return Response.json({ ok: true, count: statements.length });
           }
           if (input.kind === "patterns" && Array.isArray(input.probes)) {
             for (const probe of input.probes) {
@@ -85,6 +95,10 @@ async function assertD1RuntimeCompatibility(probes, offerIsolationQuery, p02Quer
           if (input.kind === "query" && typeof input.sql === "string") {
             const row = await env.DB.prepare(input.sql).first();
             return Response.json({ ok: true, row });
+          }
+          if (input.kind === "rows" && typeof input.sql === "string") {
+            const result = await env.DB.prepare(input.sql).all();
+            return Response.json({ ok: true, rows: result.results });
           }
           throw new Error("invalid input");
         } catch (error) {
@@ -122,6 +136,22 @@ async function assertD1RuntimeCompatibility(probes, offerIsolationQuery, p02Quer
     assert.equal(response.status, 200, body);
     assert.deepEqual(JSON.parse(body), { ok: true, count: schema.length });
 
+    for (const [name, sql] of productionQueries) {
+      response = await request({ kind: "rows", sql });
+      body = await response.text();
+      assert.equal(response.status, 200, `${name}: ${body}`);
+      const inventoryResult = JSON.parse(body);
+      assert.equal(inventoryResult.ok, true, name);
+      const expectedRowCount = name === "D1_DELIVERY_QUERY" ? 0 :
+        name === "D1_BUSINESS_QUERY" ? 3 : 1;
+      assert.equal(inventoryResult.rows.length, expectedRowCount,
+        `${name} pinned D1 empty-schema row contract`);
+      for (const row of inventoryResult.rows) {
+        assert.ok(row && typeof row === "object" && !Array.isArray(row) && Object.keys(row).length > 0,
+          `${name} pinned D1 row shape`);
+      }
+    }
+
     response = await request({ kind: "query", sql: offerIsolationQuery });
     body = await response.text();
     assert.equal(response.status, 200, body);
@@ -143,6 +173,184 @@ async function assertD1RuntimeCompatibility(probes, offerIsolationQuery, p02Quer
       ["claim_buckets_json", "[]"],
       ["outbox_buckets_json", "[]"],
     ]));
+
+    const p02Fixture = Object.freeze({
+      claimId: "claim_p02_pinned_d1",
+      submissionId: "submission_p02_pinned_d1",
+      couponHash: "a".repeat(64),
+      eventId: "event_p02_pinned_d1",
+      paymentId: "payment_p02_pinned_d1",
+      orderId: "order_p02_pinned_d1",
+      customerId: "customer_p02_pinned_d1",
+      purchaseId: "pur_order_p02_pinned_d1",
+      redemptionId: "red_payment_p02_pinned_d1",
+      lineItemUid: "line_item_p02_pinned_d1",
+      appsOutboxId: "out_apps_redeem_claim_p02_pinned_d1",
+      appsDedupeKey: "apps-redemption:claim_p02_pinned_d1",
+      addOutboxId: "out_add_redeemed_claim_p02_pinned_d1",
+      addDedupeKey: "add-redeemed:claim_p02_pinned_d1",
+      removeOutboxId: "out_remove_claim_p02_pinned_d1",
+      removeDedupeKey: "remove-group:claim_p02_pinned_d1",
+      committedAt: "2026-08-19T18:31:00.000Z",
+      occurredAt: "2026-08-19T18:30:59Z",
+    });
+    const canonicalAppsPayload = Object.freeze({
+      square_event_id: p02Fixture.eventId,
+      square_event_type: "payment_completed",
+      occurred_at_utc: p02Fixture.occurredAt,
+      square_customer_id: p02Fixture.customerId,
+      square_payment_id: p02Fixture.paymentId,
+      square_order_id: p02Fixture.orderId,
+      square_refund_id: "",
+      square_location_id: "L34NX9YA4PGF6",
+      discount_qualification: "qualified",
+      discount_catalog_object_id: "2LUX2NSI5J3NRUQVPTLIYKEK",
+      discount_name: "50% Off First Drink — Enter 50%",
+      discount_amount_minor: "250",
+      net_amount_minor: "500",
+      refund_amount_minor: "",
+      currency: "USD",
+      refund_scope: "",
+    });
+    const customerPayload = JSON.stringify({ square_customer_id: p02Fixture.customerId });
+    const p02SeedStatements = [
+      {
+        sql: `INSERT INTO offer_claims (
+          claim_id, submission_id, coupon_code_hash, square_customer_id, status, apps_ledger_status,
+          refund_review_required, created_at, updated_at, ready_at, redeemed_at
+        ) VALUES (?, ?, ?, ?, 'REDEEMED', 'READY', 0, ?, ?, ?, ?)`,
+        values: [p02Fixture.claimId, p02Fixture.submissionId, p02Fixture.couponHash,
+          p02Fixture.customerId, "2026-08-19T18:00:00.000Z", p02Fixture.committedAt,
+          "2026-08-19T18:00:00.000Z", p02Fixture.committedAt],
+      },
+      {
+        sql: `INSERT INTO webhook_events (
+          event_id, event_type, object_id, merchant_id, payload_json, state, attempts,
+          last_error_code, created_at, updated_at, lease_token, lease_expires_at, available_at
+        ) VALUES (?, 'payment.updated', ?, 'ML8W3CSGD2B71', '{}', 'PROCESSED', 1, NULL,
+          '2026-08-19T18:30:00.000Z', ?, NULL, NULL, NULL)`,
+        values: [p02Fixture.eventId, p02Fixture.paymentId, p02Fixture.committedAt],
+      },
+      {
+        sql: `INSERT INTO purchases (
+          purchase_id, claim_id, square_order_id, primary_payment_id, discount_qualification,
+          net_amount, currency, event_id, occurred_at
+        ) VALUES (?, ?, ?, ?, 'qualified', 500, 'USD', ?, ?)`,
+        values: [p02Fixture.purchaseId, p02Fixture.claimId, p02Fixture.orderId,
+          p02Fixture.paymentId, p02Fixture.eventId, p02Fixture.occurredAt],
+      },
+      {
+        sql: `INSERT INTO purchase_payments (
+          square_payment_id, purchase_id, square_order_id, created_at
+        ) VALUES (?, ?, ?, ?)`,
+        values: [p02Fixture.paymentId, p02Fixture.purchaseId, p02Fixture.orderId,
+          p02Fixture.committedAt],
+      },
+      {
+        sql: `INSERT INTO redemptions (
+          redemption_id, claim_id, square_payment_id, square_order_id, square_line_item_uid,
+          square_discount_catalog_id, applied_discount_amount, currency, event_id, redeemed_at
+        ) VALUES (?, ?, ?, ?, ?, '2LUX2NSI5J3NRUQVPTLIYKEK', 250, 'USD', ?, ?)`,
+        values: [p02Fixture.redemptionId, p02Fixture.claimId, p02Fixture.paymentId,
+          p02Fixture.orderId, p02Fixture.lineItemUid, p02Fixture.eventId, p02Fixture.committedAt],
+      },
+      {
+        sql: `INSERT INTO square_outbox (
+          outbox_id, dedupe_key, claim_id, action, payload_json, state, attempts, available_at,
+          last_error_code, created_at, updated_at, lease_token, lease_expires_at
+        ) VALUES (?, ?, ?, 'APPS_RECORD_REDEMPTION', ?, 'DONE', 1, ?, NULL, ?, ?, NULL, NULL)`,
+        values: [p02Fixture.appsOutboxId, p02Fixture.appsDedupeKey, p02Fixture.claimId,
+          JSON.stringify(canonicalAppsPayload), p02Fixture.committedAt,
+          p02Fixture.committedAt, "2026-08-19T18:31:01.000Z"],
+      },
+      ...[
+        ["ADD_REDEEMED_GROUP", p02Fixture.addOutboxId, p02Fixture.addDedupeKey],
+        ["REMOVE_ELIGIBLE_GROUP", p02Fixture.removeOutboxId, p02Fixture.removeDedupeKey],
+      ].map(([action, outboxId, dedupeKey]) => ({
+          sql: `INSERT INTO square_outbox (
+            outbox_id, dedupe_key, claim_id, action, payload_json, state, attempts, available_at,
+            last_error_code, created_at, updated_at, lease_token, lease_expires_at
+          ) VALUES (?, ?, ?, ?, ?, 'PENDING', 0, ?, NULL, ?, ?, NULL, NULL)`,
+          values: [outboxId, dedupeKey, p02Fixture.claimId, action, customerPayload,
+            p02Fixture.committedAt,
+            p02Fixture.committedAt, p02Fixture.committedAt],
+        })),
+    ];
+    response = await request({ kind: "batch", statements: p02SeedStatements });
+    body = await response.text();
+    assert.equal(response.status, 200, body);
+    assert.deepEqual(JSON.parse(body), { ok: true, count: p02SeedStatements.length });
+
+    const readP02Fixture = async () => {
+      const fixtureResponse = await request({ kind: "query", sql: p02Query });
+      const fixtureBody = await fixtureResponse.text();
+      assert.equal(fixtureResponse.status, 200, fixtureBody);
+      const fixtureResult = JSON.parse(fixtureBody);
+      assert.equal(fixtureResult.ok, true);
+      return fixtureResult.row;
+    };
+    const assertP02FixturePrivate = (row, label) => {
+      const shared = JSON.stringify(row);
+      for (const privateValue of [p02Fixture.claimId, p02Fixture.submissionId, p02Fixture.couponHash,
+        p02Fixture.eventId, p02Fixture.paymentId, p02Fixture.orderId, p02Fixture.customerId,
+        p02Fixture.purchaseId, p02Fixture.redemptionId, p02Fixture.lineItemUid,
+        p02Fixture.appsOutboxId, p02Fixture.appsDedupeKey, p02Fixture.addOutboxId,
+        p02Fixture.addDedupeKey, p02Fixture.removeOutboxId, p02Fixture.removeDedupeKey]) {
+        assert.equal(shared.includes(privateValue), false, `${label} keeps P02 identifiers private`);
+      }
+    };
+    let p02FixtureRow = await readP02Fixture();
+    assert.equal(__test.P02_INTEGER_FIELDS.length, 47);
+    const expectedP02FixtureRow = Object.fromEntries(
+      __test.P02_INTEGER_FIELDS.map((field) => [field, 0]),
+    );
+    Object.assign(expectedP02FixtureRow, {
+      payment_processed_attempt_one_count: 1,
+      claim_redeemed_apps_count: 1,
+      purchases_count: 1,
+      purchase_payments_count: 1,
+      redemptions_count: 1,
+      webhook_total_count: 1,
+      square_outbox_count: 3,
+      apps_redemption_done_count: 1,
+      source_redemption_pair_count: 1,
+      source_apps_pending_pair_count: 1,
+      source_apps_ready_pair_count: 1,
+      source_add_pending_pair_count: 1,
+      source_add_safe_pair_count: 1,
+      webhook_buckets_json: '[["PROCESSED","",1]]',
+      claim_buckets_json: '[["REDEEMED","READY",0,1]]',
+      outbox_buckets_json: '[["ADD_REDEEMED_GROUP","PENDING","",1],'+
+        '["APPS_RECORD_REDEMPTION","DONE","",1],["REMOVE_ELIGIBLE_GROUP","PENDING","",1]]',
+    });
+    assert.deepEqual(p02FixtureRow, expectedP02FixtureRow,
+      "pinned D1 populated P02 complete aggregate contract");
+    assertP02FixturePrivate(p02FixtureRow, "canonical fixture");
+
+    const malformedAppsPayloads = [
+      ["numeric amount", { ...canonicalAppsPayload, discount_amount_minor: 250 }],
+      ["missing key", Object.fromEntries(Object.entries(canonicalAppsPayload)
+        .filter(([key]) => key !== "refund_scope"))],
+      ["extra key", { ...canonicalAppsPayload, unexpected_key: "unexpected" }],
+    ];
+    for (const [label, malformedPayload] of malformedAppsPayloads) {
+      const mutation = [{
+        sql: "UPDATE square_outbox SET payload_json=? WHERE outbox_id=?",
+        values: [JSON.stringify(malformedPayload), p02Fixture.appsOutboxId],
+      }];
+      response = await request({ kind: "batch", statements: mutation });
+      body = await response.text();
+      assert.equal(response.status, 200, body);
+      assert.deepEqual(JSON.parse(body), { ok: true, count: 1 });
+      p02FixtureRow = await readP02Fixture();
+      assert.equal(p02FixtureRow.source_redemption_pair_count, 1,
+        `pinned D1 P02 source lineage survives ${label}`);
+      assert.equal(p02FixtureRow.source_apps_ready_pair_count, 0,
+        `pinned D1 P02 Apps payload rejects ${label}`);
+      assert.equal(p02FixtureRow.source_apps_pending_pair_count, 0,
+        `pinned D1 P02 source role rejects ${label}`);
+      assertP02FixturePrivate(p02FixtureRow, label);
+    }
   } finally {
     await runtime.dispose();
   }
@@ -1631,7 +1839,8 @@ for (const [name, query] of productionD1Queries) {
   }
 }
 await assertD1RuntimeCompatibility(
-  [...d1PatternProbes.values()], __test.D1_OFFER_ISOLATION_QUERY, __test.D1_P02_QUERY,
+  [...d1PatternProbes.values()], productionD1Queries,
+  __test.D1_OFFER_ISOLATION_QUERY, __test.D1_P02_QUERY,
 );
 for (const query of [__test.D1_DELIVERY_QUERY, __test.D1_BUSINESS_QUERY]) {
   assert.doesNotMatch(query, /\b(?:event_id|claim_id|submission_id|customer_id|payment_id|order_id|refund_id|payload_json|lease_token)\b/i);
