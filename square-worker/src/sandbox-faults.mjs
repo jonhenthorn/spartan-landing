@@ -1925,7 +1925,8 @@ async function commitF04SearchFault(env, context = {}) {
       SELECT 1 FROM connector_state cs JOIN offer_claims c ON c.claim_id = ?3
        WHERE cs.state_key = ?1 AND cs.state_value = ?2 AND c.updated_at = cs.updated_at
          AND c.status = 'PROVISIONING' AND c.apps_ledger_status = 'PENDING'
-         AND c.identity_hash GLOB '[a-f0-9]*' AND length(c.identity_hash) = 64
+         AND length(c.identity_hash) = 64
+         AND c.identity_hash NOT GLOB '*[^0-9a-f]*'
          AND c.square_customer_id IS NULL AND c.reference_id IS NULL AND c.match_method IS NULL
          AND c.group_membership_status IS NULL AND c.finalize_effective_at IS NULL
          AND c.ready_at IS NULL AND c.redeemed_at IS NULL

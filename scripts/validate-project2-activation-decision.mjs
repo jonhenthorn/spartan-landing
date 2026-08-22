@@ -235,6 +235,9 @@ const REQUIRED_F02_GOVERNANCE_CONTRACTS = Object.freeze({
   ownerGuide: Object.freeze([
     /request path must stop before Turnstile, Square, Apps or provider calls and before any Queue or D1 mutation/,
     /coordinator separately performs only the approved aggregate read-only Queue and D1 evidence checks/,
+    /F02_ZERO_REQUEST_SAFE_STOP_CLOSURE_CONFIRMED/,
+    /result `STOPPED`, requests `0`/,
+    /repair is reviewed code only: it is not deployed/,
   ]),
 });
 

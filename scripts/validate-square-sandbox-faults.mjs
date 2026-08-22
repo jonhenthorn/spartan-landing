@@ -1629,6 +1629,9 @@ check("fault selection has no public trigger, percentage, or random path", () =>
   assert.match(connectorSource, /commitSandboxF04SearchFault\(env, f04Admission, claim\)/);
   assert.match(connectorSource, /commitSandboxF04AppsFault/);
   assert.match(connectorSource, /commitSandboxF04Ready/);
+  assert.match(faultSource,
+    /length\(c\.identity_hash\) = 64\s+AND c\.identity_hash NOT GLOB '\*\[\^0-9a-f\]\*'/);
+  assert.doesNotMatch(faultSource, /identity_hash GLOB '\[a-f0-9\]\*'/);
   assert.match(connectorSource, /maybeSandboxFault\(env, "APPS_FINALIZE_FAILURE", input\.submission_id\)/);
   assert.match(connectorSource, /maybeSandboxFault\(env, "SQUARE_GROUP_REMOVE_FAILURE", outboxId\)/);
   assert.equal((connectorSource.match(/maybeSandboxFault\(env, "QUEUE_POST_LEASE_INTERRUPT"/g) || []).length, 2);
@@ -4747,6 +4750,54 @@ check("F-04 real D1 chain co-stamps both fault checkpoints and one terminal pass
     }, "a D1-future claim cannot create a malformed F-04 admission or business lineage");
   } finally {
     futureDb.close();
+  }
+});
+
+check("F-04 search assertion rejects malformed identity drift and rolls back atomically", async () => {
+  const db = await createLocalSqliteD1();
+  try {
+    const seed = await insertP01Claim(db, 46);
+    const env = await armF04(
+      baseSandboxEnv(db), "SQUARE_SEARCH_OUTAGE", seed.submission_id,
+      `${RUN_TOKEN}_f04_identity_rollback_0046`,
+    );
+    const admission = await sandboxFaultController.acquireF04(env, { claim: seed });
+    const identityHash = createHmac("sha256", env.D1_HASH_SECRET)
+      .update("phone:+19185550123").digest("hex");
+    await db.prepare(`
+      UPDATE offer_claims SET identity_hash = ?1, status = 'PROVISIONING', updated_at = ?2
+       WHERE claim_id = ?3
+    `).bind(identityHash, admission.stage_updated_at, seed.claim_id).run();
+    const claim = await p01Claim(db, seed.claim_id);
+    db.beforeOperations.set("sandbox_f04_search_assert", ({ db: owner }) => {
+      owner.database.prepare("UPDATE offer_claims SET identity_hash=? WHERE claim_id=?")
+        .run(`b${"Z".repeat(63)}`, seed.claim_id);
+    });
+    await assert.rejects(
+      () => sandboxFaultController.commitF04SearchFault(env, { admission, claim }),
+      (error) => error?.code === "SANDBOX_F04_SEARCH_COMMIT_AMBIGUOUS",
+    );
+    assert.deepEqual(db.lastBatchAfterRollback, db.lastBatchBefore,
+      "the strict identity assertion restores the exact pre-batch claim and stage");
+    const restored = await p01Claim(db, seed.claim_id);
+    const stage = await db.prepare(`
+      SELECT state_value FROM connector_state WHERE state_key LIKE 'sandbox_f04_v1_%'
+    `).bind().first();
+    const lineage = await db.prepare(`
+      SELECT (SELECT COUNT(*) FROM pass_sessions WHERE claim_id=?1) AS passes,
+             (SELECT COUNT(*) FROM purchases WHERE claim_id=?1) AS purchases,
+             (SELECT COUNT(*) FROM redemptions WHERE claim_id=?1) AS redemptions,
+             (SELECT COUNT(*) FROM refund_reviews WHERE claim_id=?1) AS reviews,
+             (SELECT COUNT(*) FROM square_outbox WHERE claim_id=?1) AS outboxes
+    `).bind(seed.claim_id).first();
+    assert.equal(stage.state_value, faultTest.F04_STAGE_VALUES.SEARCH_ADMITTED);
+    assert.equal(restored.identity_hash, identityHash);
+    assert.equal(restored.status, "PROVISIONING");
+    assert.deepEqual(lineage, {
+      passes: 0, purchases: 0, redemptions: 0, reviews: 0, outboxes: 0,
+    });
+  } finally {
+    db.close();
   }
 });
 

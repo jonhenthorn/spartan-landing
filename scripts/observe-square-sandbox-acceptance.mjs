@@ -110,6 +110,44 @@ const FALSE_FLAGS = Object.freeze([
   "SQUARE_WEBHOOK_ENABLED",
 ]);
 
+// Cloudflare D1 applies a bounded LIKE/GLOB pattern limit. Keep canonical UUID
+// checks structural so a read-only acceptance query cannot fail before its
+// readiness checkpoint merely because a repeated character-class pattern is
+// too long. The short negative-class and variant patterns remain case-sensitive
+// and preserve the previous lowercase UUID-v4 boundary exactly.
+function compactUuidV4Predicate(column) {
+  if (!/^(?:[a-z][a-z0-9_]*\.)?[a-z][a-z0-9_]*$/.test(column)) {
+    throw new Error("SQL_UUID_COLUMN_INVALID");
+  }
+  return `length(${column}) = 36
+     AND ${column} NOT GLOB '*[^0-9a-f-]*'
+     AND ${column} NOT GLOB '*-*-*-*-*-*'
+     AND substr(${column}, 9, 1) = '-'
+     AND substr(${column}, 14, 1) = '-'
+     AND substr(${column}, 15, 1) = '4'
+     AND substr(${column}, 19, 1) = '-'
+     AND substr(${column}, 20, 1) GLOB '[89ab]'
+     AND substr(${column}, 24, 1) = '-'`;
+}
+
+function compactIsoSecondPrefixPredicate(column) {
+  if (!/^(?:[a-z][a-z0-9_]*\.)?[a-z][a-z0-9_]*$/.test(column)) {
+    throw new Error("SQL_TIMESTAMP_COLUMN_INVALID");
+  }
+  return `length(${column}) >= 19
+     AND substr(${column}, 1, 4) NOT GLOB '*[^0-9]*'
+     AND substr(${column}, 5, 1) = '-'
+     AND substr(${column}, 6, 2) NOT GLOB '*[^0-9]*'
+     AND substr(${column}, 8, 1) = '-'
+     AND substr(${column}, 9, 2) NOT GLOB '*[^0-9]*'
+     AND substr(${column}, 11, 1) = 'T'
+     AND substr(${column}, 12, 2) NOT GLOB '*[^0-9]*'
+     AND substr(${column}, 14, 1) = ':'
+     AND substr(${column}, 15, 2) NOT GLOB '*[^0-9]*'
+     AND substr(${column}, 17, 1) = ':'
+     AND substr(${column}, 18, 2) NOT GLOB '*[^0-9]*'`;
+}
+
 // Keep this split. D1 rejected the former seven-term compound SELECT remotely.
 const D1_DELIVERY_QUERY = `
 SELECT 'offer_claims' AS scope, status AS state, '' AS error_code, COUNT(*) AS row_count
@@ -347,8 +385,7 @@ SELECT
   (SELECT COUNT(*) FROM normalized_webhook_events
     WHERE event_type = 'payment.updated' AND state = 'PROCESSING' AND attempts = 1
       AND last_error_code IS NULL AND available_at IS NULL
-      AND lease_token GLOB
-        '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'
+      AND ${compactUuidV4Predicate("lease_token")}
       AND strftime('%Y-%m-%dT%H:%M:%fZ', created_at) = created_at
       AND strftime('%Y-%m-%dT%H:%M:%fZ', updated_at) = updated_at
       AND strftime('%Y-%m-%dT%H:%M:%fZ', lease_expires_at) = lease_expires_at
@@ -390,8 +427,7 @@ SELECT
   (SELECT COUNT(*) FROM normalized_webhook_events
     WHERE event_type = 'payment.updated' AND state = 'PROCESSING' AND attempts = 2
       AND last_error_code IS NULL AND available_at IS NULL
-      AND lease_token GLOB
-        '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'
+      AND ${compactUuidV4Predicate("lease_token")}
       AND strftime('%Y-%m-%dT%H:%M:%fZ', created_at) = created_at
       AND strftime('%Y-%m-%dT%H:%M:%fZ', updated_at) = updated_at
       AND strftime('%Y-%m-%dT%H:%M:%fZ', lease_expires_at) = lease_expires_at
@@ -545,9 +581,7 @@ WITH p01_controls AS (
     FROM offer_claims c
     JOIN valid_p01_controls s
       ON s.state_value = 'P01_FAULT_COMMITTED_V1' AND s.updated_at = c.updated_at
-   WHERE length(c.claim_id) = 36
-     AND c.claim_id GLOB
-       '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'
+   WHERE ${compactUuidV4Predicate("c.claim_id")}
      AND length(c.submission_id) BETWEEN 8 AND 80
      AND substr(c.submission_id, 1, 1) GLOB '[A-Za-z0-9]'
      AND c.submission_id NOT GLOB '*[^A-Za-z0-9-]*'
@@ -577,9 +611,7 @@ WITH p01_controls AS (
     FROM offer_claims c
     JOIN valid_p01_controls s
       ON s.state_value = 'P01_READY_COMMITTED_V1' AND s.updated_at = c.updated_at
-   WHERE length(c.claim_id) = 36
-     AND c.claim_id GLOB
-       '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'
+   WHERE ${compactUuidV4Predicate("c.claim_id")}
      AND length(c.submission_id) BETWEEN 8 AND 80
      AND substr(c.submission_id, 1, 1) GLOB '[A-Za-z0-9]'
      AND c.submission_id NOT GLOB '*[^A-Za-z0-9-]*'
@@ -688,9 +720,7 @@ WITH f04_controls AS (
 ), exact_base_claims AS (
   SELECT c.*
     FROM offer_claims c
-   WHERE length(c.claim_id) = 36
-     AND c.claim_id GLOB
-       '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'
+   WHERE ${compactUuidV4Predicate("c.claim_id")}
      AND length(c.submission_id) BETWEEN 8 AND 80
      AND substr(c.submission_id, 1, 1) GLOB '[A-Za-z0-9]'
      AND c.submission_id NOT GLOB '*[^A-Za-z0-9-]*'
@@ -810,9 +840,7 @@ const D1_OFFER_ISOLATION_QUERY = `
 WITH exact_staff_claims AS (
   SELECT c.claim_id, c.updated_at
     FROM offer_claims c
-   WHERE length(c.claim_id) = 36
-     AND c.claim_id GLOB
-       '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'
+   WHERE ${compactUuidV4Predicate("c.claim_id")}
      AND length(c.submission_id) BETWEEN 8 AND 80
      AND substr(c.submission_id, 1, 1) GLOB '[A-Za-z0-9]'
      AND c.submission_id NOT GLOB '*[^A-Za-z0-9-]*'
@@ -837,9 +865,7 @@ WITH exact_staff_claims AS (
 ), exact_ready_claims AS (
   SELECT c.claim_id, c.updated_at, c.ready_at
     FROM offer_claims c
-   WHERE length(c.claim_id) = 36
-     AND c.claim_id GLOB
-       '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'
+   WHERE ${compactUuidV4Predicate("c.claim_id")}
      AND length(c.submission_id) BETWEEN 8 AND 80
      AND substr(c.submission_id, 1, 1) GLOB '[A-Za-z0-9]'
      AND c.submission_id NOT GLOB '*[^A-Za-z0-9-]*'
@@ -965,8 +991,7 @@ p02_lineage AS (
     AND strftime('%Y-%m-%dT%H:%M:%fZ', pp.created_at) = pp.created_at
     AND strftime('%Y-%m-%dT%H:%M:%fZ', r.redeemed_at) = r.redeemed_at
     AND substr(p.occurred_at, -1) = 'Z' AND length(p.occurred_at) BETWEEN 20 AND 30
-    AND substr(p.occurred_at, 1, 19) GLOB
-      '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]'
+    AND ${compactIsoSecondPrefixPredicate("p.occurred_at")}
     AND (length(p.occurred_at) = 20 OR (
       length(p.occurred_at) BETWEEN 22 AND 30 AND substr(p.occurred_at, 20, 1) = '.'
       AND substr(p.occurred_at, 21, length(p.occurred_at) - 21) <> ''
@@ -1150,9 +1175,7 @@ p02_roles AS (
          AND o.dedupe_key = 'add-redeemed:' || l.source_claim_id
          AND o.claim_id = l.source_claim_id AND o.action = 'ADD_REDEEMED_GROUP'
          AND o.state = 'PROCESSING' AND o.attempts = 1 AND o.last_error_code IS NULL
-         AND length(o.lease_token) = 36
-         AND o.lease_token GLOB
-           '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'
+         AND ${compactUuidV4Predicate("o.lease_token")}
          AND strftime('%Y-%m-%dT%H:%M:%fZ', o.created_at) = o.created_at
          AND strftime('%Y-%m-%dT%H:%M:%fZ', o.updated_at) = o.updated_at
          AND strftime('%Y-%m-%dT%H:%M:%fZ', o.available_at) = o.available_at
@@ -1297,9 +1320,7 @@ p02_control_pairs AS (
          AND o.dedupe_key = 'remove-group:' || r.source_claim_id
          AND o.claim_id = r.source_claim_id AND o.action = 'REMOVE_ELIGIBLE_GROUP'
          AND o.state = 'PROCESSING' AND o.attempts = 1 AND o.last_error_code IS NULL
-         AND length(o.lease_token) = 36
-         AND o.lease_token GLOB
-           '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'
+         AND ${compactUuidV4Predicate("o.lease_token")}
          AND strftime('%Y-%m-%dT%H:%M:%fZ', o.created_at) = o.created_at
          AND strftime('%Y-%m-%dT%H:%M:%fZ', o.updated_at) = o.updated_at
          AND strftime('%Y-%m-%dT%H:%M:%fZ', o.available_at) = o.available_at
@@ -1320,9 +1341,7 @@ p02_control_pairs AS (
          AND o.claim_id = r.source_claim_id AND o.action = 'REMOVE_ELIGIBLE_GROUP'
          AND o.state = 'PROCESSING' AND o.attempts = 2
          AND o.last_error_code = 'SANDBOX_FAULT_APPS_REDEMPTION_NOT_DONE'
-         AND length(o.lease_token) = 36
-         AND o.lease_token GLOB
-           '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'
+         AND ${compactUuidV4Predicate("o.lease_token")}
          AND strftime('%Y-%m-%dT%H:%M:%fZ', o.created_at) = o.created_at
          AND strftime('%Y-%m-%dT%H:%M:%fZ', o.updated_at) = o.updated_at
          AND strftime('%Y-%m-%dT%H:%M:%fZ', o.available_at) = o.available_at
@@ -1368,9 +1387,7 @@ p02_control_pairs AS (
          AND o.claim_id = r.source_claim_id AND o.action = 'REMOVE_ELIGIBLE_GROUP'
          AND o.state = 'PROCESSING' AND o.attempts = 2
          AND o.last_error_code = 'SQUARE_SANDBOX_FAULT_GROUP_REMOVE_UNAVAILABLE'
-         AND length(o.lease_token) = 36
-         AND o.lease_token GLOB
-           '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'
+         AND ${compactUuidV4Predicate("o.lease_token")}
          AND strftime('%Y-%m-%dT%H:%M:%fZ', o.created_at) = o.created_at
          AND strftime('%Y-%m-%dT%H:%M:%fZ', o.updated_at) = o.updated_at
          AND strftime('%Y-%m-%dT%H:%M:%fZ', o.available_at) = o.available_at
@@ -1392,9 +1409,7 @@ p02_control_pairs AS (
          AND o.claim_id = r.source_claim_id AND o.action = 'REMOVE_ELIGIBLE_GROUP'
          AND o.state = 'PROCESSING' AND o.attempts = 3
          AND o.last_error_code = 'SQUARE_SANDBOX_FAULT_GROUP_REMOVE_UNAVAILABLE'
-         AND length(o.lease_token) = 36
-         AND o.lease_token GLOB
-           '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'
+         AND ${compactUuidV4Predicate("o.lease_token")}
          AND strftime('%Y-%m-%dT%H:%M:%fZ', o.created_at) = o.created_at
          AND strftime('%Y-%m-%dT%H:%M:%fZ', o.updated_at) = o.updated_at
          AND strftime('%Y-%m-%dT%H:%M:%fZ', o.available_at) = o.available_at
@@ -1669,8 +1684,7 @@ SELECT
     WHERE event_type = 'payment.updated' AND merchant_id = 'ML8W3CSGD2B71'
       AND state = 'PROCESSING' AND attempts = 1 AND last_error_code IS NULL
       AND available_at IS NULL
-      AND lease_token GLOB
-        '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'
+      AND ${compactUuidV4Predicate("lease_token")}
       AND strftime('%Y-%m-%dT%H:%M:%fZ', created_at) = created_at
       AND strftime('%Y-%m-%dT%H:%M:%fZ', updated_at) = updated_at
       AND strftime('%Y-%m-%dT%H:%M:%fZ', lease_expires_at) = lease_expires_at
@@ -7115,6 +7129,8 @@ export const __test = Object.freeze({
   assertP02Topology,
   assertQ02Topology,
   assertQ01Topology,
+  compactIsoSecondPrefixPredicate,
+  compactUuidV4Predicate,
   defaultCommandRunner,
   parseConsumers,
   parseD1Buckets,

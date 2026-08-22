@@ -58,6 +58,84 @@ function d1Response(rows) {
   return JSON.stringify([{ success: true, results: rows }]);
 }
 
+async function assertD1RuntimeCompatibility(probes, offerIsolationQuery) {
+  const { Miniflare, convertV4MiniflareOptions } = await import("miniflare");
+  const { unstable_splitSqlQuery: splitSqlQuery } = await import("wrangler");
+  const script = `
+    export default {
+      async fetch(request, env) {
+        try {
+          const input = await request.json();
+          if (input.kind === "schema" && Array.isArray(input.statements)) {
+            await env.DB.batch(input.statements.map((sql) => env.DB.prepare(sql)));
+            return Response.json({ ok: true, count: input.statements.length });
+          }
+          if (input.kind === "patterns" && Array.isArray(input.probes)) {
+            for (const probe of input.probes) {
+              const sql = probe?.operator === "GLOB"
+                ? "SELECT ?1 GLOB ?2 AS matched"
+                : probe?.operator === "LIKE"
+                  ? "SELECT ?1 LIKE ?2 AS matched"
+                  : "";
+              if (!sql || typeof probe.pattern !== "string") throw new Error("invalid probe");
+              await env.DB.prepare(sql).bind("pattern-probe", probe.pattern).first();
+            }
+            return Response.json({ ok: true, count: input.probes.length });
+          }
+          if (input.kind === "offer-isolation" && typeof input.sql === "string") {
+            const row = await env.DB.prepare(input.sql).first();
+            return Response.json({ ok: true, row });
+          }
+          throw new Error("invalid input");
+        } catch (error) {
+          return Response.json({ ok: false, code: String(error?.message || error) }, { status: 500 });
+        }
+      },
+    };
+  `;
+  const runtime = new Miniflare(convertV4MiniflareOptions({
+    workers: [{
+      name: "observer-d1-pattern-probe",
+      compatibilityDate: "2026-08-17",
+      modules: true,
+      script,
+      d1Databases: { DB: "observer-d1-pattern-probe" },
+    }],
+    logRequests: false,
+  }));
+  const request = (body) => runtime.dispatchFetch("http://observer.invalid/d1-probe", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  try {
+    let response = await request({ kind: "patterns", probes });
+    let body = await response.text();
+    assert.equal(response.status, 200, body);
+    assert.deepEqual(JSON.parse(body), { ok: true, count: probes.length });
+
+    const schema = splitSqlQuery([
+      "0001_initial.sql", "0002_processing_leases.sql", "0003_webhook_retry_schedule.sql",
+    ].map((migration) => readFileSync(`square-worker/migrations/${migration}`, "utf8")).join("\n"));
+    response = await request({ kind: "schema", statements: schema });
+    body = await response.text();
+    assert.equal(response.status, 200, body);
+    assert.deepEqual(JSON.parse(body), { ok: true, count: schema.length });
+
+    response = await request({ kind: "offer-isolation", sql: offerIsolationQuery });
+    body = await response.text();
+    assert.equal(response.status, 200, body);
+    const result = JSON.parse(body);
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.row, Object.fromEntries([
+      ...__test.OFFER_ISOLATION_INTEGER_FIELDS.map((field) => [field, 0]),
+      ...__test.OFFER_ISOLATION_TIME_FIELDS.map((field) => [field, ""]),
+    ]));
+  } finally {
+    await runtime.dispose();
+  }
+}
+
 const deliveryRows = Object.freeze([
   { scope: "offer_claims", state: "REDEEMED", error_code: "", row_count: 1 },
   { scope: "webhook_events", state: "IGNORED", error_code: "NORMAL_ORDER_WITHOUT_LINKED_CUSTOMER", row_count: 3 },
@@ -1520,14 +1598,29 @@ assert.throws(() => __test.verifyQ02VersionBoundary(
 
 assert.equal((__test.D1_DELIVERY_QUERY.match(/\bUNION ALL\b/g) || []).length, 2);
 assert.equal((__test.D1_BUSINESS_QUERY.match(/\bUNION ALL\b/g) || []).length, 3);
-for (const query of [
-  __test.D1_DELIVERY_QUERY, __test.D1_BUSINESS_QUERY, __test.D1_GUARD_QUERY, __test.D1_TIMING_QUERY,
-  __test.D1_O01_QUERY, __test.D1_Q01_QUERY, __test.D1_P01_QUERY, __test.D1_F04_QUERY,
-  __test.D1_OFFER_ISOLATION_QUERY, __test.D1_P02_QUERY,
-  __test.D1_Q02_QUERY,
-]) {
+const productionD1Queries = Object.freeze(Object.entries(__test)
+  .filter(([name, query]) => name.startsWith("D1_") && name.endsWith("_QUERY") &&
+    typeof query === "string")
+  .sort(([left], [right]) => left.localeCompare(right)));
+assert.equal(productionD1Queries.length, 11);
+const D1_LIKE_GLOB_PATTERN_BUDGET = 50;
+const d1PatternProbes = new Map();
+for (const [name, query] of productionD1Queries) {
   assert.doesNotMatch(query, /\b(?:INSERT|DELETE|UPDATE|REPLACE|DROP|ALTER|CREATE|PRAGMA|VACUUM)\b/i);
+  const literalPatterns = [...query.matchAll(/\b(GLOB|LIKE)\s+'([^']*)'/gi)];
+  assert.equal(literalPatterns.length, (query.match(/\b(?:GLOB|LIKE)\b/gi) || []).length,
+    `${name} query must use only direct single-quoted LIKE/GLOB patterns`);
+  for (const match of literalPatterns) {
+    const operator = match[1].toUpperCase();
+    const pattern = match[2];
+    assert.ok(pattern.length <= D1_LIKE_GLOB_PATTERN_BUDGET,
+      `${name} query exceeds the D1 LIKE/GLOB pattern budget: ${pattern.length}`);
+    d1PatternProbes.set(`${operator}\0${pattern}`, { operator, pattern });
+  }
 }
+await assertD1RuntimeCompatibility(
+  [...d1PatternProbes.values()], __test.D1_OFFER_ISOLATION_QUERY,
+);
 for (const query of [__test.D1_DELIVERY_QUERY, __test.D1_BUSINESS_QUERY]) {
   assert.doesNotMatch(query, /\b(?:event_id|claim_id|submission_id|customer_id|payment_id|order_id|refund_id|payload_json|lease_token)\b/i);
 }
@@ -1594,6 +1687,43 @@ assert.match(__test.D1_P02_QUERY,
   /o\.available_at = strftime\('%Y-%m-%dT%H:%M:%fZ', o\.updated_at, '\+30 seconds'\)/);
 assert.match(__test.D1_P02_QUERY,
   /o\.available_at = strftime\('%Y-%m-%dT%H:%M:%fZ', o\.updated_at, '\+60 seconds'\)/);
+assert.throws(() => __test.compactIsoSecondPrefixPredicate("p.occurred_at; DROP TABLE purchases"),
+  /SQL_TIMESTAMP_COLUMN_INVALID/);
+const isoSecondPrefixDb = new DatabaseSync(":memory:");
+try {
+  const digitGlob = "[0-9]";
+  const legacyIsoSecondGlob = `${digitGlob.repeat(4)}-${digitGlob.repeat(2)}-` +
+    `${digitGlob.repeat(2)}T${digitGlob.repeat(2)}:${digitGlob.repeat(2)}:` +
+    digitGlob.repeat(2);
+  const compareIsoSecondPrefix = isoSecondPrefixDb.prepare(`
+    SELECT CASE WHEN ${__test.compactIsoSecondPrefixPredicate("p.occurred_at")} THEN 1 ELSE 0 END
+      AS compact_match,
+      substr(p.occurred_at, 1, 19) GLOB '${legacyIsoSecondGlob}' AS legacy_match
+    FROM (SELECT ? AS occurred_at) p
+  `);
+  for (const occurredAt of [
+    "2026-08-22T12:34:56Z",
+    "2026-08-22T12:34:56.123456789Z",
+    "202A-08-22T12:34:56Z",
+    "2026/08-22T12:34:56Z",
+    "2026-08/22T12:34:56Z",
+    "2026-08-22t12:34:56Z",
+    "2026-08-22T1A:34:56Z",
+    "2026-08-22T12-34:56Z",
+    "2026-08-22T12:3A:56Z",
+    "2026-08-22T12:34-56Z",
+    "2026-08-22T12:34:5AZ",
+    "2026-08-22T12:34:5",
+  ]) {
+    const row = compareIsoSecondPrefix.get(occurredAt);
+    assert.equal(row.compact_match, row.legacy_match,
+      `compact timestamp prefix preserves legacy matching for ${JSON.stringify(occurredAt)}`);
+    assert.equal(Boolean(row.compact_match),
+      /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}/.test(occurredAt));
+  }
+} finally {
+  isoSecondPrefixDb.close();
+}
 assert.match(__test.D1_P02_QUERY, /p02_unique_stages/);
 assert.ok((__test.D1_P02_QUERY.match(/\|\| '000000000', 1, 9\) \|\| 'Z'/g) || []).length >= 2,
   "P02 purchase occurrence time is normalized to nanoseconds before causal comparison");
@@ -1764,6 +1894,16 @@ assert.match(__test.D1_OFFER_ISOLATION_QUERY, /\+2592000 seconds/);
 assert.match(__test.D1_OFFER_ISOLATION_QUERY, /p\.revoked_at IS NULL/);
 assert.equal((__test.D1_OFFER_ISOLATION_QUERY.match(/julianday\('now', '-1800 seconds'\)/g) || []).length,
   2, "offer-isolation current evidence is bounded to the watcher deadline");
+assert.equal((__test.D1_OFFER_ISOLATION_QUERY.match(/length\(c\.claim_id\) = 36/g) || []).length,
+  2, "both offer-isolation claim lanes enforce the compact UUID length boundary");
+assert.equal((__test.D1_OFFER_ISOLATION_QUERY.match(
+  /c\.claim_id NOT GLOB '\*-\*-\*-\*-\*-\*'/g,
+) || []).length, 2, "both offer-isolation claim lanes enforce exactly four UUID hyphens");
+assert.equal((__test.D1_OFFER_ISOLATION_QUERY.match(
+  /substr\(c\.claim_id, 20, 1\) GLOB '\[89ab\]'/g,
+) || []).length, 2, "both offer-isolation claim lanes enforce the UUID-v4 variant");
+assert.throws(() => __test.compactUuidV4Predicate("c.claim_id; DROP TABLE offer_claims"),
+  /SQL_UUID_COLUMN_INVALID/);
 const offerIsolationFinalProjection = __test.D1_OFFER_ISOLATION_QUERY.slice(
   __test.D1_OFFER_ISOLATION_QUERY.lastIndexOf("\nSELECT\n"),
 );
@@ -2739,6 +2879,76 @@ try {
   assert.equal(aggregate.staff_lookup_exact_count, 1);
   assert.equal(aggregate.staff_lookup_current_exact_count, 1);
   assert.equal(JSON.stringify(aggregate).includes(staffClaimId), false);
+  const uuidV4Oracle = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  const uuidV4Corpus = Object.freeze([
+    ["01234567-89ab-4cde-8f01-23456789abcd", "variant 8"],
+    ["11234567-89ab-4cde-9f01-23456789abcd", "variant 9"],
+    ["21234567-89ab-4cde-af01-23456789abcd", "variant a"],
+    ["31234567-89ab-4cde-bf01-23456789abcd", "variant b"],
+    ["41234567-89AB-4cde-8f01-23456789abcd", "uppercase hex"],
+    ["g1234567-89ab-4cde-8f01-23456789abcd", "non-hex character"],
+    ["51234567-89ab-5cde-8f01-23456789abcd", "wrong version"],
+    ["61234567-89ab-4cde-7f01-23456789abcd", "invalid variant"],
+    ["71234567-89ab-4cde-8f01-23456789abc", "short value"],
+    ["81234567-89ab-4cde-8f01-23456789abcde", "long value"],
+    ["9123456-789ab-4cde-8f01-23456789abcd", "shifted hyphen"],
+    ["b123456789ab-4cde-8f01-23456789abcde", "missing hyphen"],
+    ["d1234567-89ab-4cde-8f01-23456789abc-", "extra hyphen"],
+  ]);
+  let currentStaffClaimId = staffClaimId;
+  for (const [candidateClaimId, label] of uuidV4Corpus) {
+    offerIsolationDb.prepare("UPDATE offer_claims SET claim_id=? WHERE claim_id=?")
+      .run(candidateClaimId, currentStaffClaimId);
+    const staffUuidAggregate = offerIsolationDb.prepare(__test.D1_OFFER_ISOLATION_QUERY).get();
+    const expectedCount = Number(uuidV4Oracle.test(candidateClaimId));
+    assert.equal(staffUuidAggregate.staff_lookup_exact_count, expectedCount,
+      `STAFF UUID predicate rejects or accepts ${label}`);
+    assert.equal(staffUuidAggregate.staff_lookup_current_exact_count, expectedCount,
+      `STAFF current UUID predicate rejects or accepts ${label}`);
+    assert.equal(JSON.stringify(staffUuidAggregate).includes(candidateClaimId), false,
+      `STAFF UUID evidence remains aggregate-only for ${label}`);
+    currentStaffClaimId = candidateClaimId;
+  }
+  offerIsolationDb.prepare("UPDATE offer_claims SET claim_id=? WHERE claim_id=?")
+    .run(staffClaimId, currentStaffClaimId);
+
+  const insertUuidReadyClaim = offerIsolationDb.prepare(`INSERT INTO offer_claims (
+    claim_id, submission_id, coupon_code_hash, identity_hash, square_customer_id,
+    reference_id, match_method, group_membership_status, finalize_effective_at,
+    status, apps_ledger_status, refund_review_required, created_at, updated_at,
+    ready_at, redeemed_at
+  ) VALUES (?, ?, ?, ?, 'UUID-READY-CUSTOMER-01', ?, 'created', 'added',
+    strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-2 minutes'), 'READY', 'READY', 0,
+    strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-3 minutes'),
+    strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 minute'),
+    strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 minute'), NULL)`);
+  const insertUuidReadyPass = offerIsolationDb.prepare(`INSERT INTO pass_sessions (
+    token_hash, claim_id, created_at, expires_at, revoked_at
+  ) VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 seconds'),
+    strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 seconds', '+2592000 seconds'), NULL)`);
+  const uuidReadyReference = `SPN1-${"U".repeat(22)}`;
+  for (const [index, [candidateClaimId, label]] of uuidV4Corpus.entries()) {
+    const tokenHash = index.toString(16).padStart(64, "0");
+    insertUuidReadyClaim.run(candidateClaimId, `uuid-ready-${index.toString().padStart(2, "0")}`,
+      "6".repeat(64), "7".repeat(64), uuidReadyReference);
+    insertUuidReadyPass.run(tokenHash, candidateClaimId);
+    const readyUuidAggregate = offerIsolationDb.prepare(__test.D1_OFFER_ISOLATION_QUERY).get();
+    const expectedIncrement = Number(uuidV4Oracle.test(candidateClaimId));
+    assert.equal(readyUuidAggregate.ready_claim_exact_count, 1 + expectedIncrement,
+      `READY UUID predicate rejects or accepts ${label}`);
+    assert.equal(readyUuidAggregate.canonical_ready_pass_pair_count, 1 + expectedIncrement,
+      `READY/pass UUID join rejects or accepts ${label}`);
+    assert.equal(readyUuidAggregate.canonical_current_live_ready_pass_pair_count, expectedIncrement,
+      `READY/pass current evidence rejects or accepts ${label}`);
+    assert.equal(JSON.stringify(readyUuidAggregate).includes(candidateClaimId), false,
+      `READY UUID evidence remains aggregate-only for ${label}`);
+    assert.equal(JSON.stringify(readyUuidAggregate).includes("UUID-READY-CUSTOMER-01"), false,
+      `READY customer evidence remains private for ${label}`);
+    assert.equal(JSON.stringify(readyUuidAggregate).includes(uuidReadyReference), false,
+      `READY reference evidence remains private for ${label}`);
+    offerIsolationDb.prepare("DELETE FROM pass_sessions WHERE token_hash=?").run(tokenHash);
+    offerIsolationDb.prepare("DELETE FROM offer_claims WHERE claim_id=?").run(candidateClaimId);
+  }
   offerIsolationDb.prepare(`UPDATE offer_claims
     SET created_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-32 minutes'),
         updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-31 minutes') WHERE claim_id=?`)
@@ -2855,6 +3065,26 @@ try {
   assert.equal(aggregate.pass_sessions_count, 3);
   assert.equal(aggregate.canonical_ready_pass_pair_count, 2,
     "an unrelated fresh pass cannot pair with a retained READY claim");
+  const legacyUuidV4Glob = [
+    "[0-9a-f]".repeat(8),
+    "[0-9a-f]".repeat(4),
+    `4${"[0-9a-f]".repeat(3)}`,
+    `[89ab]${"[0-9a-f]".repeat(3)}`,
+    "[0-9a-f]".repeat(12),
+  ].join("-");
+  const compactClaimPredicate = __test.compactUuidV4Predicate("c.claim_id");
+  assert.equal(__test.D1_OFFER_ISOLATION_QUERY.split(compactClaimPredicate).length, 3,
+    "offer-isolation uses the shared UUID predicate in exactly two claim lanes");
+  const legacyOfferIsolationQuery = __test.D1_OFFER_ISOLATION_QUERY.replaceAll(
+    compactClaimPredicate,
+    `length(c.claim_id) = 36 AND c.claim_id GLOB '${legacyUuidV4Glob}'`,
+  );
+  const compactAggregate = offerIsolationDb.prepare(__test.D1_OFFER_ISOLATION_QUERY).get();
+  const legacyAggregate = offerIsolationDb.prepare(legacyOfferIsolationQuery).get();
+  assert.equal(Object.keys(compactAggregate).length, 12,
+    "offer-isolation aggregate fixture covers every count and watermark field");
+  assert.deepEqual(compactAggregate, legacyAggregate,
+    "compact UUID predicates preserve every offer-isolation aggregate and watermark");
 } finally {
   offerIsolationDb.close();
 }
