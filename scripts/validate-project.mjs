@@ -1,4 +1,4 @@
-import { readdir, readFile } from "node:fs/promises";
+import { lstat, readdir, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -37,10 +37,191 @@ const EXPECTED_CI_ACTIONS = Object.freeze([
   "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
   "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
 ]);
+const SECRET_SIGNATURES = Object.freeze([
+  Object.freeze({
+    code: "COMMITTED_PRIVATE_KEY",
+    pattern: /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----/,
+  }),
+  Object.freeze({
+    code: "COMMITTED_AWS_ACCESS_KEY",
+    pattern: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/,
+  }),
+  Object.freeze({
+    code: "COMMITTED_GITHUB_TOKEN",
+    pattern: /\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{20,})\b/,
+  }),
+  Object.freeze({
+    code: "COMMITTED_GITLAB_TOKEN",
+    pattern: /\bglpat-[A-Za-z0-9_-]{20,}\b/,
+  }),
+  Object.freeze({
+    code: "COMMITTED_NPM_TOKEN",
+    pattern: /\bnpm_[A-Za-z0-9]{36}\b/,
+  }),
+  Object.freeze({
+    code: "COMMITTED_GOOGLE_API_KEY",
+    pattern: /\bAIza[0-9A-Za-z_-]{35}\b/,
+  }),
+  Object.freeze({
+    code: "COMMITTED_SLACK_TOKEN",
+    pattern: /\bxox[baprs]-[0-9A-Za-z-]{20,}\b/,
+  }),
+  Object.freeze({
+    code: "COMMITTED_SENDGRID_TOKEN",
+    pattern: /\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b/,
+  }),
+  Object.freeze({
+    code: "COMMITTED_STRIPE_SECRET",
+    pattern: /\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}\b/,
+  }),
+  Object.freeze({
+    code: "COMMITTED_OPENAI_SECRET",
+    pattern: /\b(?:sk-(?:proj|svcacct)-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{32,})\b/,
+  }),
+  Object.freeze({
+    code: "COMMITTED_ANTHROPIC_SECRET",
+    pattern: /\bsk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{20,}\b/,
+  }),
+  Object.freeze({
+    code: "COMMITTED_SQUARE_SECRET",
+    pattern: /\b(?:sandbox-)?sq0(?:atp|atb|csp|csb)-[A-Za-z0-9_-]{20,}\b/,
+  }),
+  Object.freeze({
+    code: "COMMITTED_SQUARE_BEARER_TOKEN",
+    pattern: /\b(?:EAA|EQA)[A-Za-z0-9_-]{20,}\b/,
+  }),
+  Object.freeze({
+    code: "COMMITTED_BREVO_SECRET",
+    pattern: /\bxkeysib-[A-Za-z0-9_-]{32,}\b/,
+  }),
+  Object.freeze({
+    code: "COMMITTED_JWT",
+    pattern: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/,
+  }),
+  Object.freeze({
+    code: "COMMITTED_CREDENTIAL_URL",
+    pattern: /\bhttps?:\/\/[^\s:/?#"'<>]+:[^\s\/@?#"'<>]+@[^\s"'<>]+/i,
+  }),
+  Object.freeze({
+    code: "COMMITTED_CLOUDFLARE_CREDENTIAL",
+    pattern: /["']?\b(?:CLOUDFLARE_API_TOKEN|CF_API_TOKEN|SQUARE_ACCEPTANCE_QUEUES_READ_TOKEN|CLOUDFLARE_GLOBAL_API_KEY|CLOUDFLARE_API_KEY|CF_API_KEY)\b["']?\s*[:=]\s*(?:"[A-Za-z0-9_-]{32,64}"|'[A-Za-z0-9_-]{32,64}'|[A-Za-z0-9_-]{32,64})(?=\s|[,;#}]|$)/m,
+  }),
+]);
 
 function fail(code) {
   process.stderr.write(`Project validation stopped: ${code}\n`);
   process.exit(1);
+}
+
+function failAtPath(code, path) {
+  process.stderr.write(`Project validation stopped: ${code} ${JSON.stringify(path)}\n`);
+  process.exit(1);
+}
+
+function findSecretSignature(source) {
+  for (const signature of SECRET_SIGNATURES) {
+    if (signature.pattern.test(source)) return Object.freeze({ code: signature.code });
+  }
+  return null;
+}
+
+function findSecretPathFailure(path) {
+  return findSecretSignature(path) ? "COMMITTED_SECRET_IN_PATH" : null;
+}
+
+function assertSecretScannerSelfTests() {
+  // Exact credential-shaped samples are assembled at runtime so the committed
+  // scanner source does not need a path-wide or content-wide fixture exemption.
+  const syntheticSecrets = Object.freeze([
+    ["COMMITTED_PRIVATE_KEY", ["-----BEGIN ", "OPENSSH PRIVATE KEY-----"].join("")],
+    ["COMMITTED_AWS_ACCESS_KEY", ["AK", "IA", "A".repeat(16)].join("")],
+    ["COMMITTED_GITHUB_TOKEN", ["gh", "p_", "a".repeat(36)].join("")],
+    ["COMMITTED_GITLAB_TOKEN", ["gl", "pat-", "a".repeat(20)].join("")],
+    ["COMMITTED_NPM_TOKEN", ["npm", "_", "a".repeat(36)].join("")],
+    ["COMMITTED_GOOGLE_API_KEY", ["AI", "za", "a".repeat(35)].join("")],
+    ["COMMITTED_SLACK_TOKEN", ["xox", "b-", "a".repeat(20)].join("")],
+    ["COMMITTED_SENDGRID_TOKEN", ["S", "G.", "a".repeat(22), ".", "b".repeat(43)].join("")],
+    ["COMMITTED_STRIPE_SECRET", ["sk", "_test_", "a".repeat(24)].join("")],
+    ["COMMITTED_OPENAI_SECRET", ["sk", "-proj-", "a".repeat(24)].join("")],
+    ["COMMITTED_ANTHROPIC_SECRET", ["sk", "-ant-api03-", "a".repeat(24)].join("")],
+    ["COMMITTED_SQUARE_SECRET", ["sandbox-", "sq0csb-", "a".repeat(24)].join("")],
+    ["COMMITTED_SQUARE_BEARER_TOKEN", ["EA", "A", "a".repeat(24)].join("")],
+    ["COMMITTED_BREVO_SECRET", ["xkey", "sib-", "a".repeat(40)].join("")],
+    ["COMMITTED_JWT", ["ey", "J", "a".repeat(12), ".", "b".repeat(12), ".", "c".repeat(12)].join("")],
+    ["COMMITTED_CREDENTIAL_URL", ["https", "://user:password@example.invalid"].join("")],
+    ["COMMITTED_CLOUDFLARE_CREDENTIAL", ["CLOUDFLARE_API_", "TOKEN=", "a".repeat(40)].join("")],
+  ]);
+  if (JSON.stringify(SECRET_SIGNATURES.map(({ code }) => code)) !==
+      JSON.stringify(syntheticSecrets.map(([code]) => code))) {
+    fail("SECRET_SCANNER_INVENTORY_SELF_TEST_FAILED");
+  }
+  for (const [expectedCode, syntheticSecret] of syntheticSecrets) {
+    const result = findSecretSignature(syntheticSecret);
+    if (result?.code !== expectedCode || Object.hasOwn(result || {}, "match") ||
+        JSON.stringify(result).includes(syntheticSecret)) {
+      fail("SECRET_SCANNER_DETECTION_SELF_TEST_FAILED");
+    }
+  }
+  const additionalDetections = Object.freeze([
+    ["COMMITTED_SQUARE_SECRET", ["sq0", "csp-", "a".repeat(24)].join("")],
+    ["COMMITTED_SQUARE_BEARER_TOKEN", ["EQ", "A", "a".repeat(24)].join("")],
+    ["COMMITTED_CLOUDFLARE_CREDENTIAL",
+      ["{\"CLOUDFLARE_API_", "TOKEN\":\"", "a".repeat(40), "\"}"].join("")],
+  ]);
+  for (const [expectedCode, syntheticSecret] of additionalDetections) {
+    if (findSecretSignature(syntheticSecret)?.code !== expectedCode) {
+      fail("SECRET_SCANNER_VARIANT_SELF_TEST_FAILED");
+    }
+  }
+  const syntheticSecretPath = ["fixtures/", "xkey", "sib-", "a".repeat(40), ".txt"].join("");
+  const pathFailure = findSecretPathFailure(syntheticSecretPath);
+  if (pathFailure !== "COMMITTED_SECRET_IN_PATH" || pathFailure.includes(syntheticSecretPath) ||
+      findSecretPathFailure("fixtures/credential-placeholder.txt") !== null) {
+    fail("SECRET_SCANNER_PATH_SELF_TEST_FAILED");
+  }
+
+  const allowedExamples = Object.freeze([
+    ["AK", "IA", "REPLACE_ME"].join(""),
+    ["sk", "-proj-", "REPLACE_ME"].join(""),
+    ["github", "_pat_", "EXAMPLE"].join(""),
+    ["-----BEGIN ", "PUBLIC KEY-----"].join(""),
+    ["pk", "_live_", "a".repeat(24)].join(""),
+    ["sandbox-", "sq0idb-", "a".repeat(24)].join(""),
+    ["EA", "A_REPLACE_ME"].join(""),
+    ["xkey", "sib-REPLACE_ME"].join(""),
+    ["ey", "Jshort.payload.signature"].join(""),
+    ["https", "://user@example.invalid"].join(""),
+    ["CLOUDFLARE_API_", "TOKEN=REPLACE_ME"].join(""),
+    ["CLOUDFLARE_API_", "TOKEN=cloudflare-only-token"].join(""),
+    ["G-", "C3R237CCQ7"].join(""),
+    "0123456789abcdef0123456789abcdef",
+  ]);
+  if (allowedExamples.some((example) => findSecretSignature(example) !== null)) {
+    fail("SECRET_SCANNER_FALSE_POSITIVE_SELF_TEST_FAILED");
+  }
+}
+
+async function assertNoCommittedSecrets() {
+  const tracked = run("git", ["ls-files", "-z"], "tracked secret-scan inventory", {
+    capture: true,
+  }).split("\0").filter(Boolean).sort();
+  if (tracked.length === 0) fail("TRACKED_SECRET_SCAN_INVENTORY_EMPTY");
+  for (const path of tracked) {
+    const pathFailure = findSecretPathFailure(path);
+    if (pathFailure) fail(pathFailure);
+    let contents;
+    try {
+      const metadata = await lstat(resolve(ROOT, path));
+      if (metadata.isSymbolicLink()) failAtPath("TRACKED_SECRET_SCAN_SYMLINK", path);
+      contents = await readFile(resolve(ROOT, path));
+    } catch {
+      failAtPath("TRACKED_SECRET_SCAN_READ_FAILED", path);
+    }
+    // Provider signatures are ASCII. latin1 preserves each byte one-for-one so
+    // a NUL or malformed UTF-8 sequence cannot turn a tracked file into a bypass.
+    const result = findSecretSignature(contents.toString("latin1"));
+    if (result) failAtPath(result.code, path);
+  }
 }
 
 function run(command, args, label, options = {}) {
@@ -149,6 +330,8 @@ async function assertCiWorkflow() {
   }
 }
 
+assertSecretScannerSelfTests();
+await assertNoCommittedSecrets();
 await assertToolchain();
 await assertNoWranglerDotEnv();
 await assertValidatorInventory();
@@ -176,5 +359,7 @@ export const __test = Object.freeze({
   EXPECTED_CI_WORKFLOW_SHA256,
   EXPECTED_NPM_VERSION,
   EXPECTED_PACKAGES,
+  SECRET_SIGNATURES,
   VALIDATORS,
+  findSecretSignature,
 });
