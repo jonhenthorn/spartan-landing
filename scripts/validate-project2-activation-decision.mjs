@@ -47,6 +47,13 @@ const REQUIRED_SECTION_TERMS = Object.freeze({
     /common production request order/i, /sent-but-unconfirmed request/i,
     /requires immediate rollback/i, /fixed result\/checkpoint names/i,
     /aggregate read-only Queue and D1 evidence checks/i,
+    /direct managed pseudo-terminal rehearsal passed/i, /no Expect\/Tcl, pipe or heredoc/i,
+    /validate-square-sandbox-f02-pty\.mjs/i,
+    /from the exact reviewed full commit/i,
+    /production coordinator main and default hidden reader/i,
+    /Expect, pexpect, Tcl, AppleScript, browser\/UI automation/i,
+    /do not automate or supply live prompt values/i,
+    /grants no credential, candidate, traffic or request authority/i,
     /F-02 request path performs no Turnstile, provider, Apps or Square call/i,
     /no Queue or D1 mutation/i, /evidence collection, not request-path business activity/i,
     /HTTP `000` \/ request count `0` for a fixed pre-request stop/i,
@@ -72,6 +79,9 @@ const REQUIRED_SECTION_TERMS = Object.freeze({
   ],
   "Rollback authority": [
     /Immediate rollback/i, /preauthorize/i, /Rollback operator/i, /preserves evidence/i,
+    /launcher failure, pseudo-terminal loss or exit before one fixed terminal result is `STOP`/i,
+    /grants no retry/i,
+    /offline PTY PASS grants no credential, candidate, traffic or request authority/i,
   ],
   "Evidence and signoff": [
     /Custody and closure record/, /revocation/i, /Final pre-run signatures/, /Final post-run signatures/,
@@ -233,6 +243,19 @@ const REQUIRED_F02_GOVERNANCE_CONTRACTS = Object.freeze({
     /shared F-02 record may extract only the coordinator's fixed checkpoints and terminal result/,
     /F-02 request path performs no Turnstile, provider, Apps or Square call and no Queue or D1 mutation/,
     /coordinator separately performs only the approved aggregate read-only Queue and D1 evidence checks/,
+    /direct managed pseudo-terminal/, /Expect(?:\/Tcl|, pexpect, Tcl)/,
+    /validate-square-sandbox-f02-pty\.mjs/,
+    /production coordinator main and default hidden reader/,
+    /every first side-effect boundary with fail-closed tripwires/,
+    /Expect, pexpect, Tcl, AppleScript, browser\/UI automation/,
+    /Python 3\.9 or newer on macOS or Linux/,
+    /exactly four ordered prompts with no input echo/,
+    /forced parent-interrupt cleanup self-test/,
+    /entire PTY process group and wrapper/,
+    /handle stream failures/,
+    /signals both the top-level validator/,
+    /nested terminal parent/,
+    /grants no credential, candidate, traffic or request authority/,
   ]),
   acceptance: Object.freeze([
     /F-02 coordinator instead pins the reviewed public sandbox origin in code, never prints it/,
@@ -248,11 +271,29 @@ const REQUIRED_F02_GOVERNANCE_CONTRACTS = Object.freeze({
     /Neither repair is deployed, neither is live-case evidence and neither grants retry, credential, traffic, request, provider, Apps, Queue, D1 or production authority/,
     /F-02 request itself performs no Turnstile, provider, Apps or Square call and no Queue or D1 mutation/,
     /coordinator separately performs the approved aggregate read-only Queue and D1 checks/,
+    /direct managed pseudo-terminal/, /Expect(?:\/Tcl|, pexpect, Tcl)/,
+    /validate-square-sandbox-f02-pty\.mjs/,
+    /production coordinator main and default hidden reader/,
+    /every first side-effect boundary with fail-closed tripwires/,
+    /Expect, pexpect, Tcl, AppleScript, browser\/UI automation/,
+    /Python 3\.9 or newer on macOS or Linux/,
+    /forced parent-interrupt cleanup self-test/,
+    /entire PTY process group and wrapper/,
+    /handle stream failures/,
+    /signals both the top-level validator/,
+    /nested terminal parent/,
+    /offline true-PTY wrong-confirmation rehearsal passed/,
+    /PTY rehearsal is local launch-boundary proof only/,
+    /grants no credential, candidate, traffic or request authority/,
     /raw coordinator\/operator\/Wrangler transcript and candidate\/rollback outputs private/,
   ]),
   ownerGuide: Object.freeze([
     /request path must stop before Turnstile, Square, Apps or provider calls and before any Queue or D1 mutation/,
     /coordinator separately performs only the approved aggregate read-only Queue and D1 evidence checks/,
+    /direct managed pseudo-terminal validator must pass/i, /Expect(?:\/Tcl|, pexpect, Tcl)/,
+    /exact reviewed commit/i, /Python 3\.9 or newer on macOS or Linux/,
+    /Expect, pexpect, Tcl, AppleScript, browser\/UI automation/,
+    /uses only dummy inputs and grants no live authority/,
     /F02_ZERO_REQUEST_SAFE_STOP_CLOSURE_CONFIRMED/,
     /result `STOPPED`, requests `0`/,
     /all-off baseline remained the sole active baseline; no traffic rollback was required/i,
@@ -265,6 +306,13 @@ const REQUIRED_F02_GOVERNANCE_CONTRACTS = Object.freeze({
     /previously reviewed controller build is deployed only as the current all-off sandbox baseline/,
     /no case candidate, profile, canary or temporary control is active or armed/,
     /newer observer repairs are not deployed/,
+    /validate-square-sandbox-f02-pty\.mjs/,
+    /Python 3\.9 or newer on macOS or Linux/,
+    /forced parent-interrupt cleanup self-test/,
+    /entire PTY process group and temporary state/,
+    /signals both the top-level validator/,
+    /nested terminal parent/,
+    /runs all 20 local validators/,
   ]),
   squareWorkerReadme: Object.freeze([
     /exact current version and binding references remain in private evidence rather than this shared handoff/,
@@ -323,6 +371,7 @@ function validateDefaultNoGo(source, errors) {
     /A retry or later case requires a fresh record, fresh exact-commit review, new unexpired window and new final `GO`/,
     /blank repository template remains default `NOT APPROVED`/,
     /Exact reviewed full commit evidence \| `\[REVIEW\/FILL — reference only; no value\]`/,
+    /If F-02: offline PTY-validator PASS bound to that exact reviewed full commit \| `\[REVIEW\/FILL — reference only; no value\]`/,
     /Any source or dependency change after that review invalidates the decision and returns the case to `NO-GO`/,
     /does not authorize production, a second case, real-customer use, alert delivery, backups/,
   ]) {
@@ -751,6 +800,10 @@ function assertUnsafeMutationsFail(source, knownDocTargets) {
       "| Exact reviewed full commit evidence |",
       "| Reviewed source evidence |",
     )],
+    ["DEFAULT_NO_GO_CONTRACT_INCOMPLETE", source.replace(
+      "| If F-02: offline PTY-validator PASS bound to that exact reviewed full commit |",
+      "| If F-02: terminal rehearsal reviewed |",
+    )],
     ["COMPLETED_OR_MALFORMED_TABLE_FIELD", source.replace(
       "| Exact sandbox worksheet case | `[REVIEW/FILL]` |",
       "| Exact sandbox worksheet case | `YES` |",
@@ -764,6 +817,14 @@ function assertUnsafeMutationsFail(source, knownDocTargets) {
     ["SECTION_CONTRACT_TEMPORARY_SANDBOX_AUTHORIZATION", source.replace(
       "HTTP `000` / request count `0` for a fixed pre-request stop",
       "a pre-request result",
+    )],
+    ["SECTION_CONTRACT_TEMPORARY_SANDBOX_AUTHORIZATION", source.replace(
+      "production coordinator main and default hidden reader",
+      "coordinator logic",
+    )],
+    ["SECTION_CONTRACT_ROLLBACK_AUTHORITY", source.replace(
+      "For F-02, a launcher failure, pseudo-terminal loss or exit before one fixed terminal result is `STOP`",
+      "For F-02, a launcher failure may be reviewed",
     )],
     ["F02_ACTIVATION_READ_ONLY_AUTHORIZATION_CONTRADICTION_PRESENT",
       `${source}\nF-02 does not authorize Square, Apps, Queue or D1 activity.\n`],
@@ -945,6 +1006,20 @@ function assertUnsafeF02GovernanceMutationsFail(
         "The earlier authority is retained."),
       acceptance, ownerGuide,
     }],
+    ["F02_FAULT_HOOKS_GOVERNANCE_CONTRACT_MISSING", {
+      faultHooks: faultHooks.replace(
+        "production coordinator main and default hidden reader",
+        "coordinator logic",
+      ),
+      acceptance, ownerGuide,
+    }],
+    ["F02_FAULT_HOOKS_GOVERNANCE_CONTRACT_MISSING", {
+      faultHooks: faultHooks.replace(
+        "forced parent-interrupt cleanup self-test",
+        "cleanup review",
+      ),
+      acceptance, ownerGuide,
+    }],
     ["F02_DEPLOYED_BASELINE_STATUS_CONTRADICTION_PRESENT", {
       faultHooks,
       acceptance: `${acceptance}\nNothing has been deployed or armed. The current live Worker therefore still has no controller primitive.\n`,
@@ -988,6 +1063,11 @@ function assertUnsafeF02GovernanceMutationsFail(
       ),
       ownerGuide,
     }],
+    ["F02_ACCEPTANCE_GOVERNANCE_CONTRACT_MISSING", {
+      faultHooks,
+      acceptance: acceptance.replace("handle stream failures", "handle cleanup"),
+      ownerGuide,
+    }],
     ["F02_OWNER_GUIDE_GOVERNANCE_CONTRACT_MISSING", {
       faultHooks, acceptance,
       ownerGuide: ownerGuide.replace(
@@ -1007,6 +1087,13 @@ function assertUnsafeF02GovernanceMutationsFail(
       ownerGuide: ownerGuide.replace(
         "The all-off baseline remained the sole active baseline; no traffic rollback was required.",
         "The all-off baseline was restored.",
+      ),
+    }],
+    ["F02_OWNER_GUIDE_GOVERNANCE_CONTRACT_MISSING", {
+      faultHooks, acceptance,
+      ownerGuide: ownerGuide.replace(
+        "uses only dummy inputs and grants no live authority",
+        "validates launch readiness",
       ),
     }],
     ["F02_HISTORICAL_PASS_CONTRADICTION_PRESENT", {
@@ -1050,6 +1137,19 @@ function assertUnsafeF02GovernanceMutationsFail(
       rootReadme: rootReadme.replace(
         "previously reviewed controller build is deployed only as the current all-off sandbox baseline",
         "controller is ready",
+      ),
+      squareWorkerReadme,
+    }],
+    ["F02_ROOT_README_GOVERNANCE_CONTRACT_MISSING", {
+      faultHooks, acceptance, ownerGuide,
+      rootReadme: rootReadme.replace("runs all 20 local validators", "runs the local validators"),
+      squareWorkerReadme,
+    }],
+    ["F02_ROOT_README_GOVERNANCE_CONTRACT_MISSING", {
+      faultHooks, acceptance, ownerGuide,
+      rootReadme: rootReadme.replace(
+        "forced parent-interrupt cleanup self-test",
+        "cleanup self-test",
       ),
       squareWorkerReadme,
     }],
