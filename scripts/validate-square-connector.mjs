@@ -1196,6 +1196,37 @@ check("static configuration is default-off and pinned", () => {
   assert.doesNotMatch(wrangler, /SQUARE_ACCESS_TOKEN\s*=/);
 });
 
+check("all-off scheduled handling performs no D1 or Queue work", async () => {
+  const trace = [];
+  const env = baseEnv(new MockD1(trace), {
+    send: async () => { throw new Error("all-off cron must not touch Queue"); },
+  });
+  for (const name of ["SQUARE_OFFER_ENABLED", "SQUARE_WEBHOOK_ENABLED", "SQUARE_PASS_ENABLED",
+    "SQUARE_CONSUMER_ENABLED", "SQUARE_RECONCILIATION_ENABLED"]) env[name] = "false";
+  const waits = [];
+  await worker.scheduled({}, env, { waitUntil(promise) { waits.push(promise); } });
+  await Promise.all(waits);
+  assert.equal(waits.length, 0, "all-off cron must schedule no background task");
+  assert.deepEqual(trace, [], "all-off cron must prepare or execute no D1 statement");
+});
+
+check("pass cleanup runs only while pass handling is enabled", async () => {
+  const trace = [];
+  const db = new MockD1(trace);
+  const env = baseEnv(db, { send: async () => {} });
+  env.SQUARE_OFFER_ENABLED = "false";
+  env.SQUARE_WEBHOOK_ENABLED = "false";
+  env.SQUARE_CONSUMER_ENABLED = "false";
+  env.SQUARE_RECONCILIATION_ENABLED = "false";
+  db.passes.push(
+    { token_hash: "expired", expires_at: new Date(Date.now() - 60_000).toISOString(), revoked_at: null },
+    { token_hash: "current", expires_at: new Date(Date.now() + 60_000).toISOString(), revoked_at: null },
+  );
+  await runScheduled(env);
+  assert.deepEqual(trace, ["db:pass_cleanup"]);
+  assert.deepEqual(db.passes.map((row) => row.token_hash), ["current"]);
+});
+
 check("sandbox configuration is isolated, placeholder-gated, and default-off", async () => {
   assert.match(sandboxWrangler, /^name = "spartan-square-connector-sandbox"/m);
   assert.match(sandboxWrangler, /^workers_dev = true$/m);
