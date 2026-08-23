@@ -125,6 +125,14 @@ Required non-secret values before enablement:
 - `PROCESSING_LEASE_SECONDS` defaults to 900 seconds and is clamped to 300–3600 seconds
 - `PROCESSING_RECOVERY_LIMIT` defaults to 25 rows per table per scheduled run and is clamped to 1–100
 
+`APPS_SCRIPT_URL` must be the byte-exact versioned web-app URL
+`https://script.google.com/macros/s/<deployment-id>/exec`, with no credentials,
+port, query, or fragment. The connector sends the signed POST only to that
+origin, manually accepts one `302` or `303` response, and follows only the
+resulting exact `https://script.googleusercontent.com/macros/echo` URL with a
+bodyless GET. Any other destination, status, repeated redirect, content type,
+or response larger than 32 KiB fails closed before the Apps response is used.
+
 The Apps Script project must have `SQUARE_JOURNEY_ENABLED=true` and matching location, discount, group, and shared-secret properties. Run its journey-ledger diagnostic first.
 
 ## Production release order after sandbox signoff
