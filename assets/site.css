@@ -1962,6 +1962,86 @@ dialog::backdrop {
   font-size: 0.9rem;
 }
 
+.square-offer {
+  margin-top: 1.15rem;
+  padding: 1rem;
+  border: 2px solid color-mix(in srgb, var(--teal) 34%, var(--line));
+  border-radius: 1rem;
+  background: color-mix(in srgb, var(--teal) 6%, white);
+  text-align: left;
+}
+
+.square-offer[hidden],
+.square-offer-pass[hidden],
+.square-offer form[hidden] {
+  display: none;
+}
+
+.square-offer .eyebrow {
+  margin: 0;
+}
+
+.square-offer h3 {
+  margin: 0.25rem 0 0;
+  color: var(--ink);
+  font-size: 1.1rem;
+  line-height: 1.25;
+}
+
+.square-offer > p:not(.eyebrow) {
+  margin: 0.55rem 0 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.square-offer-consent {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  margin-top: 0.85rem;
+  padding: 0.75rem;
+  border: 1px solid #b9c8c1;
+  border-radius: 0.75rem;
+  background: #fff;
+  color: var(--ink);
+  font-size: 0.82rem;
+  font-weight: 700;
+  line-height: 1.35;
+  cursor: pointer;
+}
+
+.square-offer-consent:focus-within {
+  outline: 3px solid rgba(8, 120, 107, 0.2);
+  outline-offset: 1px;
+}
+
+.square-offer-consent input {
+  flex: 0 0 auto;
+  width: 1.1rem;
+  height: 1.1rem;
+  margin: 0.1rem 0 0;
+  accent-color: var(--teal);
+}
+
+.square-offer-challenge {
+  min-height: 4.1rem;
+  margin-top: 0.75rem;
+}
+
+.square-offer .button {
+  width: 100%;
+  min-height: 2.8rem;
+}
+
+.square-offer-status {
+  margin-top: 0.65rem;
+}
+
+.square-offer-pass {
+  margin-top: 0.75rem;
+  text-align: center;
+}
+
 .coupon-discovery {
   margin-top: 1.15rem;
   padding: 1rem;

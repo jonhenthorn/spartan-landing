@@ -15,6 +15,12 @@
   const couponDiscoveryForm = document.querySelector("[data-coupon-discovery]");
   const couponDiscoveryStatus = document.querySelector("[data-discovery-status]");
   const couponDiscoverySkip = document.querySelector("[data-discovery-skip]");
+  const squareOffer = document.querySelector("[data-square-offer]");
+  const squareOfferForm = document.querySelector("[data-square-offer-form]");
+  const squareOfferConsent = squareOfferForm?.querySelector('input[name="square_profile_consent"]');
+  const squareOfferChallenge = document.querySelector("[data-square-offer-challenge]");
+  const squareOfferStatus = document.querySelector("[data-square-offer-status]");
+  const squareOfferPass = document.querySelector("[data-square-offer-pass]");
   const couponResultNextAction = document.querySelector(".coupon-next-actions a");
   const couponForm = document.getElementById("coupon-form");
   const updatesForm = document.getElementById("updates-form");
@@ -34,7 +40,11 @@
   const confirmationEndpoint = "/api/forms";
   const discoveryEndpoint = "/api/forms/discovery";
   const discoveryContractVersion = "spartan-discovery-v1-2026-08-16";
+  const squareOfferConfigEndpoint = "/api/square/config";
+  const squareOfferEndpoint = "/api/square/offer";
+  const squareOfferContractVersion = "spartan-square-offer-v1-2026-08-17";
   const confirmationTimeoutMs = 30000;
+  const squareOfferTimeoutMs = 45000;
   const pendingSubmissionMaxAge = 30 * 60 * 1000;
   const pendingKeys = {
     coupon: "spartanPendingCouponSubmission",
@@ -94,6 +104,9 @@
   ];
   const metaBlockedEvents = new Set([
     "discovery_source_saved",
+    "square_offer_ready",
+    "square_offer_fallback",
+    "square_offer_pass_opened",
     "home_products_view",
     "home_delivery_click",
     "member_savings_click",
@@ -113,6 +126,13 @@
     "other"
   ]);
   let activeDiscoverySubmissionId = "";
+  let activeSquareOfferSubmissionId = "";
+  let activeSquareOfferCouponCode = "";
+  let squareOfferTurnstileToken = "";
+  let squareOfferTurnstileWidgetId = null;
+  let squareOfferConfigPromise = null;
+  let squareOfferConfigSubmissionId = "";
+  let squareOfferGeneration = 0;
 
   const sanitizeCampaignValue = (name, value) => {
     const candidate = String(value || "").trim().slice(0, 180);
@@ -211,6 +231,135 @@
     if (couponDiscoveryStatus) couponDiscoveryStatus.textContent = "";
   };
 
+  const setSquareOfferButtonState = () => {
+    const button = squareOfferForm?.querySelector('button[type="submit"]');
+    if (!button) return;
+    button.disabled = !(squareOfferConsent?.checked && squareOfferTurnstileToken);
+  };
+
+  const resetSquareOffer = () => {
+    squareOfferGeneration += 1;
+    activeSquareOfferSubmissionId = "";
+    activeSquareOfferCouponCode = "";
+    squareOfferTurnstileToken = "";
+    squareOffer?.setAttribute("hidden", "");
+    squareOfferForm?.removeAttribute("aria-busy");
+    squareOfferForm?.removeAttribute("hidden");
+    if (squareOfferConsent) squareOfferConsent.checked = false;
+    if (squareOfferStatus) squareOfferStatus.textContent = "";
+    if (squareOfferPass) squareOfferPass.hidden = true;
+    if (squareOfferTurnstileWidgetId !== null && window.turnstile?.reset) {
+      window.turnstile.reset(squareOfferTurnstileWidgetId);
+    }
+    setSquareOfferButtonState();
+  };
+
+  const loadTurnstile = () => {
+    if (window.turnstile?.render) return Promise.resolve(window.turnstile);
+    return new Promise((resolve, reject) => {
+      const existing = document.querySelector('script[data-spartan-turnstile]');
+      if (existing) {
+        existing.addEventListener("load", () => resolve(window.turnstile), { once: true });
+        existing.addEventListener("error", reject, { once: true });
+        return;
+      }
+      const script = document.createElement("script");
+      script.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
+      script.async = true;
+      script.defer = true;
+      script.dataset.spartanTurnstile = "true";
+      script.addEventListener("load", () => resolve(window.turnstile), { once: true });
+      script.addEventListener("error", reject, { once: true });
+      document.head.appendChild(script);
+    });
+  };
+
+  const loadSquareOfferConfig = (submissionId) => {
+    if (squareOfferConfigPromise && squareOfferConfigSubmissionId === submissionId) {
+      return squareOfferConfigPromise;
+    }
+    squareOfferConfigSubmissionId = submissionId;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), squareOfferTimeoutMs);
+    squareOfferConfigPromise = fetch(squareOfferConfigEndpoint, {
+      method: "GET",
+      credentials: "omit",
+      cache: "no-store",
+      headers: {
+        Accept: "application/json",
+        "X-Spartan-Submission-Id": submissionId
+      },
+      signal: controller.signal
+    }).then(async (response) => {
+      const result = await response.json();
+      const expectedKeys = [
+        "enabled",
+        "ok",
+        "square_offer_contract_version",
+        "turnstile_site_key"
+      ];
+      const actualKeys = result && typeof result === "object" && !Array.isArray(result)
+        ? Object.keys(result).sort()
+        : [];
+      if (!response.ok
+        || actualKeys.length !== expectedKeys.length
+        || !expectedKeys.every((key, index) => actualKeys[index] === key)
+        || result.ok !== true
+        || typeof result.enabled !== "boolean"
+        || typeof result.turnstile_site_key !== "string"
+        || result.square_offer_contract_version !== squareOfferContractVersion) {
+        throw new Error("Invalid Square offer configuration");
+      }
+      return result;
+    }).catch(() => ({ enabled: false, turnstile_site_key: "" }))
+      .finally(() => window.clearTimeout(timeout));
+    return squareOfferConfigPromise;
+  };
+
+  const showSquareOfferOption = async (submissionId, code) => {
+    if (!squareOffer || !squareOfferForm || !squareOfferChallenge) return;
+    if (!/^[A-Za-z0-9][A-Za-z0-9-]{7,79}$/.test(submissionId)) return;
+    if (!/^[A-Za-z0-9-]{2,40}$/.test(code)) return;
+
+    const requestGeneration = squareOfferGeneration;
+    const config = await loadSquareOfferConfig(submissionId);
+    if (requestGeneration !== squareOfferGeneration) return;
+    if (!config.enabled || !config.turnstile_site_key) return;
+
+    try {
+      await loadTurnstile();
+      if (requestGeneration !== squareOfferGeneration) return;
+      if (!window.turnstile?.render) throw new Error("Turnstile unavailable");
+      activeSquareOfferSubmissionId = submissionId;
+      activeSquareOfferCouponCode = code;
+      squareOffer.removeAttribute("hidden");
+      if (squareOfferTurnstileWidgetId === null) {
+        squareOfferTurnstileWidgetId = window.turnstile.render(squareOfferChallenge, {
+          sitekey: config.turnstile_site_key,
+          action: "square_offer",
+          callback: (token) => {
+            squareOfferTurnstileToken = String(token || "");
+            setSquareOfferButtonState();
+          },
+          "expired-callback": () => {
+            squareOfferTurnstileToken = "";
+            setSquareOfferButtonState();
+          },
+          "error-callback": () => {
+            squareOfferTurnstileToken = "";
+            if (squareOfferStatus) squareOfferStatus.textContent = "The checkout-code check is unavailable. Your coupon still works; staff can find you by phone.";
+            setSquareOfferButtonState();
+          }
+        });
+      } else {
+        window.turnstile.reset(squareOfferTurnstileWidgetId);
+      }
+      setSquareOfferButtonState();
+    } catch (error) {
+      resetSquareOffer();
+    }
+  };
+
   const showDiscoveryPrompt = (submissionId) => {
     if (!couponDiscoveryForm || !/^[A-Za-z0-9][A-Za-z0-9-]{7,79}$/.test(submissionId)) return;
     couponDiscoveryForm.reset();
@@ -226,6 +375,7 @@
 
   const showCouponResult = (code = "FIRST-VISIT", message = "", state = "success") => {
     resetDiscoveryPrompt();
+    resetSquareOffer();
     const content = couponResultContent[state] || couponResultContent.success;
     couponFormStep?.setAttribute("hidden", "");
     couponResult?.removeAttribute("hidden");
@@ -561,6 +711,7 @@
         track("coupon_confirmed");
       });
       showDiscoveryPrompt(submissionId);
+      showSquareOfferOption(submissionId, safeCode);
     }
 
     if (updatesResult === "requested") {
@@ -684,6 +835,105 @@
     resetDiscoveryPrompt();
     couponResultNextAction?.focus({ preventScroll: true });
   });
+
+  squareOfferConsent?.addEventListener("change", setSquareOfferButtonState);
+
+  const squareOfferResponseMatches = (result) => {
+    if (!result || typeof result !== "object" || Array.isArray(result)) return false;
+    const expectedKeys = [
+      "offer_result",
+      "ok",
+      "pass_available",
+      "pass_url",
+      "square_offer_contract_version"
+    ];
+    const actualKeys = Object.keys(result).sort();
+    return actualKeys.length === expectedKeys.length
+      && expectedKeys.every((key, index) => actualKeys[index] === key)
+      && result.ok === true
+      && ["ready", "already_ready", "staff_lookup_required", "already_redeemed"].includes(result.offer_result)
+      && typeof result.pass_available === "boolean"
+      && result.pass_url === "/api/square/pass"
+      && result.square_offer_contract_version === squareOfferContractVersion;
+  };
+
+  squareOfferForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!squareOfferConsent?.checked || !squareOfferTurnstileToken) {
+      if (squareOfferStatus) squareOfferStatus.textContent = "Check the Square Customer Directory choice and complete the security check first.";
+      return;
+    }
+    if (!activeSquareOfferSubmissionId || !activeSquareOfferCouponCode) {
+      if (squareOfferStatus) squareOfferStatus.textContent = "Your coupon is still ready, but this scan code cannot be prepared. Staff can find you by phone.";
+      return;
+    }
+
+    const button = squareOfferForm.querySelector('button[type="submit"]');
+    squareOfferForm.setAttribute("aria-busy", "true");
+    if (button) {
+      button.disabled = true;
+      button.textContent = "Preparing…";
+    }
+    if (squareOfferStatus) squareOfferStatus.textContent = "Preparing your checkout scan code…";
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), squareOfferTimeoutMs);
+    try {
+      const response = await fetch(squareOfferEndpoint, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          submission_id: activeSquareOfferSubmissionId,
+          coupon_code: activeSquareOfferCouponCode,
+          square_profile_consent: "yes",
+          turnstile_token: squareOfferTurnstileToken
+        }),
+        signal: controller.signal
+      });
+      const result = await response.json();
+      if (!response.ok || !squareOfferResponseMatches(result)) throw new Error("Unconfirmed Square offer response");
+
+      squareOfferForm.removeAttribute("aria-busy");
+      squareOfferTurnstileToken = "";
+      if (result.pass_available && ["ready", "already_ready"].includes(result.offer_result)) {
+        squareOfferForm.setAttribute("hidden", "");
+        if (squareOfferStatus) squareOfferStatus.textContent = "Your scan code is ready. Open it and show it to staff before they charge your order.";
+        if (squareOfferPass) {
+          squareOfferPass.href = result.pass_url;
+          squareOfferPass.hidden = false;
+        }
+        track("square_offer_ready");
+        squareOfferStatus?.focus({ preventScroll: true });
+      } else if (result.offer_result === "already_redeemed") {
+        squareOfferForm.setAttribute("hidden", "");
+        if (squareOfferStatus) squareOfferStatus.textContent = "This first-visit offer is already recorded as redeemed. No new scan code was created.";
+        squareOfferStatus?.focus({ preventScroll: true });
+      } else {
+        squareOfferForm.setAttribute("hidden", "");
+        if (squareOfferStatus) squareOfferStatus.textContent = "We couldn’t safely verify one eligible Square profile, so no scan code was created. Show your coupon to staff; they can confirm eligibility and find you by phone.";
+        track("square_offer_fallback");
+        squareOfferStatus?.focus({ preventScroll: true });
+      }
+    } catch (error) {
+      squareOfferForm.removeAttribute("aria-busy");
+      squareOfferTurnstileToken = "";
+      if (squareOfferTurnstileWidgetId !== null && window.turnstile?.reset) {
+        window.turnstile.reset(squareOfferTurnstileWidgetId);
+      }
+      if (button) button.textContent = "Prepare my scan code";
+      if (squareOfferStatus) squareOfferStatus.textContent = "We couldn’t prepare the scan code. Your coupon is still ready; staff can find you by phone.";
+      track("square_offer_fallback");
+      setSquareOfferButtonState();
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  });
+
+  squareOfferPass?.addEventListener("click", () => track("square_offer_pass_opened"));
 
   const showUnconfirmedState = (form, status, kind) => {
     if (status) {

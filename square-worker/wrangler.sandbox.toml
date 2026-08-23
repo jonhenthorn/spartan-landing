@@ -1,0 +1,57 @@
+name = "spartan-square-connector-sandbox"
+main = "src/sandbox.mjs"
+compatibility_date = "2026-08-17"
+workers_dev = true
+
+# Intentionally no custom routes or production zone. This origin is the isolated
+# workers.dev sandbox hostname and is never used by the production website.
+
+[vars]
+CONNECTOR_ENVIRONMENT = "sandbox"
+ALLOWED_ORIGINS = "https://spartan-square-connector-sandbox.bixbynutrition.workers.dev"
+SQUARE_ENVIRONMENT = "sandbox"
+SQUARE_API_BASE_URL = "https://connect.squareupsandbox.com"
+SQUARE_API_VERSION = "2026-07-15"
+SQUARE_LOCATION_ID = "L34NX9YA4PGF6"
+SQUARE_DISCOUNT_CATALOG_ID = "2LUX2NSI5J3NRUQVPTLIYKEK"
+SQUARE_ELIGIBLE_GROUP_ID = "1BQP5N2CYS5BT5KYY39Z53954S"
+SQUARE_REDEEMED_GROUP_ID = "70AGVJZGBK8K7YV33N42SNDTNR"
+SQUARE_QUALIFYING_VARIATION_IDS = "74BBBGMDIZEOBYFD2RLJX4F5,JKCNQ4ROWWMZFGQIEABKFGQR"
+SQUARE_MERCHANT_ID = "ML8W3CSGD2B71"
+SQUARE_WEBHOOK_NOTIFICATION_URL = "https://spartan-square-connector-sandbox.bixbynutrition.workers.dev/api/square/webhook"
+TURNSTILE_SITE_KEY = "0x4AAAAAAETIBGUWCQZhgbGM"
+TURNSTILE_EXPECTED_ACTION = "square_offer_sandbox"
+SQUARE_SANDBOX_TEST_HARNESS_ENABLED = "false"
+SQUARE_SANDBOX_FAULTS_ENABLED = "false"
+SQUARE_OFFER_ENABLED = "false"
+SQUARE_WEBHOOK_ENABLED = "false"
+SQUARE_PASS_ENABLED = "false"
+SQUARE_CONSUMER_ENABLED = "false"
+SQUARE_RECONCILIATION_ENABLED = "false"
+SQUARE_CANARY_ONLY = "true"
+SQUARE_CANARY_SUBMISSION_IDS = ""
+PASS_SESSION_TTL_SECONDS = "2592000"
+PROCESSING_LEASE_SECONDS = "900"
+PROCESSING_RECOVERY_LIMIT = "25"
+RECONCILIATION_LOOKBACK_HOURS = "96"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "spartan-square-connector-sandbox"
+database_id = "9531221e-cabe-4ed4-b7d4-f715798b8945"
+preview_database_id = "ffd69503-aa8d-4677-ac4f-8875a0860bb2"
+migrations_dir = "migrations"
+
+[[queues.producers]]
+binding = "SQUARE_QUEUE"
+queue = "spartan-square-connector-sandbox"
+
+[[queues.consumers]]
+queue = "spartan-square-connector-sandbox"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 5
+dead_letter_queue = "spartan-square-connector-sandbox-dlq"
+
+[triggers]
+crons = ["*/5 * * * *"]

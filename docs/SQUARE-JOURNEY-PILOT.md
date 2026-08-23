@@ -1,8 +1,8 @@
 # Spartan Square journey-measurement pilot
 
-Last reviewed: August 16, 2026
+Last reviewed: August 19, 2026
 
-Status: **Project 2 — active.** The reviewed empty ledger foundation is live. No customer event is recorded and no Square setting or customer record changes until the controlled POS test is completed.
+Status: **Project 2 — active.** The ledger foundation and isolated sandbox connector are live but disabled. An owner-controlled QR/customer-attachment and paid-transaction proof is complete, and the sandbox connector later proved one qualifying redemption plus a full-refund review without restoring eligibility or issuing another offer. Those proofs were synthetic and not linked to a genuine website submission. A later return purchase, genuine website redemption and 30-day baseline remain open.
 
 ## Outcome
 
@@ -14,23 +14,27 @@ Connect a website first-visit claim to a verified Square redemption and later pu
 - How many customers return within 30 days?
 - Is the workflow accurate and light enough to support referral rewards and lifecycle email?
 
-The pilot uses the current Google Sheet, Square Customer Directory and the existing first-drink discount. It does not add a CRM, loyalty subscription, staff spreadsheet or custom database.
+The manual staff workflow and original ledger baseline use the current Google Sheet, Square Customer Directory and the existing first-drink discount; they add no CRM, loyalty subscription or staff spreadsheet. Project 2 separately includes the live-disabled connector's private D1 delivery ledger, so the earlier “no custom database” description does not apply to the whole technical system.
 
 ## Customer and staff journey
 
 ```text
-Customer shows website offer
-→ staff searches Square by phone
-→ staff selects the existing customer or creates name + phone only
+Customer shows website offer or approved QR
+→ staff scans the QR or searches Square by phone
+→ staff confirms the intended customer profile
 → staff attaches the customer before payment
-→ staff applies the dedicated first-drink discount to one eligible drink
+→ staff opens the selected eligible prepared-drink line and confirms quantity 1
+→ staff applies `50% Off First Drink — Enter 50%` to that line only
+→ staff confirms every other item remains full price and no discount is stacked
 → staff completes the sale
 → owner reconciles qualifying Square transactions once each week
 ```
 
-Staff works only in Square. Target added time is no more than 20 seconds per qualifying redemption.
+Staff works only in Square. Target added time is no more than 20 seconds per qualifying redemption. Never use the sale-level **Add discount** control for this offer. If two identical drinks are combined on one line, split the eligible drink to a separate quantity-one line or transaction before applying the discount; Square otherwise discounts both quantities.
 
 Do not manually add a website claimant's email to Square during this pilot. Square customer identity is operational purchase evidence; it is not Spartan Updates email or SMS permission.
+
+The current phone-search/manual-coupon path remains the default. The local default-off Square profile/scan-code candidate may be offered only as a separate, optional action after the website has already confirmed and displayed the coupon. Declining it cannot remove or delay the coupon, and Square activity can never create, restore or change Brevo email/SMS permission. See [`SQUARE-CONNECTOR-ROLLOUT.md`](SQUARE-CONNECTOR-ROLLOUT.md).
 
 ## Phase 0 — live Square verification
 
@@ -41,34 +45,42 @@ Before changing the Sheet or POS workflow, verify in the signed-in Spartan accou
 3. Customer Management visibility and staff permission to search, create and attach customers.
 4. Whether a completed POS payment records a stable Square customer ID.
 5. Exact first-drink discount name, catalog ID, line-item scope, stacking behavior and report visibility.
-6. Whether a fixed 50% line-item discount can replace manual entry without changing eligibility or history.
+6. Fixed 50% line-item behavior, including quantity, stacking, eligibility and reporting history.
 7. Transaction/customer export columns, stable payment/order IDs and refund behavior.
 8. Existing customer-ID coverage and obvious duplicate-customer rate.
 
-Do not rename the existing discount in place. Preserve its reporting history; create a new fixed discount only after the controlled test proves it is safer.
+The owner changed the existing discount from variable percentage to fixed 50%. Do not change its name, value or rules again without a new controlled test and report-history check.
 
-### Live account findings — August 16, 2026
+### Live account findings — August 16–17, 2026
 
-Confirmed read-only in the Spartan Square Dashboard:
+Confirmed in the signed-in Spartan Square account:
 
 - Customer Directory is available and currently reports **3,539 customers**. It already exposes Square-created groups including New Customers, Regulars and Lapsed.
 - The dashboard customer form supports first name, last name, phone, email and a **Reference ID**. That Reference ID is a possible later non-PII linkage/scan field, but nothing was written during this audit.
 - Square Loyalty is **not active**. Opening it shows a 30-day trial offer, so the pilot will not depend on Loyalty.
 - The account has Square Online Free. It is also in a Square for Restaurants Plus free trial ending **September 11, 2026**. The manage screen shows the current two-countertop-POS configuration as **$139/month if subscribed**. No subscription choice was changed. Square's current restaurant guidance says an unselected trial downgrades to Free after the trial; verify that account-specific behavior before the deadline. [Square restaurant plan guidance](https://squareup.com/us/en/point-of-sale/restaurants)
 - One active location named `Spartan` is visible with Square location ID `3MDGSXS33HERT`.
+- The fixed first-drink discount has Square catalog object ID `5ZXWVO3YGDYFHPZBD5KX6JXI`. Connector verification must use this ID plus the recorded 50% line-item evidence, not the display name alone.
 - The Discounts report identifies `50% Off First Drink — Enter 50%` separately and showed **$26.12 discounted** in the selected January 1–December 31, 2026 report view at audit time. This proves the offer is reportable by name; it does not yet prove claimant/customer linkage or usage count.
 - One recent paid-transaction detail showed stable transaction, order and receipt links but no visible customer-profile link. This is a single sample, not a customer-link coverage estimate; the controlled test and baseline must measure coverage.
+- On August 17, an owner-controlled QR attached the intended labeled test customer before a paid **$3.58** Best Defense transaction. Square recorded a stable customer, payment, order and location link. This proves QR/customer attachment and completed-sale attribution for that test; it does not prove a website claim, genuine coupon redemption or ledger write.
+- The owner changed `50% Off First Drink — Enter 50%` to a fixed 50% discount. A no-charge cart test showed that applying it from one selected Kids Shake line left BCAAs and Protein Coffee at full price. Applying it to a quantity-two Kids Shake line discounted both drinks, so quantity 1 is a mandatory staff check.
+- Scanning/attaching the test customer did not apply the discount, record redemption or remove the customer from the eligible group. QR attachment is identity only; staff action and later reconciliation remain required.
+- An August 19 read-only preflight reconfirmed that the production discount is still fixed at 50%, assigned to `Spartan` and addressed by catalog object ID `5ZXWVO3YGDYFHPZBD5KX6JXI`; its automatic `Discount rules` option was unchecked. The intended manual eligible group is visible in Customer Directory, but its API group ID and the eligible variation allowlist still require exact production verification before deployment.
+- The same preflight found Square Text Message Marketing `Not subscribed`; the separate `Coupon for joining` remains 50%, while `Collect text subscribers on point of sale` offered a `Turn on` action. That checkout collection prompt was therefore off at review time. Reconfirm it immediately before the owner canary.
 
 Still requires hands-on POS/account verification:
 
-- Staff/customer-management permissions on every checkout device.
-- Attach-before-payment behavior in the actual Restaurant POS mode.
-- Fixed-discount catalog ID, line-level scope, stacking and receipt behavior.
+- Staff/customer-management permissions and the SOP on every checkout device.
+- Complete eligible-drink variation allowlist, stacking protection, receipt/report behavior and quantity-one compliance in the live POS workflow.
 - Customer, transaction and discount export columns.
 - Customer duplicate rate and the percentage of qualifying transactions with a usable customer ID.
-- One controlled qualifying redemption, later purchase and refund/reversal.
+- One genuine website-linked redemption and a later return purchase. The isolated sandbox qualifying-purchase refund-review path is proven; a later-return-purchase refund remains part of the production owner canary.
+- Immediate pre-canary reconfirmation that Square's separate 50%-for-text-signup checkout prompt remains off or cannot create a competing first-visit offer.
 
-No customer, discount, plan, transaction or Square setting was created or changed during this read-only audit.
+For automated preparation, a matched existing Square customer with a known linked completed order at Spartan is routed to staff review and receives no eligibility group or scan pass. A clean Square history search means only that no prior **linked** completed order was found; it cannot prove the person never purchased anonymously. If the history check is unavailable, the connector fails closed to the existing staff/manual path.
+
+The August 16 review was read-only. The separate August 17 controlled test created a labeled test customer and one paid transaction, and the owner changed the existing discount to fixed 50%. No plan subscription, website redemption record or journey-ledger event was created.
 
 ### Provisional plan recommendation
 
@@ -88,7 +100,7 @@ Use one owner-controlled customer and four auditable events:
 1. Submit a labeled website claim.
 2. Attach the matching Square customer, apply the qualifying discount and complete one paid transaction.
 3. Complete a separate later purchase with the same customer to prove repeat tracking.
-4. Refund or reverse a controlled transaction and prove that history is counter-recorded rather than deleted.
+4. Refund a controlled transaction and prove that append-only review history is recorded rather than deleted. Project 2 does not automatically restore eligibility, reissue a coupon or reverse the redemption snapshot.
 
 Reconcile and retain:
 
@@ -97,11 +109,11 @@ Reconcile and retain:
 - Discount catalog ID/name and applied amount.
 - Transaction time, net amount and currency.
 - Match method/confidence.
-- Refund/reversal reference when applicable.
+- Refund/review reference when applicable.
 
 ## Phase 2 — restricted Sheet ledger
 
-Keep the existing `spartan leads` tab and its 41 current columns unchanged. Its redemption fields remain an owner-friendly current snapshot. The approved schema-only foundation may create the two exact, header-only tabs below before the controlled proof; it does not append contacts, identity links or events. Data entry remains gated on Phase 1 confirming the available Square fields.
+Preserve the existing values in the `spartan leads` tab and append exactly four Square profile-consent audit columns, bringing the tab from 41 to 45 columns: `square_customer_profile_consent_status`, `square_customer_profile_consent_timestamp`, `square_customer_profile_consent_language_version` and `square_customer_profile_consent_language`. Historical rows remain blank; the connector writes these fields only on the original confirmed claim after the customer separately checks the Square profile option. Existing redemption fields remain an owner-friendly current snapshot. The approved schema-only foundation may create the two exact, header-only tabs below before the controlled proof; it does not append contacts, identity links or events. Data entry remains gated on Phase 1 confirming the available Square fields.
 
 The current workbook is private and owner-only. The setup intentionally does not change spreadsheet sharing or add sheet protections because Apps Script cannot safely prove or preserve every existing editor through that change. Add explicit tab protection only after the durable owner verifies the workbook access list and the enforcement can be tested without removing legitimate recovery access.
 
@@ -164,7 +176,7 @@ reversal_of_event_id
 notes
 ```
 
-Initial raw event types are `coupon_redeemed`, `order_completed`, `order_refunded`, `redemption_reversed`, `identity_linked` and `identity_merge_corrected`. `repeat_purchase_completed` is a derived reporting outcome from a later qualifying `order_completed` event; it is not imported as a second raw event.
+Initial automated raw event types are `coupon_redeemed`, `order_completed`, `order_refunded` and `identity_linked`. `redemption_reversed` and `identity_merge_corrected` are reserved for an explicit, audited correction process; the connector does not create them automatically. `repeat_purchase_completed` is a derived reporting outcome from a later qualifying `order_completed` event; it is not imported as a second raw event.
 
 The idempotency key is `source_system:source_event_id:event_type`. One Square payment cannot satisfy two redemptions or two future referral rewards. Corrections and refunds append counter-events; they never erase history.
 
@@ -204,7 +216,7 @@ Report:
 - Redemptions and repeat behavior by discovery-source cohort.
 - Square customer-link coverage.
 - Unmatched/ambiguous transactions and discount errors.
-- Refunds/reversals.
+- Refunds and owner-review status; any later manual reversal is reported separately.
 - Owner reconciliation minutes.
 
 Use `no linked purchase recorded`, not `did not return`, when customer linkage is incomplete. Exclude claims that are not old enough for the selected measurement window.
@@ -224,9 +236,11 @@ If Loyalty is already included, test its phone check-in as a possible lower-burd
 
 Future reusable automation should use scoped Square OAuth and verified webhooks, not an unrestricted personal access token. The manual baseline must prove which fields and staff behavior are dependable first.
 
+The separate connector design, privacy gate, default-off flags, sandbox/canary sequence and rollback procedure are defined in [`SQUARE-CONNECTOR-ROLLOUT.md`](SQUARE-CONNECTOR-ROLLOUT.md). Documentation does not authorize deployment or production Square writes.
+
 ## Definition of done
 
-- The controlled claim → redemption → later purchase → reversal path is reproducible.
+- The controlled claim → redemption → later purchase → refund-review path is reproducible.
 - Every qualifying offer use has stable Square IDs or a documented exception.
 - The two ledger tabs are append-only, restricted through the private owner-only workbook and restorable; explicit tab protection is added only after its access effects are verified.
 - Mature-window KPIs reproduce from raw events and show match coverage.

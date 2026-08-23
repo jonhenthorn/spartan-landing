@@ -13,7 +13,7 @@
     <meta name="theme-color" content="#18302a" />
     <link rel="canonical" href="https://spartandrink.com/" />
     <link rel="icon" href="assets/favicon.ico" sizes="any" />
-    <link rel="stylesheet" href="assets/site.css?v=20260816c" />
+    <link rel="stylesheet" href="assets/site.css?v=20260817a" />
 
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Spartan Nutrition" />
@@ -1268,6 +1268,22 @@
           <p data-coupon-result-instruction>Save or screenshot this coupon and show it to staff when ordering.</p>
           <p class="coupon-code">Claim: <span data-coupon-code>FIRST-VISIT</span></p>
           <p class="coupon-result-message" data-coupon-result-message hidden></p>
+          <section class="square-offer" data-square-offer hidden aria-labelledby="square-offer-title">
+            <p class="eyebrow">Faster checkout</p>
+            <h3 id="square-offer-title">Prepare your checkout scan code</h3>
+            <p>Your coupon is already ready. This optional step lets staff scan your code, find your offer in Square, and attach your visit before checkout.</p>
+            <form data-square-offer-form>
+              <label class="square-offer-consent">
+                <input type="checkbox" name="square_profile_consent" value="yes" />
+                <span>Save my name and mobile number in Spartan Nutrition’s Square Customer Directory to find my first-visit offer and link my in-store purchases. This is not permission for marketing emails or texts.</span>
+              </label>
+              <div class="square-offer-challenge" data-square-offer-challenge></div>
+              <button class="button button-secondary" type="submit" disabled>Prepare my scan code</button>
+            </form>
+            <p class="form-status square-offer-status" role="status" aria-live="polite" tabindex="-1" data-square-offer-status></p>
+            <a class="button button-primary square-offer-pass" href="#first-visit" target="_blank" rel="noopener" data-square-offer-pass hidden>Open my checkout scan code</a>
+            <p class="fine-print">Skip this if you prefer. Your coupon still works—staff can use your saved claim and find you by phone.</p>
+          </section>
           <form class="coupon-discovery" id="coupon-discovery-form" data-coupon-discovery hidden>
             <fieldset aria-describedby="coupon-discovery-help">
               <legend>One quick question—how did you first hear about Spartan?</legend>
@@ -1306,6 +1322,6 @@
       <button class="primary" type="button" data-open-coupon>50% off</button>
     </nav>
 
-    <script src="assets/site.js?v=20260816c" defer></script>
+    <script src="assets/site.js?v=20260817a" defer></script>
   </body>
 </html>
