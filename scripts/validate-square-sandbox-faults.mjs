@@ -6261,6 +6261,9 @@ check("O-01 official wrapper commits both guarded business batches atomically an
   let activeProvider = null;
   let appsResponseMode = "success";
   let squareResponseMode = "success";
+  let pendingAppsResponse = null;
+  const appsRequestUrl = baseSandboxEnv().APPS_SCRIPT_URL;
+  const appsResponseUrl = "https://script.googleusercontent.com/macros/echo?fixture=o01-guarded-business-batches";
   const externalCalls = [];
   const waitForAbort = (signal) => new Promise((resolve, reject) => {
     if (!signal) return reject(new Error("missing O-01 transport AbortSignal"));
@@ -6277,30 +6280,54 @@ check("O-01 official wrapper commits both guarded business batches atomically an
     const pathname = url.pathname;
     if (!activeProvider) throw new Error("provider fixture unavailable");
     if (url.hostname === "script.google.com") {
+      assert.equal(url.toString(), appsRequestUrl);
+      assert.equal(init.method, "POST");
+      assert.equal(init.redirect, "manual");
+      assert.deepEqual([...new Headers(init.headers).entries()], [
+        ["accept", "application/json"],
+        ["content-type", "application/x-www-form-urlencoded;charset=UTF-8"],
+      ]);
+      assert.equal(pendingAppsResponse, null, "each signed Apps request must consume its one response");
       const fields = new URLSearchParams(String(init.body || ""));
       const eventType = fields.get("square_event_type");
+      assert.match(fields.get("connector_signature") || "", /^[a-f0-9]{64}$/);
       externalCalls.push(eventType);
       if (appsResponseMode === "network") throw new TypeError("simulated Apps network ambiguity");
       if (appsResponseMode === "timeout") return waitForAbort(init.signal);
-      if (appsResponseMode === "oversize") {
-        return new Response("x".repeat(32 * 1024 + 1), { status: 200 });
+      pendingAppsResponse = { eventType, mode: appsResponseMode };
+      return new Response(null, { status: 303, headers: { Location: appsResponseUrl } });
+    }
+    if (url.toString() === appsResponseUrl) {
+      assert.ok(pendingAppsResponse, "the Apps response GET must follow one signed POST");
+      assert.equal(init.method, "GET");
+      assert.equal(init.redirect, "manual");
+      assert.equal(Object.hasOwn(init, "body"), false);
+      assert.deepEqual([...new Headers(init.headers).entries()], [["accept", "application/json"]]);
+      const { eventType, mode } = pendingAppsResponse;
+      pendingAppsResponse = null;
+      if (mode === "oversize") {
+        return new Response("x".repeat(32 * 1024 + 1), {
+          status: 200, headers: { "Content-Type": "application/json" },
+        });
       }
-      if (appsResponseMode === "malformed") {
-        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      if (mode === "malformed") {
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200, headers: { "Content-Type": "application/json" },
+        });
       }
-      if (appsResponseMode === "retry") {
+      if (mode === "retry") {
         return new Response(JSON.stringify({
           ok: false,
           code: "event_commit_failed",
           connector_contract_version: "spartan-square-connector-v1-2026-08-17",
-        }), { status: 503 });
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
       }
       const response = {
         ok: true,
         operation: "event_commit",
-        event_commit_result: appsResponseMode === "duplicate" ? "duplicate" : "committed",
+        event_commit_result: mode === "duplicate" ? "duplicate" : "committed",
         square_event_type: eventType,
-        order_event_id: appsResponseMode === "invalid_uuid"
+        order_event_id: mode === "invalid_uuid"
           ? "not-a-canonical-apps-uuid"
           : eventType === "payment_completed"
           ? "123e4567-e89b-42d3-a456-426614174001"
@@ -6310,14 +6337,16 @@ check("O-01 official wrapper commits both guarded business batches atomically an
           : "123e4567-e89b-42d3-a456-426614174004",
         reversal_event_id: "",
         redemption_result: eventType === "payment_completed"
-          ? (appsResponseMode === "duplicate" ? "already_recorded" : "redeemed")
+          ? (mode === "duplicate" ? "already_recorded" : "redeemed")
           : "refund_recorded",
-        rows_appended: appsResponseMode === "duplicate" ? 0
-          : appsResponseMode === "success_one" ? 1
+        rows_appended: mode === "duplicate" ? 0
+          : mode === "success_one" ? 1
           : eventType === "payment_completed" ? 2 : 1,
         connector_contract_version: "spartan-square-connector-v1-2026-08-17",
       };
-      return new Response(JSON.stringify(response), { status: 200 });
+      return new Response(JSON.stringify(response), {
+        status: 200, headers: { "Content-Type": "application/json" },
+      });
     }
     if (pathname.includes("/groups/") && ["DELETE", "PUT"].includes(init.method)) {
       externalCalls.push(init.method);
