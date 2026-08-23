@@ -11,6 +11,10 @@ const DEFAULT_PROCESSING_RECOVERY_LIMIT = 25;
 const WEBHOOK_ENQUEUED_STALE_SECONDS = 1800;
 const PRODUCTION_SQUARE_API_BASE = "https://connect.squareup.com";
 const SANDBOX_SQUARE_API_BASE = "https://connect.squareupsandbox.com";
+const APPS_SCRIPT_ORIGIN = "https://script.google.com";
+const APPS_SCRIPT_RESPONSE_ORIGIN = "https://script.googleusercontent.com";
+const APPS_SCRIPT_MAX_REDIRECT_BYTES = 2048;
+const APPS_SCRIPT_MAX_RESPONSE_BYTES = 32 * 1024;
 const PRODUCTION_LOCATION_ID = "3MDGSXS33HERT";
 const SANDBOX_OWNER_HARNESS_PATH = "/sandbox/owner-offer-test";
 const encoder = new TextEncoder();
@@ -3084,7 +3088,8 @@ async function boundedResponseText(response, maximumBytes) {
 }
 
 async function appsCall(action, fields, env, options = null) {
-  if (!env.APPS_SCRIPT_URL || !env.APPS_SCRIPT_SHARED_SECRET) throw new ConnectorError("APPS_NOT_CONFIGURED", 503);
+  const appsScriptUrl = canonicalAppsScriptUrl(env.APPS_SCRIPT_URL);
+  if (!appsScriptUrl || !env.APPS_SCRIPT_SHARED_SECRET) throw new ConnectorError("APPS_NOT_CONFIGURED", 503);
   const transport = exactTransportOptions(options);
   const operation = APPS_OPERATIONS[action];
   if (!operation) throw new ConnectorError("APPS_OPERATION_INVALID", 500);
@@ -3108,36 +3113,78 @@ async function appsCall(action, fields, env, options = null) {
   const body = `${unsignedBody}&connector_signature=${encodeURIComponent(signature)}`;
   let response;
   try {
-    response = await fetch(env.APPS_SCRIPT_URL, {
+    response = await fetch(appsScriptUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+      },
       body,
-      redirect: "follow",
+      redirect: "manual",
       ...(transport ? { signal: transport.signal } : {}),
     });
   } catch {
     throw transient("APPS_REQUEST_FAILED");
   }
+  if (![302, 303].includes(Number(response?.status))) throw transient("APPS_REQUEST_FAILED");
+  const responseUrl = canonicalAppsScriptResponseUrl(response.headers?.get("location"));
+  if (!responseUrl) throw new ConnectorError("APPS_RESPONSE_INVALID", 502);
+  try {
+    response = await fetch(responseUrl, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      redirect: "manual",
+      ...(transport ? { signal: transport.signal } : {}),
+    });
+  } catch {
+    throw transient("APPS_REQUEST_FAILED");
+  }
+  if (Number(response?.status) >= 300 && Number(response?.status) < 400) {
+    throw new ConnectorError("APPS_RESPONSE_INVALID", 502);
+  }
+  if (!response?.ok) throw transient("APPS_REQUEST_FAILED");
+  const contentType = String(response.headers?.get("content-type") || "");
+  if (contentType.length > 128 ||
+      !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(contentType)) {
+    throw new ConnectorError("APPS_RESPONSE_INVALID", 502);
+  }
   let text;
-  try { text = transport
-    ? await boundedResponseText(response, transport.maxResponseBytes)
-    : await response.text(); }
+  const maximumResponseBytes = Math.min(
+    APPS_SCRIPT_MAX_RESPONSE_BYTES,
+    transport?.maxResponseBytes ?? APPS_SCRIPT_MAX_RESPONSE_BYTES,
+  );
+  try { text = await boundedResponseText(response, maximumResponseBytes); }
   catch (error) {
     if (error?.code === "RESPONSE_TOO_LARGE") throw new ConnectorError("APPS_RESPONSE_TOO_LARGE", 502);
     throw transient("APPS_REQUEST_FAILED");
   }
-  if (!transport && encoder.encode(text).byteLength > 32 * 1024) {
-    throw new ConnectorError("APPS_RESPONSE_TOO_LARGE", 502);
-  }
   let parsed;
   try { parsed = JSON.parse(text); } catch {
-    if (!response.ok) throw transient("APPS_REQUEST_FAILED");
     throw new ConnectorError("APPS_RESPONSE_INVALID", 502);
   }
   rejectEmailFields(parsed);
   if (parsed?.ok === false) throw appsResponseError(action, parsed);
-  if (!response.ok) throw transient("APPS_REQUEST_FAILED");
   return parsed;
+}
+
+function canonicalAppsScriptUrl(value) {
+  if (typeof value !== "string" || !value) return "";
+  let url;
+  try { url = new URL(value); } catch { return ""; }
+  if (url.origin !== APPS_SCRIPT_ORIGIN ||
+      !/^\/macros\/s\/[A-Za-z0-9_-]{20,256}\/exec$/.test(url.pathname) ||
+      url.username || url.password || url.port || url.search || url.hash || url.toString() !== value) return "";
+  return value;
+}
+
+function canonicalAppsScriptResponseUrl(value) {
+  if (typeof value !== "string" || !value ||
+      encoder.encode(value).byteLength > APPS_SCRIPT_MAX_REDIRECT_BYTES) return "";
+  let url;
+  try { url = new URL(value); } catch { return ""; }
+  if (url.origin !== APPS_SCRIPT_RESPONSE_ORIGIN || url.pathname !== "/macros/echo" ||
+      url.username || url.password || url.port || url.hash || url.toString() !== value) return "";
+  return value;
 }
 
 function appsResponseError(action, response) {
@@ -3290,7 +3337,7 @@ function offerConfigured(env) {
     env.SQUARE_LOCATION_ID && env.SQUARE_DISCOUNT_CATALOG_ID && env.SQUARE_ELIGIBLE_GROUP_ID &&
     csvSet(env.SQUARE_QUALIFYING_VARIATION_IDS).size > 0 && env.TURNSTILE_SITE_KEY &&
     env.TURNSTILE_SECRET_KEY && secretReady(env.D1_HASH_SECRET) && secretReady(env.PASS_SESSION_SECRET) &&
-    env.APPS_SCRIPT_URL && secretReady(env.APPS_SCRIPT_SHARED_SECRET),
+    canonicalAppsScriptUrl(env.APPS_SCRIPT_URL) && secretReady(env.APPS_SCRIPT_SHARED_SECRET),
   );
 }
 

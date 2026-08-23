@@ -3578,6 +3578,8 @@ check("F-03 offer isolation handles two Square matches once and repeats without 
   let appsCalls = 0;
   let squareSearchCalls = 0;
   let squareWriteCalls = 0;
+  let pendingAppsResponse = null;
+  const appsResponseUrl = "https://script.googleusercontent.com/macros/echo?fixture=f03-offer-isolation";
   globalThis.fetch = async (input, init = {}) => {
     const url = String(input);
     if (url === "https://challenges.cloudflare.com/turnstile/v0/siteverify") {
@@ -3590,9 +3592,16 @@ check("F-03 offer isolation handles two Square matches once and repeats without 
     }
     if (url === APPS_URL) {
       appsCalls += 1;
+      assert.equal(init.method, "POST");
+      assert.equal(init.redirect, "manual");
+      assert.deepEqual([...new Headers(init.headers).entries()], [
+        ["accept", "application/json"],
+        ["content-type", "application/x-www-form-urlencoded;charset=UTF-8"],
+      ]);
       const params = new URLSearchParams(String(init.body || ""));
       assert.equal(params.get("operation"), "offer_prepare");
-      return Response.json({
+      assert.match(params.get("connector_signature") || "", /^[a-f0-9]{64}$/);
+      pendingAppsResponse = {
         ok: true,
         operation: "offer_prepare",
         offer_prepare_result: "eligible",
@@ -3604,7 +3613,18 @@ check("F-03 offer isolation handles two Square matches once and repeats without 
         square_customer_id: "",
         identity_link_id: "",
         connector_contract_version: PRIVATE_CONTRACT,
-      });
+      };
+      return new Response(null, { status: 303, headers: { Location: appsResponseUrl } });
+    }
+    if (url === appsResponseUrl) {
+      assert.ok(pendingAppsResponse, "the Apps response GET must follow one signed POST");
+      assert.equal(init.method, "GET");
+      assert.equal(init.redirect, "manual");
+      assert.equal(Object.hasOwn(init, "body"), false);
+      assert.deepEqual([...new Headers(init.headers).entries()], [["accept", "application/json"]]);
+      const response = pendingAppsResponse;
+      pendingAppsResponse = null;
+      return Response.json(response);
     }
     if (url === `${BASE_VARS.SQUARE_API_BASE_URL}/v2/customers/search`) {
       squareSearchCalls += 1;

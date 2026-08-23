@@ -884,7 +884,7 @@ function baseEnv(db, queue) {
     TURNSTILE_SECRET_KEY: "turnstile-secret",
     D1_HASH_SECRET: "stable-d1-hash-secret-at-least-thirty-two-bytes",
     PASS_SESSION_SECRET: "pass-secret-that-is-at-least-thirty-two-bytes",
-    APPS_SCRIPT_URL: "https://apps.test/exec",
+    APPS_SCRIPT_URL: "https://script.google.com/macros/s/connector_validation_deployment_1234567890/exec",
     APPS_SCRIPT_SHARED_SECRET: "apps-secret-that-is-at-least-thirty-two-bytes",
   };
 }
@@ -900,6 +900,15 @@ async function runScheduled(env) {
 }
 
 function installServiceMocks(env, trace, state) {
+  const redirectToAppsResponse = (value, status = 200) => {
+    state.appsResponseSequence = Number(state.appsResponseSequence || 0) + 1;
+    const responseId = String(state.appsResponseSequence);
+    (state.appsResponses ||= new Map()).set(responseId, { status, value });
+    return new Response(null, {
+      status: 303,
+      headers: { Location: `https://script.googleusercontent.com/macros/echo?mock_response=${responseId}` },
+    });
+  };
   globalThis.fetch = async (input, init = {}) => {
     const url = String(input);
     if (url.includes("turnstile")) {
@@ -913,6 +922,12 @@ function installServiceMocks(env, trace, state) {
       });
     }
     if (url === env.APPS_SCRIPT_URL) {
+      assert.equal(init.method, "POST");
+      assert.equal(init.redirect, "manual");
+      assert.deepEqual([...new Headers(init.headers).entries()], [
+        ["accept", "application/json"],
+        ["content-type", "application/x-www-form-urlencoded;charset=UTF-8"],
+      ]);
       const body = String(init.body || "");
       const params = new URLSearchParams(body);
       const operation = params.get("operation");
@@ -925,11 +940,11 @@ function installServiceMocks(env, trace, state) {
       assert.equal(params.get("connector_signature"), expected);
       if (operation === "offer_prepare" && Number(state.prepareFailures || 0) > 0) {
         state.prepareFailures -= 1;
-        return jsonResponse({
+        return redirectToAppsResponse({
           ok: false, code: "offer_prepare_failed", connector_contract_version: __test.PRIVATE_CONTRACT,
         });
       }
-      if (operation === "offer_prepare") return jsonResponse({
+      if (operation === "offer_prepare") return redirectToAppsResponse({
         ok: true, operation, connector_contract_version: __test.PRIVATE_CONTRACT,
         offer_prepare_result: state.appsLinked ? "already_linked" : (state.prepareResult || "eligible"), profile_consent_result: "recorded",
         website_submission_id: params.get("submission_id"), coupon_code: params.get("coupon_code"),
@@ -948,12 +963,12 @@ function installServiceMocks(env, trace, state) {
         }
         if (Number(state.finalizeFailures || 0) > 0) {
           state.finalizeFailures -= 1;
-          return jsonResponse({
+          return redirectToAppsResponse({
             ok: false, code: "offer_finalize_failed", connector_contract_version: __test.PRIVATE_CONTRACT,
           });
         }
         state.appsLinked = true;
-        return jsonResponse({
+        return redirectToAppsResponse({
           ok: true, operation, connector_contract_version: __test.PRIVATE_CONTRACT,
           offer_finalize_result: "linked", website_submission_id: params.get("website_submission_id"),
           coupon_code: params.get("coupon_code"), square_customer_id: params.get("square_customer_id"),
@@ -963,12 +978,12 @@ function installServiceMocks(env, trace, state) {
           ...(state.finalizeOverride || {}),
         });
       }
-      if (operation === "event_commit" && state.eventCommitErrorCode) return jsonResponse({
+      if (operation === "event_commit" && state.eventCommitErrorCode) return redirectToAppsResponse({
         ok: false, code: state.eventCommitErrorCode, connector_contract_version: __test.PRIVATE_CONTRACT,
       });
       if (operation === "event_commit") {
         state.eventCommitCalls = Number(state.eventCommitCalls || 0) + 1;
-        return jsonResponse({
+        return redirectToAppsResponse({
           ok: true, operation, connector_contract_version: __test.PRIVATE_CONTRACT,
           event_commit_result: "committed", square_event_type: params.get("square_event_type"),
           order_event_id: "order_event_1", redemption_event_id: "redemption_event_1",
@@ -978,7 +993,22 @@ function installServiceMocks(env, trace, state) {
           rows_appended: 2, ...(state.eventCommitOverride || {}),
         });
       }
-      return jsonResponse({ ok: false }, 400);
+      return redirectToAppsResponse({ ok: false }, 400);
+    }
+    if (url.startsWith("https://script.googleusercontent.com/macros/echo?")) {
+      const responseUrl = new URL(url);
+      assert.equal(responseUrl.origin, "https://script.googleusercontent.com");
+      assert.equal(responseUrl.pathname, "/macros/echo");
+      assert.deepEqual([...responseUrl.searchParams.keys()], ["mock_response"]);
+      assert.equal(init.method, "GET");
+      assert.equal(init.redirect, "manual");
+      assert.equal(Object.hasOwn(init, "body"), false);
+      assert.deepEqual([...new Headers(init.headers).entries()], [["accept", "application/json"]]);
+      const responseId = responseUrl.searchParams.get("mock_response");
+      const stored = state.appsResponses?.get(responseId);
+      assert.ok(stored, `missing mocked Apps response ${responseId}`);
+      state.appsResponses.delete(responseId);
+      return jsonResponse(stored.value, stored.status);
     }
     const parsed = new URL(url);
     const path = parsed.pathname;
@@ -1366,6 +1396,205 @@ check("config has the exact browser contract and remains disabled by default", a
   env.SQUARE_CONSUMER_ENABLED = "true"; delete env.SQUARE_WEBHOOK_SIGNATURE_KEY;
   const noWebhookConfig = await worker.fetch(new Request("https://spartandrink.com/api/square/config"), env, {});
   assert.equal((await noWebhookConfig.json()).enabled, false, "the offer requires the complete webhook verification configuration");
+});
+
+check("Apps Script URL validation is canonical and shared by config and transport", async () => {
+  const validEnv = baseEnv(new MockD1(), { send: async () => {} });
+  const validConfig = await worker.fetch(new Request("https://spartandrink.com/api/square/config"), validEnv, {});
+  assert.equal((await validConfig.json()).enabled, true, "the canonical Apps deployment URL remains eligible");
+  const invalidUrls = [
+    "",
+    "https://apps.test/exec",
+    "http://script.google.com/macros/s/connector_validation_deployment_1234567890/exec",
+    "https://script.google.com.evil.example/macros/s/connector_validation_deployment_1234567890/exec",
+    "https://user@script.google.com/macros/s/connector_validation_deployment_1234567890/exec",
+    "https://script.google.com:444/macros/s/connector_validation_deployment_1234567890/exec",
+    "https://script.google.com/macros/s/short/exec",
+    "https://script.google.com/macros/s/connector_validation_deployment_1234567890/dev",
+    "https://script.google.com/macros/s/connector_validation_deployment_1234567890/exec/",
+    "https://script.google.com/macros/s/connector_validation_deployment_1234567890/exec?target=other",
+    "https://script.google.com/macros/s/connector_validation_deployment_1234567890/exec#other",
+    "https://SCRIPT.GOOGLE.COM/macros/s/connector_validation_deployment_1234567890/exec",
+  ];
+  const previousFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = async () => { fetchCalls += 1; throw new Error("invalid Apps URL must not be fetched"); };
+  try {
+    for (const appsUrl of invalidUrls) {
+      const env = baseEnv(new MockD1(), { send: async () => {} });
+      env.APPS_SCRIPT_URL = appsUrl;
+      const config = await worker.fetch(new Request("https://spartandrink.com/api/square/config"), env, {});
+      assert.equal((await config.json()).enabled, false, `config must reject ${appsUrl || "an empty URL"}`);
+      await assert.rejects(() => __test.appsCall("offer_prepare", {}, env), (error) => {
+        assert.equal(error?.code, "APPS_NOT_CONFIGURED");
+        return true;
+      });
+    }
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  assert.equal(fetchCalls, 0, "rejected Apps URLs must never reach fetch");
+});
+
+check("Apps Script transport accepts only one trusted 302 or 303 redirect and strips the signed request", async () => {
+  const fields = {
+    submission_id: "submission-transport-0001",
+    coupon_code: "SPN50-TRANSPORT",
+    square_customer_profile_consent: "yes",
+    square_customer_profile_consent_version: "square-customer-profile-v1-2026-08-17",
+  };
+  for (const redirectStatus of [302, 303]) {
+    const env = baseEnv(new MockD1(), { send: async () => {} });
+    const responseUrl = `https://script.googleusercontent.com/macros/echo?status=${redirectStatus}&opaque=abc123`;
+    const calls = [];
+    const previousFetch = globalThis.fetch;
+    globalThis.fetch = async (input, init = {}) => {
+      calls.push({ input: String(input), init });
+      if (calls.length === 1) {
+        assert.equal(String(input), env.APPS_SCRIPT_URL);
+        assert.equal(init.method, "POST");
+        assert.equal(init.redirect, "manual");
+        assert.deepEqual([...new Headers(init.headers).entries()], [
+          ["accept", "application/json"],
+          ["content-type", "application/x-www-form-urlencoded;charset=UTF-8"],
+        ]);
+        const body = String(init.body || "");
+        const params = new URLSearchParams(body);
+        assert.equal(params.get("submission_id"), fields.submission_id);
+        assert.match(params.get("connector_signature") || "", /^[a-f0-9]{64}$/);
+        const unsigned = body.slice(0, body.lastIndexOf("&connector_signature="));
+        assert.equal(params.get("connector_signature"),
+          createHmac("sha256", env.APPS_SCRIPT_SHARED_SECRET).update(unsigned).digest("hex"));
+        return new Response(null, { status: redirectStatus, headers: { Location: responseUrl } });
+      }
+      assert.equal(String(input), responseUrl);
+      assert.equal(init.method, "GET");
+      assert.equal(init.redirect, "manual");
+      assert.equal(Object.hasOwn(init, "body"), false);
+      assert.deepEqual([...new Headers(init.headers).entries()], [["accept", "application/json"]]);
+      assert.doesNotMatch(String(input), /submission|coupon|signature|consent/i);
+      return new Response(JSON.stringify({ ok: true, redirect_status: redirectStatus }), {
+        status: 200, headers: { "Content-Type": "application/json; charset=UTF-8" },
+      });
+    };
+    try {
+      assert.deepEqual(await __test.appsCall("offer_prepare", fields, env), {
+        ok: true, redirect_status: redirectStatus,
+      });
+    } finally {
+      globalThis.fetch = previousFetch;
+    }
+    assert.equal(calls.length, 2, "Apps transport must perform exactly two fetches");
+  }
+});
+
+check("Apps Script transport rejects untrusted or malformed first-hop redirects without a second request", async () => {
+  const env = baseEnv(new MockD1(), { send: async () => {} });
+  const cases = [
+    { name: "missing Location", location: null },
+    { name: "relative Location", location: "/macros/echo?opaque=abc" },
+    { name: "plain HTTP", location: "http://script.googleusercontent.com/macros/echo?opaque=abc" },
+    { name: "lookalike host", location: "https://script.googleusercontent.com.evil.example/macros/echo?opaque=abc" },
+    { name: "credentials", location: "https://user@script.googleusercontent.com/macros/echo?opaque=abc" },
+    { name: "non-default port", location: "https://script.googleusercontent.com:444/macros/echo?opaque=abc" },
+    { name: "wrong path", location: "https://script.googleusercontent.com/macros/not-echo?opaque=abc" },
+    { name: "fragment", location: "https://script.googleusercontent.com/macros/echo?opaque=abc#fragment" },
+    { name: "non-canonical host", location: "https://SCRIPT.GOOGLEUSERCONTENT.COM/macros/echo?opaque=abc" },
+    { name: "oversized Location", location: `https://script.googleusercontent.com/macros/echo?opaque=${"a".repeat(2050)}` },
+  ];
+  const previousFetch = globalThis.fetch;
+  try {
+    for (const testCase of cases) {
+      let fetchCalls = 0;
+      globalThis.fetch = async () => {
+        fetchCalls += 1;
+        const headers = testCase.location ? { Location: testCase.location } : {};
+        return new Response(null, { status: 303, headers });
+      };
+      await assert.rejects(() => __test.appsCall("offer_prepare", {}, env), (error) => {
+        assert.equal(error?.code, "APPS_RESPONSE_INVALID", testCase.name);
+        return true;
+      });
+      assert.equal(fetchCalls, 1, `${testCase.name} must stop before a second request`);
+    }
+    for (const status of [200, 301, 304, 307, 308, 400, 500]) {
+      let fetchCalls = 0;
+      globalThis.fetch = async () => {
+        fetchCalls += 1;
+        return new Response(status === 200 ? "{}" : null, {
+          status,
+          headers: { Location: "https://script.googleusercontent.com/macros/echo?opaque=abc" },
+        });
+      };
+      await assert.rejects(() => __test.appsCall("offer_prepare", {}, env), (error) => {
+        assert.equal(error?.code, "APPS_REQUEST_FAILED", `unexpected first-hop status ${status}`);
+        return true;
+      });
+      assert.equal(fetchCalls, 1, `status ${status} must not trigger a second request`);
+    }
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+check("Apps Script second-hop responses fail closed on redirects, status, type, body, and size", async () => {
+  const env = baseEnv(new MockD1(), { send: async () => {} });
+  const responseUrl = "https://script.googleusercontent.com/macros/echo?opaque=transport-test";
+  const validHeaders = { "Content-Type": "application/json" };
+  const oversizedJson = JSON.stringify({ ok: true, padding: "x".repeat(32 * 1024) });
+  const cases = [
+    { name: "second redirect", response: () => new Response(null, { status: 302,
+      headers: { Location: "https://script.googleusercontent.com/macros/echo?opaque=third-hop" } }), code: "APPS_RESPONSE_INVALID" },
+    { name: "non-2xx", response: () => jsonResponse({ ok: true }, 503), code: "APPS_REQUEST_FAILED" },
+    { name: "missing content type", response: () => new Response("{}", { status: 200 }), code: "APPS_RESPONSE_INVALID" },
+    { name: "non-JSON content type", response: () => new Response("{}", { status: 200,
+      headers: { "Content-Type": "text/plain" } }), code: "APPS_RESPONSE_INVALID" },
+    { name: "unsupported JSON charset", response: () => new Response("{}", { status: 200,
+      headers: { "Content-Type": "application/json; charset=iso-8859-1" } }), code: "APPS_RESPONSE_INVALID" },
+    { name: "invalid JSON", response: () => new Response("not-json", { status: 200, headers: validHeaders }), code: "APPS_RESPONSE_INVALID" },
+    { name: "empty body", response: () => new Response(null, { status: 200, headers: validHeaders }), code: "APPS_RESPONSE_INVALID" },
+    { name: "oversized JSON", response: () => new Response(oversizedJson, { status: 200, headers: validHeaders }),
+      code: "APPS_RESPONSE_TOO_LARGE", transport: { maxResponseBytes: 64 * 1024, signal: new AbortController().signal } },
+    { name: "invalid stream", response: () => ({ ok: true, status: 200, headers: new Headers(validHeaders), body: {} }),
+      code: "APPS_REQUEST_FAILED" },
+  ];
+  const previousFetch = globalThis.fetch;
+  try {
+    for (const testCase of cases) {
+      let fetchCalls = 0;
+      globalThis.fetch = async (_input, init = {}) => {
+        fetchCalls += 1;
+        if (fetchCalls === 1) return new Response(null, { status: 303, headers: { Location: responseUrl } });
+        assert.equal(fetchCalls, 2, `${testCase.name} must not perform a third request`);
+        assert.equal(init.method, "GET");
+        if (testCase.transport) assert.equal(init.signal, testCase.transport.signal);
+        return testCase.response();
+      };
+      await assert.rejects(() => __test.appsCall("offer_prepare", {}, env, testCase.transport), (error) => {
+        assert.equal(error?.code, testCase.code, testCase.name);
+        return true;
+      });
+      assert.equal(fetchCalls, 2, `${testCase.name} must stop after the one allowed GET`);
+    }
+
+    const prefix = '{"ok":true,"padding":"';
+    const suffix = '"}';
+    const exactBody = `${prefix}${"x".repeat((32 * 1024) - prefix.length - suffix.length)}${suffix}`;
+    assert.equal(Buffer.byteLength(exactBody), 32 * 1024);
+    let fetchCalls = 0;
+    globalThis.fetch = async () => {
+      fetchCalls += 1;
+      return fetchCalls === 1
+        ? new Response(null, { status: 302, headers: { Location: responseUrl } })
+        : new Response(exactBody, { status: 200, headers: validHeaders });
+    };
+    const exact = await __test.appsCall("offer_prepare", {}, env);
+    assert.equal(exact.ok, true);
+    assert.equal(exact.padding.length, (32 * 1024) - prefix.length - suffix.length);
+    assert.equal(fetchCalls, 2);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
 });
 
 check("offer rejects cross-origin, extra fields, and missing consent", async () => {
@@ -3841,7 +4070,9 @@ check("refund-before-payment delivery retries and reconciles after redemption", 
 check("source enforces raw webhook signing, no pass analytics, and no email sent to Square", () => {
   assert.match(source, /env\.SQUARE_WEBHOOK_NOTIFICATION_URL,[\s\S]*rawBody,[\s\S]*signature/);
   assert.match(source, /HttpOnly; Secure; SameSite=Strict/);
-  assert.match(source, /redirect: "follow"/);
+  assert.match(source, /APPS_SCRIPT_ORIGIN = "https:\/\/script\.google\.com"/);
+  assert.match(source, /APPS_SCRIPT_RESPONSE_ORIGIN = "https:\/\/script\.googleusercontent\.com"/);
+  assert.doesNotMatch(source, /redirect: "follow"/);
   const compactPass = __test.renderPass("SPN1-0123456789ABCDEFabcd_-");
   assert.doesNotMatch(compactPass, /analytics|gtag|pixel|<script/i);
   assert.doesNotMatch(compactPass, /overflow:auto/i);
