@@ -10,9 +10,12 @@ import { fileURLToPath } from "node:url";
 const CHILD_ARG = "--internal-f02-pty-smoke-child";
 const HANG_CHILD_ARG = "--internal-f02-pty-interrupt-child";
 const INTERRUPT_PARENT_ARG = "--internal-f02-pty-interrupt-parent";
+const PRE_READY_INTERRUPT_PARENT_ARG = "--internal-f02-pty-pre-ready-interrupt-parent";
 const TOP_INTERRUPT_PARENT_ARG = "--internal-f02-pty-top-interrupt-parent";
+const BRIDGE_READY = "F02_PTY_BRIDGE_READY";
 const INTERRUPT_CHILD_READY = "F02_PTY_INTERRUPT_CHILD_READY";
 const INTERRUPT_PARENT_READY = "F02_PTY_INTERRUPT_PARENT_READY";
+const PRE_READY_INTERRUPT_PARENT_READY = "F02_PTY_PRE_READY_INTERRUPT_PARENT_READY";
 const TOP_INTERRUPT_PARENT_READY = "F02_PTY_TOP_INTERRUPT_PARENT_READY";
 const CONFIRMATION = "RUN_F02_DECLINED_CONSENT_ONCE";
 const EXECUTE_ARGS = Object.freeze([
@@ -52,13 +55,6 @@ function validationError(code) {
 }
 
 async function runChild() {
-  const {
-    __test: f02Test,
-    runF02DriverMain,
-  } = await import("./run-square-sandbox-f02.mjs");
-  if (f02Test.CONFIRMATION !== CONFIRMATION ||
-      JSON.stringify(f02Test.EXECUTE_ARGS) !== JSON.stringify(EXECUTE_ARGS)) return 2;
-
   let captureCalls = 0;
   let watchCalls = 0;
   let fetchCalls = 0;
@@ -72,6 +68,13 @@ async function runChild() {
     throw new Error("F02_PTY_GLOBAL_FETCH_TRIPWIRE");
   };
   try {
+    const {
+      __test: f02Test,
+      runF02DriverMain,
+    } = await import("./run-square-sandbox-f02.mjs");
+    if (f02Test.CONFIRMATION !== CONFIRMATION ||
+        JSON.stringify(f02Test.EXECUTE_ARGS) !== JSON.stringify(EXECUTE_ARGS)) return 2;
+
     result = await runF02DriverMain([...f02Test.EXECUTE_ARGS], {
       captureImpl: async () => {
         captureCalls += 1;
@@ -127,20 +130,30 @@ function selectPython() {
   throw validationError("PTY_PYTHON_3_9_UNAVAILABLE");
 }
 
-function ptyInvocation(childArg = CHILD_ARG) {
+function ptyInvocation(childArg = CHILD_ARG, { pidReportDelayMs = 0 } = {}) {
+  if (!Number.isInteger(pidReportDelayMs) || pidReportDelayMs < 0 || pidReportDelayMs > 1_000) {
+    throw validationError("PTY_PID_REPORT_DELAY_INVALID");
+  }
   const self = fileURLToPath(import.meta.url);
+  const pidReportDelaySeconds = (pidReportDelayMs / 1_000).toFixed(3);
   const bridge = [
-    "import errno,os,pty,select,signal,sys",
+    "import errno,os,pty,select,signal,sys,time",
+    "forwarded=(signal.SIGINT,signal.SIGTERM,signal.SIGHUP)",
+    "old_mask=signal.pthread_sigmask(signal.SIG_BLOCK,forwarded)",
+    `os.write(3,b'${BRIDGE_READY}\\n')`,
     "pid,master=pty.fork()",
     "if pid == 0:",
+    " signal.pthread_sigmask(signal.SIG_SETMASK,old_mask)",
     " os.close(3)",
     " os.execv(sys.argv[1],sys.argv[1:])",
-    "os.write(3,(str(pid)+'\\n').encode('ascii'))",
-    "os.close(3)",
     "def forward(sig,frame):",
     " try: os.killpg(pid,sig)",
     " except ProcessLookupError: pass",
-    "for sig in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP): signal.signal(sig,forward)",
+    "for sig in forwarded: signal.signal(sig,forward)",
+    `time.sleep(${pidReportDelaySeconds})`,
+    "os.write(3,(str(pid)+'\\n').encode('ascii'))",
+    "os.close(3)",
+    "signal.pthread_sigmask(signal.SIG_SETMASK,old_mask)",
     "stdin_fd=sys.stdin.fileno()",
     "stdout_fd=sys.stdout.fileno()",
     "stdin_open=True",
@@ -218,11 +231,20 @@ async function waitForProcessGroupExit(groupId, milliseconds = 750) {
   return !isProcessGroupAlive(groupId);
 }
 
-async function runParent({ interruptProbe = false } = {}) {
+async function runParent({ interruptProbe = false, preReadyInterruptProbe = false } = {}) {
+  if (preReadyInterruptProbe && !interruptProbe) {
+    throw validationError("PTY_PRE_READY_PROBE_INVALID");
+  }
   const parentSignals = ["SIGINT", "SIGTERM", "SIGHUP"];
   let parentSignalReceived = false;
+  let preReadySignalBeforePid = false;
   let requestSignalCleanup = () => {};
+  let grandchildPid = null;
+  let bridgeReady = false;
   const onParentSignal = () => {
+    if (preReadyInterruptProbe) {
+      preReadySignalBeforePid = bridgeReady && !Number.isInteger(grandchildPid);
+    }
     parentSignalReceived = true;
     requestSignalCleanup();
   };
@@ -230,11 +252,12 @@ async function runParent({ interruptProbe = false } = {}) {
   let isolatedRoot = null;
   let child;
   let close;
-  let grandchildPid = null;
   let closed = false;
   let terminationPromise = null;
   try {
-    const invocation = ptyInvocation(interruptProbe ? HANG_CHILD_ARG : CHILD_ARG);
+    const invocation = ptyInvocation(interruptProbe ? HANG_CHILD_ARG : CHILD_ARG, {
+      pidReportDelayMs: preReadyInterruptProbe ? 500 : 0,
+    });
     if (parentSignalReceived) throw validationError("PTY_PARENT_INTERRUPTED");
     isolatedRoot = await mkdtemp(join(tmpdir(), "spartan-f02-pty-"));
     if (parentSignalReceived) throw validationError("PTY_PARENT_INTERRUPTED");
@@ -280,9 +303,21 @@ async function runParent({ interruptProbe = false } = {}) {
     });
     child.stdio[3].on("data", (chunk) => {
       pidOutput += chunk;
-      const match = pidOutput.match(/^(\d+)\n$/);
+      const bridgePrefix = `${BRIDGE_READY}\n`;
+      if (bridgePrefix.startsWith(pidOutput)) {
+        if (pidOutput === bridgePrefix) bridgeReady = true;
+        notify();
+        return;
+      }
+      if (!pidOutput.startsWith(bridgePrefix)) {
+        recordFailure("PTY_CHILD_PID_INVALID");
+        return;
+      }
+      bridgeReady = true;
+      const numericOutput = pidOutput.slice(bridgePrefix.length);
+      const match = numericOutput.match(/^(\d+)\n$/);
       if (match) grandchildPid = Number(match[1]);
-      else if (pidOutput.length > 32 || pidOutput.includes("\n")) {
+      else if (!/^\d{0,20}$/.test(numericOutput)) {
         recordFailure("PTY_CHILD_PID_INVALID");
       }
       notify();
@@ -306,15 +341,17 @@ async function runParent({ interruptProbe = false } = {}) {
         signalProcessGroup(grandchildPid, "SIGTERM");
         if (!closed) {
           try { child.kill("SIGTERM"); } catch {}
-          await settleWithin(close, 750);
+          await settleWithin(close, 1_500);
         }
         if (isProcessGroupAlive(grandchildPid)) signalProcessGroup(grandchildPid, "SIGKILL");
         if (!closed) {
           try { child.kill("SIGKILL"); } catch {}
           await settleWithin(close, 750);
         }
-        const groupGone = await waitForProcessGroupExit(grandchildPid);
-        if (!closed || !groupGone || isProcessAlive(grandchildPid)) {
+        const groupGone = Number.isInteger(grandchildPid)
+          ? await waitForProcessGroupExit(grandchildPid) : false;
+        if (!closed || !groupGone || !Number.isInteger(grandchildPid) ||
+            isProcessAlive(grandchildPid)) {
           throw validationError("PTY_CHILD_CLEANUP_FAILED");
         }
       })();
@@ -363,7 +400,20 @@ async function runParent({ interruptProbe = false } = {}) {
     }, 15_000);
     let cursor = 0;
     try {
-      if (interruptProbe) {
+      if (preReadyInterruptProbe) {
+        const bridgeDeadline = Date.now() + 1_000;
+        while (!bridgeReady && Date.now() < bridgeDeadline && !forcedFailure) {
+          await boundedDelay(10);
+        }
+        if (!bridgeReady || Number.isInteger(grandchildPid)) {
+          throw validationError("PTY_PRE_READY_HANDSHAKE_INVALID");
+        }
+        process.stdout.write(`${PRE_READY_INTERRUPT_PARENT_READY} ${JSON.stringify({
+          wrapperPid: child.pid,
+          isolatedRoot,
+        })}\n`);
+        await waitFor("F02_PTY_PRE_READY_PARENT_INTERRUPT_REQUIRED", stdout.length);
+      } else if (interruptProbe) {
         await waitFor(INTERRUPT_CHILD_READY, 0);
         const pidDeadline = Date.now() + 1_000;
         while (!Number.isInteger(grandchildPid) && Date.now() < pidDeadline && !forcedFailure) {
@@ -390,7 +440,8 @@ async function runParent({ interruptProbe = false } = {}) {
         if (result.code !== 1 || result.signal !== null) {
           throw validationError("PTY_CHILD_STATUS_INVALID");
         }
-        if (pidOutput !== `${grandchildPid}\n` || !Number.isInteger(grandchildPid) ||
+        if (pidOutput !== `${BRIDGE_READY}\n${grandchildPid}\n` || !bridgeReady ||
+            !Number.isInteger(grandchildPid) ||
             isProcessAlive(grandchildPid) || isProcessGroupAlive(grandchildPid)) {
           throw validationError("PTY_CHILD_REAP_INVALID");
         }
@@ -407,6 +458,9 @@ async function runParent({ interruptProbe = false } = {}) {
       }
     } catch (error) {
       await terminateAndWait();
+      if (preReadyInterruptProbe && parentSignalReceived && !preReadySignalBeforePid) {
+        throw validationError("PTY_PRE_READY_SIGNAL_ORDER_INVALID");
+      }
       throw error;
     } finally {
       clearTimeout(deadline);
@@ -421,8 +475,9 @@ async function runParent({ interruptProbe = false } = {}) {
         try { child.kill("SIGKILL"); } catch {}
         await settleWithin(close, 750);
       }
-      const groupGone = await waitForProcessGroupExit(grandchildPid);
-      cleanupFailed = !closed || !groupGone;
+      const groupGone = Number.isInteger(grandchildPid)
+        ? await waitForProcessGroupExit(grandchildPid) : false;
+      cleanupFailed = !closed || !groupGone || !Number.isInteger(grandchildPid);
     }
     if (isolatedRoot) await rm(isolatedRoot, { recursive: true, force: true });
     if (isolatedRoot && existsSync(isolatedRoot)) {
@@ -434,12 +489,18 @@ async function runParent({ interruptProbe = false } = {}) {
   process.stdout.write(
     "Square sandbox F-02 PTY validation passed: isolated direct pseudo-terminal, exact prompt-only " +
     "transcript, non-echoing dummy input, fixed zero-request stop, all side-effect tripwires clear, " +
-    "and forced top-level/nested parent-interrupt process-group/temp cleanup verified.\n",
+    "and forced pre-handshake/top-level/nested parent-interrupt process-group/temp cleanup verified.\n",
   );
 }
 
-async function runInterruptSelfTest({ externalInterruptProbe = false } = {}) {
+async function runInterruptSelfTest({ externalInterruptProbe = false, preReadyProbe = false } = {}) {
+  if (externalInterruptProbe && preReadyProbe) {
+    throw validationError("PTY_INTERRUPT_SELF_TEST_MODE_INVALID");
+  }
   const self = fileURLToPath(import.meta.url);
+  const parentArg = preReadyProbe ? PRE_READY_INTERRUPT_PARENT_ARG : INTERRUPT_PARENT_ARG;
+  const readyToken = preReadyProbe
+    ? PRE_READY_INTERRUPT_PARENT_READY : INTERRUPT_PARENT_READY;
   const tempPrefix = "spartan-f02-pty-";
   const selfTestSignals = ["SIGINT", "SIGTERM", "SIGHUP"];
   let externallyInterrupted = false;
@@ -460,7 +521,7 @@ async function runInterruptSelfTest({ externalInterruptProbe = false } = {}) {
   try {
     before = new Set((await readdir(tmpdir())).filter((name) => name.startsWith(tempPrefix)));
     if (externallyInterrupted) throw validationError("PTY_PARENT_INTERRUPTED");
-    child = spawn(process.execPath, [self, INTERRUPT_PARENT_ARG], {
+    child = spawn(process.execPath, [self, parentArg], {
       cwd: fileURLToPath(new URL("..", import.meta.url)),
       env: {
         HOME: tmpdir(),
@@ -492,22 +553,23 @@ async function runInterruptSelfTest({ externalInterruptProbe = false } = {}) {
     child.stdout.on("error", () => { childFailure = "PTY_INTERRUPT_SELF_TEST_STDOUT_ERROR"; });
     child.stderr.on("error", () => { childFailure = "PTY_INTERRUPT_SELF_TEST_STDERR_ERROR"; });
     const readyDeadline = Date.now() + 5_000;
-    while (!stdout.includes(`${INTERRUPT_PARENT_READY} `) && !closed && !childFailure &&
+    while (!stdout.includes(`${readyToken} `) && !closed && !childFailure &&
         !externallyInterrupted && Date.now() < readyDeadline) {
       await boundedDelay(10);
     }
     if (externallyInterrupted) throw validationError("PTY_PARENT_INTERRUPTED");
     if (childFailure) throw validationError(childFailure);
     const readyLine = stdout.replaceAll("\r", "").split("\n")
-      .find((line) => line.startsWith(`${INTERRUPT_PARENT_READY} `));
+      .find((line) => line.startsWith(`${readyToken} `));
     if (!readyLine) throw validationError("PTY_INTERRUPT_SELF_TEST_NOT_READY");
     try {
-      metadata = JSON.parse(readyLine.slice(INTERRUPT_PARENT_READY.length + 1));
+      metadata = JSON.parse(readyLine.slice(readyToken.length + 1));
     } catch {
       throw validationError("PTY_INTERRUPT_SELF_TEST_METADATA_INVALID");
     }
     if (!Number.isInteger(metadata?.wrapperPid) || metadata.wrapperPid <= 1 ||
-        !Number.isInteger(metadata?.groupId) || metadata.groupId <= 1 ||
+        (!preReadyProbe &&
+          (!Number.isInteger(metadata?.groupId) || metadata.groupId <= 1)) ||
         typeof metadata?.isolatedRoot !== "string" ||
         !metadata.isolatedRoot.startsWith(join(tmpdir(), tempPrefix))) {
       throw validationError("PTY_INTERRUPT_SELF_TEST_METADATA_INVALID");
@@ -541,7 +603,8 @@ async function runInterruptSelfTest({ externalInterruptProbe = false } = {}) {
     if (!result || result.code !== 1 || result.signal !== null ||
         normalizedStdout !== `${readyLine}\n` || isProcessAlive(child.pid) ||
         stderr !== "F-02 PTY validation stopped: PTY_PARENT_INTERRUPTED\n" ||
-        isProcessAlive(metadata.wrapperPid) || isProcessGroupAlive(metadata.groupId) ||
+        isProcessAlive(metadata.wrapperPid) ||
+        (!preReadyProbe && isProcessGroupAlive(metadata.groupId)) ||
         existsSync(metadata.isolatedRoot)) {
       throw validationError("PTY_INTERRUPT_SELF_TEST_CLEANUP_FAILED");
     }
@@ -713,6 +776,12 @@ if (process.argv.length === 3 && process.argv[2] === CHILD_ARG) {
   } catch (error) {
     reportFailure(error);
   }
+} else if (process.argv.length === 3 && process.argv[2] === PRE_READY_INTERRUPT_PARENT_ARG) {
+  try {
+    await runParent({ interruptProbe: true, preReadyInterruptProbe: true });
+  } catch (error) {
+    reportFailure(error);
+  }
 } else if (process.argv.length === 3 && process.argv[2] === TOP_INTERRUPT_PARENT_ARG) {
   try {
     await runInterruptSelfTest({ externalInterruptProbe: true });
@@ -724,6 +793,7 @@ if (process.argv.length === 3 && process.argv[2] === CHILD_ARG) {
   process.exitCode = 1;
 } else {
   try {
+    await runInterruptSelfTest({ preReadyProbe: true });
     await runTopLevelInterruptSelfTest();
     await runInterruptSelfTest();
     await runParent();
