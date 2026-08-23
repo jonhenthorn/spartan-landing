@@ -3,6 +3,27 @@
 import { randomBytes } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import {
+  abortF02NamespaceOperationLocks,
+  abortF02NamespaceOperationLocksSync,
+  abortF02KeychainSecurityProcesses,
+  abortF02KeychainSecurityProcessesSync,
+  assertF02NamespaceOperationLockOwned,
+  assertF02KeychainWindow,
+  createF02KeychainAccess,
+  f02ShutdownReapVerified,
+  f02KeychainPidOwner,
+  F02_KEYCHAIN_ITEMS,
+  F02_KEYCHAIN_PID_OWNER_PATTERN,
+  F02_KEYCHAIN_STATE_PATTERN,
+  isF02NamespaceOperationLockHeld,
+  requireF02KeychainProcessAck,
+  retainF02NamespaceOperationLockFailStickySync,
+  retainF02NamespaceOperationLocksFailStickySync,
+  retainF02NamespaceOperationLocksForShutdownSync,
+  splitF02KeychainArgs,
+  withF02NamespaceOperationLock,
+} from "./project2-f02-keychain.mjs";
+import {
   __test as faultTest,
   computeSandboxFaultAppsUrlDigest,
   computeSandboxO01RoleDigest,
@@ -331,20 +352,66 @@ export async function prepareSandboxFaultMain(argv = process.argv.slice(2), depe
   }
   const genericPrepare = argv.length === 1 && argv[0] === "--prepare";
   const offerIsolationPrepare = argv.length === 1 && argv[0] === "--prepare-offer-isolation";
+  const offerKeychainSelection = splitF02KeychainArgs(argv, ["--prepare-offer-isolation"]);
+  const offerIsolationKeychainPrepare = offerKeychainSelection.enabled;
   const f04ChainPrepare = argv.length === 1 && argv[0] === "--prepare-f04-chain";
   const p01IsolationPrepare = argv.length === 1 && argv[0] === "--prepare-p01-isolation";
   const replayIsolationPrepare = argv.length === 1 && argv[0] === "--prepare-replay-isolation";
   const o01IsolationPrepare = argv.length === 1 && argv[0] === "--prepare-o01-isolation";
   const q01IsolationPrepare = argv.length === 1 && argv[0] === "--prepare-q01-isolation";
   const q02IsolationPrepare = argv.length === 1 && argv[0] === "--prepare-q02-isolation";
-  if (!genericPrepare && !offerIsolationPrepare && !f04ChainPrepare && !p01IsolationPrepare &&
+  if (!genericPrepare && !offerIsolationPrepare && !offerIsolationKeychainPrepare &&
+      !f04ChainPrepare && !p01IsolationPrepare &&
       !replayIsolationPrepare && !o01IsolationPrepare &&
       !q01IsolationPrepare && !q02IsolationPrepare) {
     print("STATUS=INPUT_REJECTED");
     return 2;
   }
+  if (offerIsolationKeychainPrepare &&
+      !isF02NamespaceOperationLockHeld(offerKeychainSelection.namespace)) {
+    const buffered = [];
+    try {
+      const status = await withF02NamespaceOperationLock(
+        offerKeychainSelection.namespace,
+        async () => {
+          let value;
+          let innerError;
+          let securityCleanup;
+          try {
+            value = await prepareSandboxFaultMain(argv, {
+              ...dependencies,
+              print: (line) => buffered.push(line),
+            });
+          } catch (error) {
+            innerError = error;
+          } finally {
+            try { securityCleanup = await abortF02KeychainSecurityProcesses(); } catch {}
+          }
+          if (!f02ShutdownReapVerified(securityCleanup)) {
+            if (!retainF02NamespaceOperationLockFailStickySync(
+              offerKeychainSelection.namespace,
+            )) {
+              retainF02NamespaceOperationLocksFailStickySync();
+            }
+            buffered.length = 0;
+            buffered.push("STATUS=INPUT_REJECTED");
+            return 2;
+          }
+          if (innerError) throw innerError;
+          return value;
+        },
+        dependencies,
+      );
+      for (const line of buffered) print(line);
+      return status;
+    } catch {
+      print("STATUS=INPUT_REJECTED");
+      return 2;
+    }
+  }
 
   const prompt = dependencies.readHiddenLine || readHiddenLine;
+  let keychain = null;
   let selector = "";
   let sourceSelector = "";
   let targetEvent = null;
@@ -354,7 +421,34 @@ export async function prepareSandboxFaultMain(argv = process.argv.slice(2), depe
   let sandboxAppsUrl = "";
   let forbiddenAppsUrl = "";
   try {
-    const mode = offerIsolationPrepare
+    if (offerIsolationKeychainPrepare) {
+      await assertF02NamespaceOperationLockOwned(offerKeychainSelection.namespace);
+      await requireF02KeychainProcessAck(prompt, "helper");
+      keychain = dependencies.keychainAccess || createF02KeychainAccess({
+        namespace: offerKeychainSelection.namespace,
+      });
+      if (!keychain || typeof keychain.read !== "function" ||
+          typeof keychain.assertAbsent !== "function" || typeof keychain.storeNew !== "function" ||
+          typeof keychain.replaceExact !== "function") {
+        throw new Error("INPUT_REJECTED");
+      }
+      await assertF02KeychainWindow(
+        keychain,
+        offerKeychainSelection.namespace,
+        dependencies.now || Date.now,
+      );
+      const state = await keychain.read(F02_KEYCHAIN_ITEMS.bundleState, {
+        maxBytes: 32, pattern: F02_KEYCHAIN_STATE_PATTERN,
+      });
+      if (state !== "READY_FOR_HELPER") throw new Error("INPUT_REJECTED");
+      await keychain.assertAbsent([
+        F02_KEYCHAIN_ITEMS.targetDigest,
+        F02_KEYCHAIN_ITEMS.runToken,
+        F02_KEYCHAIN_ITEMS.appsUrlDigest,
+        F02_KEYCHAIN_ITEMS.forbiddenAppsUrlDigest,
+      ]);
+    }
+    const mode = offerIsolationPrepare || offerIsolationKeychainPrepare
       ? OFFER_ROUTE_ISOLATION_MODE
       : f04ChainPrepare
         ? F04_SEARCH_MODE
@@ -403,6 +497,11 @@ export async function prepareSandboxFaultMain(argv = process.argv.slice(2), depe
       selector = await prompt("Exact private webhook event ID (hidden): ", 160);
       if (!/^[A-Za-z0-9][A-Za-z0-9_-]{7,159}$/.test(selector) ||
           selector === QUEUE_CANARY_SENTINEL) throw new Error("INPUT_REJECTED");
+    } else if (offerIsolationKeychainPrepare) {
+      selector = await keychain.read(F02_KEYCHAIN_ITEMS.canary, {
+        maxBytes: 80,
+        pattern: /^[A-Za-z0-9][A-Za-z0-9-]{7,79}$/,
+      });
     } else {
       selector = await prompt(
         f04ChainPrepare
@@ -413,7 +512,8 @@ export async function prepareSandboxFaultMain(argv = process.argv.slice(2), depe
         offerIsolationPrepare || f04ChainPrepare || p01IsolationPrepare ? 80 : 160,
       );
     }
-    if ((offerIsolationPrepare || f04ChainPrepare || p01IsolationPrepare) &&
+    if ((offerIsolationPrepare || offerIsolationKeychainPrepare || f04ChainPrepare ||
+        p01IsolationPrepare) &&
         !/^[A-Za-z0-9][A-Za-z0-9-]{7,79}$/.test(selector)) {
       throw new Error("INPUT_REJECTED");
     }
@@ -423,9 +523,26 @@ export async function prepareSandboxFaultMain(argv = process.argv.slice(2), depe
     if (mode === "SQUARE_GROUP_REMOVE_FAILURE") {
       sourceSelector = await prompt("Exact source webhook event ID (hidden): ", 160);
     }
-    hashSecret = await prompt("Temporary fault HMAC secret, 32-256 UTF-8 bytes (hidden): ", 256);
-    sandboxAppsUrl = await prompt("Expected isolated sandbox Apps /exec URL (hidden): ", 2048);
-    forbiddenAppsUrl = await prompt("Forbidden production form Apps /exec URL (hidden): ", 2048);
+    if (offerIsolationKeychainPrepare) {
+      hashSecret = await keychain.read(F02_KEYCHAIN_ITEMS.hashSecret, {
+        maxBytes: 256,
+        pattern: /^[^\0\r\n]+$/u,
+      });
+      if (Buffer.byteLength(hashSecret, "utf8") < 32) throw new Error("INPUT_REJECTED");
+      sandboxAppsUrl = await keychain.read(F02_KEYCHAIN_ITEMS.sandboxAppsUrl, {
+        maxBytes: 2048,
+        pattern: /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]{20,256}\/exec$/,
+      });
+      forbiddenAppsUrl = await keychain.read(F02_KEYCHAIN_ITEMS.forbiddenAppsUrl, {
+        maxBytes: 2048,
+        pattern: /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]{20,256}\/exec$/,
+      });
+      if (sandboxAppsUrl === forbiddenAppsUrl) throw new Error("INPUT_REJECTED");
+    } else {
+      hashSecret = await prompt("Temporary fault HMAC secret, 32-256 UTF-8 bytes (hidden): ", 256);
+      sandboxAppsUrl = await prompt("Expected isolated sandbox Apps /exec URL (hidden): ", 2048);
+      forbiddenAppsUrl = await prompt("Forbidden production form Apps /exec URL (hidden): ", 2048);
+    }
     if (f04ChainPrepare) {
       const result = await prepareF04ChainConfiguration({
         selector, hashSecret, sandboxAppsUrl, forbiddenAppsUrl,
@@ -439,6 +556,24 @@ export async function prepareSandboxFaultMain(argv = process.argv.slice(2), depe
       });
       print(formatPreparedP01IsolationConfiguration(result));
     } else {
+      if (offerIsolationKeychainPrepare) {
+        await assertF02KeychainWindow(
+          keychain,
+          offerKeychainSelection.namespace,
+          dependencies.now || Date.now,
+        );
+        await keychain.storeNew(
+          F02_KEYCHAIN_ITEMS.helperLease,
+          f02KeychainPidOwner(),
+          { maxBytes: 14, pattern: F02_KEYCHAIN_PID_OWNER_PATTERN },
+        );
+        await keychain.replaceExact(
+          F02_KEYCHAIN_ITEMS.bundleState,
+          "READY_FOR_HELPER",
+          "HELPER_STARTED",
+          { maxBytes: 32, pattern: F02_KEYCHAIN_STATE_PATTERN },
+        );
+      }
       const result = await prepareFaultConfiguration({
         mode,
         selector,
@@ -451,7 +586,30 @@ export async function prepareSandboxFaultMain(argv = process.argv.slice(2), depe
         forbiddenAppsUrl,
         randomBytesImpl: dependencies.randomBytesImpl || randomBytes,
       });
-      print(formatPreparedFaultConfiguration(result));
+      if (offerIsolationKeychainPrepare) {
+        await keychain.storeNew(F02_KEYCHAIN_ITEMS.targetDigest, result.targetDigest, {
+          maxBytes: 64, pattern: /^[a-f0-9]{64}$/,
+        });
+        await keychain.storeNew(F02_KEYCHAIN_ITEMS.runToken, result.runToken, {
+          maxBytes: 128, pattern: /^[A-Za-z0-9_-]{32,128}$/,
+        });
+        await keychain.storeNew(F02_KEYCHAIN_ITEMS.appsUrlDigest, result.appsUrlDigest, {
+          maxBytes: 64, pattern: /^[a-f0-9]{64}$/,
+        });
+        await keychain.storeNew(
+          F02_KEYCHAIN_ITEMS.forbiddenAppsUrlDigest, result.forbiddenAppsUrlDigest,
+          { maxBytes: 64, pattern: /^[a-f0-9]{64}$/ },
+        );
+        await keychain.replaceExact(
+          F02_KEYCHAIN_ITEMS.bundleState,
+          "HELPER_STARTED",
+          "HELPER_COMPLETE",
+          { maxBytes: 32, pattern: F02_KEYCHAIN_STATE_PATTERN },
+        );
+        print("STATUS=PREPARED RESULT=F02_KEYCHAIN_CONTROLS_STORED");
+      } else {
+        print(formatPreparedFaultConfiguration(result));
+      }
     }
     return 0;
   } catch {
@@ -466,18 +624,39 @@ export async function prepareSandboxFaultMain(argv = process.argv.slice(2), depe
     hashSecret = "";
     sandboxAppsUrl = "";
     forbiddenAppsUrl = "";
+    keychain = null;
     restoreTerminal();
   }
 }
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
-  const exitForSignal = (signalCode) => {
+  const restoreHelperResources = () => {
+    try { abortF02KeychainSecurityProcessesSync(); } catch {}
     restoreTerminal();
+    try { abortF02NamespaceOperationLocksSync(); } catch {}
+  };
+  let terminating = false;
+  const exitForSignal = async (signalCode) => {
+    if (terminating) return;
+    terminating = true;
+    try { retainF02NamespaceOperationLocksForShutdownSync(); } catch {}
+    try { abortF02KeychainSecurityProcessesSync(); } catch {}
+    let securityCleanup;
+    try { securityCleanup = await abortF02KeychainSecurityProcesses(); } catch {}
+    const descendantsReaped = f02ShutdownReapVerified(securityCleanup);
+    restoreTerminal();
+    let lockClosed = false;
+    if (descendantsReaped) {
+      try { abortF02NamespaceOperationLocksSync(); } catch {}
+      try { lockClosed = await abortF02NamespaceOperationLocks() === true; } catch {}
+    }
+    if (!lockClosed) return;
     process.exit(128 + signalCode);
   };
-  process.once("exit", restoreTerminal);
-  process.once("SIGINT", () => exitForSignal(2));
-  process.once("SIGTERM", () => exitForSignal(15));
+  process.once("exit", restoreHelperResources);
+  process.on("SIGINT", () => { void exitForSignal(2); });
+  process.on("SIGTERM", () => { void exitForSignal(15); });
+  process.on("SIGHUP", () => { void exitForSignal(1); });
   process.exitCode = await prepareSandboxFaultMain();
 }
