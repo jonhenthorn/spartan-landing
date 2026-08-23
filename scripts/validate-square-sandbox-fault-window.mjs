@@ -32,6 +32,12 @@ import {
   formatPreparedP02FaultConfiguration,
   prepareP02FaultConfiguration,
 } from "./prepare-square-sandbox-p02-fault.mjs";
+import {
+  __test as keychainTest,
+  F02_KEYCHAIN_FLAG,
+  F02_KEYCHAIN_ITEMS,
+} from "./project2-f02-keychain.mjs";
+import { createProcessScope, runBoundedProcess } from "./project2-f02-process-scope.mjs";
 
 const ACCOUNT = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const COMMIT = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -67,6 +73,12 @@ const COMMON_FAULT_NAMES = driverTest.FAULT_SECRET_NAMES.filter(
 );
 
 const checks = [];
+const VALIDATOR_OPERATION_LOCK_ROOT = mkdtempSync(
+  resolve(tmpdir(), "project2-f02-fault-validator-locks-"),
+);
+process.once("exit", () => {
+  rmSync(VALIDATOR_OPERATION_LOCK_ROOT, { recursive: true, force: true });
+});
 function check(name, fn) { checks.push({ name, fn }); }
 
 function fixtureVersion(id, vars, secrets = driverTest.STANDING_SECRET_NAMES) {
@@ -96,6 +108,45 @@ function promptFrom(values) {
       return remaining.shift();
     },
     assertDone: () => assert.equal(remaining.length, 0, "all hidden inputs consumed"),
+  };
+}
+
+function memoryF02Keychain(initial, events = []) {
+  const values = new Map(Object.entries(initial));
+  const validate = (value, validation) => {
+    assert.equal(typeof value, "string");
+    assert.ok(Buffer.byteLength(value, "utf8") <= validation.maxBytes);
+    assert.ok(validation.pattern.test(value));
+  };
+  return {
+    values,
+    async has(account) { return values.has(account); },
+    async read(account, validation) {
+      assert.ok(values.has(account), `Keychain fixture item exists: ${account}`);
+      const value = values.get(account);
+      validate(value, validation);
+      events.push({ type: "keychain-read", account });
+      return value;
+    },
+    async assertAbsent(accounts) {
+      for (const account of accounts) assert.equal(values.has(account), false, `${account} absent`);
+      events.push({ type: "keychain-absent", accounts: [...accounts] });
+    },
+    async storeNew(account, value, validation) {
+      validate(value, validation);
+      if (values.has(account)) throw new Error("fixture duplicate Keychain item");
+      values.set(account, value);
+      events.push({ type: "keychain-store", account, value });
+    },
+    async replaceExact(account, expected, value, validation) {
+      validate(expected, validation);
+      validate(value, validation);
+      if (values.get(account) !== expected || expected === value) {
+        throw new Error("fixture Keychain replacement mismatch");
+      }
+      values.set(account, value);
+      events.push({ type: "keychain-replace", account, expected, value });
+    },
   };
 }
 
@@ -254,7 +305,15 @@ function makeRunner({
   }
 
   const run = async (command, args, options = {}) => {
-    const call = { command, args: [...args], input: options.input || "", env: { ...(options.env || {}) } };
+    const inputBuffer = Buffer.isBuffer(options.input) ? options.input : null;
+    const call = {
+      command,
+      args: [...args],
+      input: inputBuffer ? Buffer.from(inputBuffer) : options.input || "",
+      inputBuffer,
+      sentinels: [...(options.sentinels || [])],
+      env: { ...(options.env || {}) },
+    };
     state.calls.push(call);
     if (command === "git") {
       if (args.join(" ") === "rev-parse --show-toplevel") return { code: 0, stdout: `${driverTest.ROOT}\n`, stderr: "" };
@@ -385,6 +444,7 @@ async function invokeMain(args, prompt, runner, dependencies = {}) {
     print: (line) => output.push(line),
     readHiddenLine: prompt.read,
     run: runner.run,
+    operationLockRoot: VALIDATOR_OPERATION_LOCK_ROOT,
     ...dependencies,
   });
   return { output, status };
@@ -486,6 +546,139 @@ check("empty and plan modes are inert and process-free", async () => {
     "every migration authority, recovery and closure step must precede case preparation",
   );
   assert.equal(runner.state.calls.length, 0);
+});
+
+check("Keychain process runner redacts sentinels, times out descendants, and preserves the portable manual path", async () => {
+  const portable = await driverTest.defaultRun(process.execPath, [
+    "-e", "process.stdout.write('PORTABLE_MANUAL_OK')",
+  ]);
+  assert.deepEqual(portable, { code: 0, stdout: "PORTABLE_MANUAL_OK", stderr: "" });
+
+  const dummyToken = `dummy-workers-edit-${"z".repeat(40)}`;
+  const redacted = await driverTest.defaultRun(process.execPath, [
+    "-e", "process.stdout.write(process.env.CLOUDFLARE_API_TOKEN || '')",
+  ], {
+    env: { CLOUDFLARE_API_TOKEN: dummyToken },
+    processRunner: runBoundedProcess,
+    sentinels: [dummyToken],
+  });
+  assert.deepEqual(redacted, { code: -1, stdout: "", stderr: "" });
+
+  const derivedSecret = `dummy-derived-control-${"s".repeat(40)}`;
+  const secretInput = Buffer.from(derivedSecret, "utf8");
+  const secretEcho = await driverTest.defaultRun(process.execPath, [
+    "-e", "process.stdin.pipe(process.stdout)",
+  ], {
+    input: secretInput,
+    processRunner: runBoundedProcess,
+    sentinels: [derivedSecret],
+  });
+  secretInput.fill(0);
+  assert.deepEqual(secretEcho, { code: -1, stdout: "", stderr: "" });
+  assert.ok(secretInput.every((byte) => byte === 0), "caller-owned secret input is zeroed");
+
+  const directory = mkdtempSync(resolve(tmpdir(), "f02-operator-scope-test-"));
+  const pidPath = resolve(directory, "pids.json");
+  try {
+    const timedOut = await driverTest.defaultRun(process.execPath, [
+      "-e",
+      [
+        "const {spawn}=require('node:child_process')",
+        "const {writeFileSync}=require('node:fs')",
+        "const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'})",
+        "writeFileSync(process.argv[1],JSON.stringify([process.pid,child.pid]))",
+        "setInterval(()=>{},1000)",
+      ].join(";"),
+      pidPath,
+    ], { timeoutMs: 250, processRunner: runBoundedProcess });
+    assert.deepEqual(timedOut, { code: -1, stdout: "", stderr: "" });
+    assert.equal(existsSync(pidPath), true);
+    const pids = JSON.parse(readFileSync(pidPath, "utf8"));
+    for (const pid of pids) {
+      let alive = true;
+      try { process.kill(pid, 0); } catch { alive = false; }
+      assert.equal(alive, false, `bounded process group member ${pid} was reaped`);
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+
+  const operatorSource = readFileSync(
+    resolve(driverTest.ROOT, "scripts/manage-square-sandbox-fault-window.mjs"), "utf8",
+  );
+  const retainedLockAt = operatorSource.indexOf(
+    "retainF02NamespaceOperationLocksForShutdownSync();",
+  );
+  const securityStopAt = operatorSource.indexOf(
+    "abortF02KeychainSecurityProcessesSync();", retainedLockAt,
+  );
+  const scopeStopAt = operatorSource.indexOf("processScope?.abortAllSync();", securityStopAt);
+  const securityReapAt = operatorSource.indexOf(
+    "abortF02KeychainSecurityProcesses(),", scopeStopAt,
+  );
+  const scopeReapAt = operatorSource.indexOf("processScope?.abortAll?.() ||", securityReapAt);
+  const reapProofAt = operatorSource.indexOf(
+    "f02ShutdownReapVerified(...descendantResults)", scopeReapAt,
+  );
+  const restoreAt = operatorSource.indexOf(
+    "resourcesCleaned = restoreTerminal() === true;", reapProofAt,
+  );
+  const lockStopAt = operatorSource.indexOf(
+    "abortF02NamespaceOperationLocksSync();", restoreAt,
+  );
+  const lockReapAt = operatorSource.indexOf(
+    "await abortF02NamespaceOperationLocks() === true", lockStopAt,
+  );
+  const signalExitAt = operatorSource.indexOf("process.exit(128 + signalCode);", lockReapAt);
+  assert.ok(retainedLockAt >= 0 && retainedLockAt < securityStopAt &&
+    securityStopAt < scopeStopAt && scopeStopAt < securityReapAt &&
+    securityReapAt < scopeReapAt && scopeReapAt < reapProofAt &&
+    reapProofAt < restoreAt && restoreAt < lockStopAt &&
+    lockStopAt < lockReapAt && lockReapAt < signalExitAt,
+  "signal cleanup retains the lock through descendant reaping and releases it last");
+  assert.match(operatorSource, /if \(descendantsReaped && resourcesCleaned\) \{/,
+    "operator signal exit cannot reap the lock helper after ambiguous local-resource cleanup");
+  assert.match(operatorSource, /processScope \? \{ processScope, processScopeOwned: true \} : \{\}/,
+    "the standalone operator proves its CLI-owned scope before lock unwind");
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+    assert.match(operatorSource, new RegExp(`process\\.on\\("${signal}"`),
+      `${signal} remains intercepted while asynchronous reaping settles`);
+  }
+
+  const helperSource = readFileSync(
+    resolve(driverTest.ROOT, "scripts/prepare-square-sandbox-fault.mjs"), "utf8",
+  );
+  const helperRetainAt = helperSource.indexOf(
+    "retainF02NamespaceOperationLocksForShutdownSync();",
+  );
+  const helperSecurityStopAt = helperSource.indexOf(
+    "abortF02KeychainSecurityProcessesSync();", helperRetainAt,
+  );
+  const helperSecurityReapAt = helperSource.indexOf(
+    "securityCleanup = await abortF02KeychainSecurityProcesses();", helperSecurityStopAt,
+  );
+  const helperReapProofAt = helperSource.indexOf(
+    "f02ShutdownReapVerified(securityCleanup)", helperSecurityReapAt,
+  );
+  const helperRestoreAt = helperSource.indexOf("restoreTerminal();", helperReapProofAt);
+  const helperLockStopAt = helperSource.indexOf(
+    "abortF02NamespaceOperationLocksSync();", helperRestoreAt,
+  );
+  const helperLockReapAt = helperSource.indexOf(
+    "await abortF02NamespaceOperationLocks() === true", helperLockStopAt,
+  );
+  assert.ok(helperRetainAt >= 0 && helperRetainAt < helperSecurityStopAt &&
+    helperSecurityStopAt < helperSecurityReapAt &&
+    helperSecurityReapAt < helperReapProofAt && helperReapProofAt < helperRestoreAt &&
+    helperRestoreAt < helperLockStopAt && helperLockStopAt < helperLockReapAt,
+  "preparation-helper signal cleanup retains the lock through security reap and releases it last");
+  assert.match(helperSource,
+    /const restoreHelperResources = \(\) => \{[\s\S]*?abortF02KeychainSecurityProcessesSync\(\);[\s\S]*?restoreTerminal\(\);[\s\S]*?abortF02NamespaceOperationLocksSync\(\);/,
+    "preparation-helper synchronous exit fallback terminates the lock last");
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+    assert.match(helperSource, new RegExp(`process\\.on\\("${signal}"`),
+      `preparation-helper ${signal} remains intercepted while asynchronous reaping settles`);
+  }
 });
 
 check("version upload output accepts exactly one labeled Worker version ID", () => {
@@ -1521,6 +1714,48 @@ check("temporary config content, mode or readability drift still removes the exa
   }
 });
 
+check("Keychain temporary-config cleanup ambiguity retains the durable namespace fence", async () => {
+  const namespace = "f02-20260823t190000z-9abc1236";
+  const operationLockRoot = mkdtempSync(resolve(tmpdir(), "project2-f02-temp-poison-"));
+  const operationLockPath = resolve(operationLockRoot, `${namespace}.lock`);
+  try {
+    const child = spawnSync(process.execPath, [
+      process.argv[1], "--keychain-temp-cleanup-poison-child",
+      operationLockRoot, namespace,
+    ], { encoding: "utf8", timeout: 15_000 });
+    assert.equal(child.status, 0, child.stderr || "temp-cleanup poison child failed");
+    assert.equal(child.signal, null);
+    assert.equal(child.stderr, "");
+    assert.deepEqual(JSON.parse(child.stdout), {
+      result: {
+        status: 3,
+        output: ["STATUS=REJECTED RESULT=F02_KEYCHAIN_INPUT_REJECTED"],
+      },
+      state: "OPERATOR_STARTED",
+      reserved: true,
+      uploads: 1,
+    });
+    const marker = readFileSync(operationLockPath, "ascii");
+    assert.match(marker, /^MAIN:[1-9][0-9]{0,9}:ACTION:[a-f0-9]{32}$/,
+      "post-upload temporary-config ambiguity retains a nonempty marker");
+    const lockModuleUrl = new URL("./project2-f02-keychain.mjs", import.meta.url).href;
+    const probe = spawnSync(process.execPath, [
+      "--input-type=module", "--eval", [
+        "const [moduleUrl, candidateNamespace, lockRoot] = process.argv.slice(1)",
+        "const {__test} = await import(moduleUrl)",
+        "try { await __test.acquireF02NamespaceOperationLock(candidateNamespace, {operationLockRoot:lockRoot}); process.exitCode=2 }",
+        "catch { process.exitCode=0 }",
+      ].join("\n"),
+      lockModuleUrl, namespace, operationLockRoot,
+    ], { encoding: "utf8", timeout: 5_000 });
+    assert.equal(probe.status, 0,
+      "fresh-process acquisition is blocked after temporary-config cleanup ambiguity");
+    assert.equal(readFileSync(operationLockPath, "ascii"), marker);
+  } finally {
+    rmSync(operationLockRoot, { recursive: true, force: true });
+  }
+});
+
 check("offer deployment requires its complete exposure acknowledgement vector", async () => {
   for (const acknowledgement of [
     "--ack-main-queue-and-dlq-empty", "--ack-zero-nonterminal-webhook-outbox-work",
@@ -1722,6 +1957,1174 @@ check("distinct offer-isolation preparation, deployment, rollback, and cleanup p
   assert.equal(Object.hasOwn(finalVars, "SQUARE_SANDBOX_CONTROL_PROFILE"), false);
   assert.deepEqual(finalVersion.resources.bindings.filter((binding) => binding.type === "secret_text")
     .map((binding) => binding.name).sort(), driverTest.STANDING_SECRET_NAMES.slice().sort());
+});
+
+check("F-02 Keychain candidate mode recomputes controls, confines W to exact Wrangler children, and redacts custody", async () => {
+  const namespace = "f02-20260823t190000z-9abc1234";
+  const now = Date.parse("2026-08-23T19:01:00.000Z");
+  const workersToken = `worker-edit-${"x".repeat(40)}`;
+  const readBundleToken = `read-bundle-${"y".repeat(40)}`;
+  const coupon = "F02-KEYCHAIN-OPERATOR-001";
+  const targetDigest = await computeSandboxFaultTargetDigest(
+    driverTest.OFFER_ROUTE_ISOLATION_MODE, CANARY, HASH_SECRET, RUN_TOKEN,
+  );
+  const appsDigest = await computeSandboxFaultAppsUrlDigest(
+    driverTest.OFFER_ROUTE_ISOLATION_MODE, APPS_URL, HASH_SECRET, RUN_TOKEN,
+  );
+  const forbiddenDigest = await computeSandboxFaultAppsUrlDigest(
+    driverTest.OFFER_ROUTE_ISOLATION_MODE, FORBIDDEN_APPS_URL, HASH_SECRET, RUN_TOKEN,
+  );
+  const initial = {
+    [F02_KEYCHAIN_ITEMS.bundleState]: "HELPER_COMPLETE",
+    [F02_KEYCHAIN_ITEMS.windowStartUtc]: "2026-08-23T19:00:00.000Z",
+    [F02_KEYCHAIN_ITEMS.windowEndUtc]: "2026-08-23T21:00:00.000Z",
+    [F02_KEYCHAIN_ITEMS.accountId]: ACCOUNT,
+    [F02_KEYCHAIN_ITEMS.reviewedCommit]: COMMIT,
+    [F02_KEYCHAIN_ITEMS.baselineVersion]: BASELINE,
+    [F02_KEYCHAIN_ITEMS.canary]: CANARY,
+    [F02_KEYCHAIN_ITEMS.coupon]: coupon,
+    [F02_KEYCHAIN_ITEMS.hashSecret]: HASH_SECRET,
+    [F02_KEYCHAIN_ITEMS.sandboxAppsUrl]: APPS_URL,
+    [F02_KEYCHAIN_ITEMS.forbiddenAppsUrl]: FORBIDDEN_APPS_URL,
+    [F02_KEYCHAIN_ITEMS.targetDigest]: targetDigest,
+    [F02_KEYCHAIN_ITEMS.runToken]: RUN_TOKEN,
+    [F02_KEYCHAIN_ITEMS.appsUrlDigest]: appsDigest,
+    [F02_KEYCHAIN_ITEMS.forbiddenAppsUrlDigest]: forbiddenDigest,
+    [F02_KEYCHAIN_ITEMS.workersEditToken]: workersToken,
+    [F02_KEYCHAIN_ITEMS.readBundleToken]: readBundleToken,
+  };
+  const deletionFenceKeychain = memoryF02Keychain(initial);
+  const deletionFenceRunner = makeRunner({ uploadIds: [UPLOAD], secretIds: [CANDIDATE] });
+  const deletionFenceLock = await keychainTest.acquireF02NamespaceOperationLock(namespace, {
+    operationLockRoot: VALIDATOR_OPERATION_LOCK_ROOT,
+  });
+  try {
+    const blockedByDeletionFence = await invokeMain([
+      ...driverTest.PREPARE_OFFER_ISOLATION_ARGS, F02_KEYCHAIN_FLAG, namespace,
+    ], async () => { throw new Error("must reject before prompt"); }, deletionFenceRunner, {
+      keychainAccess: deletionFenceKeychain,
+      now: () => now,
+    });
+    assert.equal(blockedByDeletionFence.status, 3);
+    assert.deepEqual(blockedByDeletionFence.output,
+      ["STATUS=REJECTED RESULT=F02_KEYCHAIN_INPUT_REJECTED"]);
+    assert.equal(deletionFenceRunner.state.calls.length, 0,
+      "an active namespace deletion/staging actor blocks all provider reads and writes");
+    assert.equal(deletionFenceKeychain.values.has(F02_KEYCHAIN_ITEMS.operatorLease), false);
+  } finally {
+    await deletionFenceLock.release();
+  }
+  const events = [];
+  const keychain = memoryF02Keychain(initial, events);
+  const cleanupIds = [
+    "71000000-0000-4000-8000-000000000001",
+    "71000000-0000-4000-8000-000000000002",
+    "71000000-0000-4000-8000-000000000003",
+    "71000000-0000-4000-8000-000000000004",
+    "71000000-0000-4000-8000-000000000005",
+    "71000000-0000-4000-8000-000000000006",
+  ];
+  const fixture = makeRunner({
+    uploadIds: [UPLOAD, CLEANUP],
+    secretIds: [CANDIDATE, ...cleanupIds],
+  });
+  const runner = {
+    state: fixture.state,
+    run: async (command, args, options = {}) => {
+      events.push({
+        type: "run", command, args: [...args],
+        env: { ...(options.env || {}) }, sourceEnv: { ...(options.sourceEnv || {}) },
+      });
+      return fixture.run(command, args, options);
+    },
+  };
+  const saved = {
+    CLOUDFLARE_API_TOKEN: process.env.CLOUDFLARE_API_TOKEN,
+    SQUARE_ACCEPTANCE_QUEUES_READ_TOKEN: process.env.SQUARE_ACCEPTANCE_QUEUES_READ_TOKEN,
+    XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+  };
+  process.env.CLOUDFLARE_API_TOKEN = "standing-token-must-not-flow";
+  process.env.SQUARE_ACCEPTANCE_QUEUES_READ_TOKEN = "standing-read-must-not-flow";
+  process.env.XDG_CONFIG_HOME = "/tmp/standing-xdg-must-not-flow";
+  let result;
+  try {
+    result = await invokeMain([
+      ...driverTest.PREPARE_OFFER_ISOLATION_ARGS, F02_KEYCHAIN_FLAG, namespace,
+    ], promptFrom(["LOAD_F02_OPERATOR_KEYCHAIN_ONCE"]), runner, {
+      keychainAccess: keychain,
+      now: () => now,
+    });
+  } finally {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+  assert.equal(result.status, 0);
+  assert.deepEqual(result.output, [
+    "STATUS=PREPARED RESULT=SANDBOX_OFFER_ISOLATION_CANDIDATE_READY CANDIDATE_VERSION=[KEYCHAIN]",
+  ]);
+  assert.equal(keychain.values.get(F02_KEYCHAIN_ITEMS.candidateVersion), CANDIDATE);
+  assert.equal(keychain.values.get(F02_KEYCHAIN_ITEMS.bundleState), "CANDIDATE_COMPLETE");
+  assert.equal(keychain.values.get(F02_KEYCHAIN_ITEMS.operatorLease), `PID:${process.pid}`);
+  assert.equal(runner.state.trafficId, BASELINE);
+  const reservation = events.findIndex((event) =>
+    event.type === "keychain-store" && event.account === F02_KEYCHAIN_ITEMS.candidateVersion);
+  const firstCredentialRun = events.findIndex((event) =>
+    event.type === "run" && event.env.CLOUDFLARE_API_TOKEN === workersToken);
+  const lastCredentialFreePreflight = events.reduce((last, event, index) =>
+    event.type === "run" && !Object.hasOwn(event.env, "CLOUDFLARE_API_TOKEN")
+      ? index : last, -1);
+  assert.ok(lastCredentialFreePreflight >= 0 && reservation > lastCredentialFreePreflight &&
+    reservation < firstCredentialRun,
+  "candidate reservation follows local Git/Wrangler preflight and precedes first W-authenticated call");
+  const runEvents = events.filter((event) => event.type === "run");
+  const xdgHomes = new Set();
+  for (const event of runEvents) {
+    assert.equal(Object.values(event.sourceEnv).includes("standing-token-must-not-flow"), false);
+    assert.equal(Object.values(event.sourceEnv).includes("standing-read-must-not-flow"), false);
+    assert.equal(Object.values(event.sourceEnv).includes("/tmp/standing-xdg-must-not-flow"), false);
+    if (event.command === "git") {
+      assert.equal(Object.hasOwn(event.env, "CLOUDFLARE_API_TOKEN"), false);
+      assert.equal(Object.hasOwn(event.env, "XDG_CONFIG_HOME"), false);
+      continue;
+    }
+    assert.deepEqual(event.args.slice(0, 2), ["--no-install", "wrangler"]);
+    xdgHomes.add(event.env.XDG_CONFIG_HOME);
+    assert.equal(event.env.HOME, event.env.XDG_CONFIG_HOME);
+    if (event.args.length === 3 && event.args[2] === "--version") {
+      assert.equal(Object.hasOwn(event.env, "CLOUDFLARE_API_TOKEN"), false);
+    } else {
+      assert.equal(event.env.CLOUDFLARE_API_TOKEN, workersToken);
+    }
+  }
+  assert.equal(xdgHomes.size, 1);
+  assert.equal(existsSync([...xdgHomes][0]), false, "private Wrangler HOME/XDG removed before success");
+  const uploadCall = runner.state.calls.find((call) => call.args.includes("upload"));
+  assert.equal(uploadCall.uploadConfigMode, 0o600);
+  assert.ok(!existsSync(uploadCall.uploadConfigPath));
+  const secretBulkCall = runner.state.calls.find((call) =>
+    call.args.includes("secret") && call.args.includes("bulk"));
+  const stagedControls = JSON.parse(secretBulkCall.input);
+  assert.deepEqual(new Set(secretBulkCall.sentinels),
+    new Set([...Object.values(stagedControls), workersToken]));
+  assert.ok(Buffer.isBuffer(secretBulkCall.inputBuffer));
+  assert.ok(secretBulkCall.inputBuffer.every((byte) => byte === 0),
+    "operator zeroes its caller-owned secret JSON buffer after the bulk child settles");
+  const privateValues = [workersToken, readBundleToken, HASH_SECRET, APPS_URL, FORBIDDEN_APPS_URL, coupon, CANDIDATE];
+  for (const value of privateValues) assert.equal(result.output.join("\n").includes(value), false);
+  const childArguments = runner.state.calls.map((call) => JSON.stringify(call.args)).join("\n");
+  for (const value of [workersToken, readBundleToken, HASH_SECRET, APPS_URL, FORBIDDEN_APPS_URL, coupon]) {
+    assert.equal(childArguments.includes(value), false);
+  }
+  const uploadedText = JSON.stringify(uploadCall.uploadVars);
+  for (const value of [workersToken, readBundleToken, HASH_SECRET, APPS_URL, FORBIDDEN_APPS_URL, coupon]) {
+    assert.equal(uploadedText.includes(value), false);
+  }
+
+  keychain.values.set(F02_KEYCHAIN_ITEMS.bundleState, "COORDINATOR_STARTED");
+  keychain.values.set(F02_KEYCHAIN_ITEMS.lifecycleLease, `COORDINATOR:PID:${process.pid}`);
+  keychain.values.set(F02_KEYCHAIN_ITEMS.coordinatorLease, `PID:${process.pid}`);
+  keychain.values.set(F02_KEYCHAIN_ITEMS.readyForFinalGo, "READY");
+  keychain.values.set(F02_KEYCHAIN_ITEMS.finalGoAccepted, "ACCEPTED");
+  const deployed = await invokeMain([
+    ...driverTest.DEPLOY_OFFER_ISOLATION_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["DEPLOY_F02_KEYCHAIN_CANDIDATE_ONCE"]), runner, {
+    keychainAccess: keychain,
+    now: () => now,
+  });
+  assert.equal(deployed.status, 0);
+  assert.deepEqual(deployed.output, ["STATUS=COMPLETE RESULT=SANDBOX_OFFER_ISOLATION_TRAFFIC_ACTIVE"]);
+  assert.equal(runner.state.trafficId, CANDIDATE);
+  assert.equal(keychain.values.get(F02_KEYCHAIN_ITEMS.deployLease), "CLAIMED");
+  assert.equal(keychain.values.get(F02_KEYCHAIN_ITEMS.candidateDeployed), CANDIDATE);
+
+  keychain.values.set(F02_KEYCHAIN_ITEMS.bundleState, "REQUEST_ATTEMPTED");
+  const rolledBack = await invokeMain([
+    ...driverTest.ROLLBACK_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["ROLLBACK_F02_KEYCHAIN_TO_BASELINE_ONCE"]), runner, {
+    keychainAccess: keychain,
+    now: () => now,
+  });
+  assert.equal(rolledBack.status, 0);
+  assert.deepEqual(rolledBack.output, ["STATUS=COMPLETE RESULT=EXACT_ALL_OFF_ROLLBACK_CONFIRMED"]);
+  assert.equal(runner.state.trafficId, BASELINE);
+  assert.equal(keychain.values.get(F02_KEYCHAIN_ITEMS.rollbackLease), `PID:${process.pid}`);
+  assert.equal(keychain.values.get(F02_KEYCHAIN_ITEMS.rollbackComplete), BASELINE);
+
+  runner.state.nextUploadSecrets = [...driverTest.STANDING_SECRET_NAMES, ...COMMON_FAULT_NAMES];
+  const cleaned = await invokeMain([
+    ...driverTest.CLEANUP_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["CLEANUP_F02_KEYCHAIN_ALL_OFF_ONCE"]), runner, {
+    keychainAccess: keychain,
+    now: () => now,
+  });
+  assert.equal(cleaned.status, 0);
+  assert.deepEqual(cleaned.output, ["STATUS=COMPLETE RESULT=SANDBOX_CLEAN_ALL_OFF_DEPLOYED"]);
+  assert.equal(runner.state.trafficId, cleanupIds.at(-1));
+  assert.equal(keychain.values.get(F02_KEYCHAIN_ITEMS.cleanupLease), `PID:${process.pid}`);
+  assert.equal(keychain.values.get(F02_KEYCHAIN_ITEMS.cleanupCandidateVersion), cleanupIds.at(-1));
+  assert.equal(keychain.values.get(F02_KEYCHAIN_ITEMS.cleanupComplete), cleanupIds.at(-1));
+  for (const resultLines of [deployed.output, rolledBack.output, cleaned.output]) {
+    for (const value of privateValues) assert.equal(resultLines.join("\n").includes(value), false);
+  }
+
+  const rejectedEvents = [];
+  const rejectedKeychain = memoryF02Keychain({
+    ...initial,
+    [F02_KEYCHAIN_ITEMS.targetDigest]: "0".repeat(64),
+  }, rejectedEvents);
+  const rejectedRunner = makeRunner({ uploadIds: [UPLOAD], secretIds: [CANDIDATE] });
+  const rejected = await invokeMain([
+    ...driverTest.PREPARE_OFFER_ISOLATION_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["LOAD_F02_OPERATOR_KEYCHAIN_ONCE"]), rejectedRunner, {
+    keychainAccess: rejectedKeychain,
+    now: () => now,
+  });
+  assert.notEqual(rejected.status, 0);
+  assert.equal(rejectedRunner.state.calls.length, 5);
+  assert.ok(rejectedRunner.state.calls.every((call) =>
+    !Object.hasOwn(call.env, "CLOUDFLARE_API_TOKEN")),
+  "derived-control mismatch stops after credential-free local preflight and before W-authenticated work");
+  assert.equal(rejectedKeychain.values.has(F02_KEYCHAIN_ITEMS.operatorLease), false);
+  assert.equal(rejectedKeychain.values.has(F02_KEYCHAIN_ITEMS.candidateVersion), false);
+
+  let windowReads = 0;
+  const expiredBeforeReservationKeychain = memoryF02Keychain(initial);
+  const expiredBeforeReservationRunner = makeRunner({ uploadIds: [UPLOAD], secretIds: [CANDIDATE] });
+  const expiredBeforeReservation = await invokeMain([
+    ...driverTest.PREPARE_OFFER_ISOLATION_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["LOAD_F02_OPERATOR_KEYCHAIN_ONCE"]), expiredBeforeReservationRunner, {
+    keychainAccess: expiredBeforeReservationKeychain,
+    now: () => ++windowReads <= 2 ? now : Date.parse("2026-08-23T21:00:01.000Z"),
+  });
+  assert.notEqual(expiredBeforeReservation.status, 0);
+  assert.equal(expiredBeforeReservationKeychain.values.has(F02_KEYCHAIN_ITEMS.operatorLease), false);
+  assert.equal(expiredBeforeReservationKeychain.values.has(F02_KEYCHAIN_ITEMS.candidateVersion), false);
+  assert.equal(expiredBeforeReservationRunner.state.calls.some((call) =>
+    Object.hasOwn(call.env, "CLOUDFLARE_API_TOKEN")), false,
+  "window expiry after private-input reads but before the final reservation check blocks authority");
+
+  windowReads = 0;
+  const expiredBeforeUploadKeychain = memoryF02Keychain(initial);
+  const expiredBeforeUploadRunner = makeRunner({ uploadIds: [UPLOAD], secretIds: [CANDIDATE] });
+  const expiredBeforeUpload = await invokeMain([
+    ...driverTest.PREPARE_OFFER_ISOLATION_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["LOAD_F02_OPERATOR_KEYCHAIN_ONCE"]), expiredBeforeUploadRunner, {
+    keychainAccess: expiredBeforeUploadKeychain,
+    now: () => ++windowReads <= 3 ? now : Date.parse("2026-08-23T21:00:01.000Z"),
+  });
+  assert.notEqual(expiredBeforeUpload.status, 0);
+  assert.equal(expiredBeforeUploadKeychain.values.get(F02_KEYCHAIN_ITEMS.operatorLease),
+    `PID:${process.pid}`);
+  assert.equal(expiredBeforeUploadKeychain.values.get(F02_KEYCHAIN_ITEMS.candidateVersion),
+    "00000000-0000-4000-8000-000000000000");
+  assert.equal(expiredBeforeUploadRunner.state.calls.some((call) =>
+    call.args.includes("upload") || call.args.includes("secret") && call.args.includes("bulk")), false,
+  "window expiry after read-only baseline verification blocks both preparation mutations");
+
+  windowReads = 0;
+  const expiredBeforeSecretKeychain = memoryF02Keychain(initial);
+  const expiredBeforeSecretRunner = makeRunner({ uploadIds: [UPLOAD], secretIds: [CANDIDATE] });
+  const expiredBeforeSecret = await invokeMain([
+    ...driverTest.PREPARE_OFFER_ISOLATION_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["LOAD_F02_OPERATOR_KEYCHAIN_ONCE"]), expiredBeforeSecretRunner, {
+    keychainAccess: expiredBeforeSecretKeychain,
+    now: () => ++windowReads <= 4 ? now : Date.parse("2026-08-23T21:00:01.000Z"),
+  });
+  assert.notEqual(expiredBeforeSecret.status, 0);
+  assert.equal(expiredBeforeSecretRunner.state.calls.filter((call) => call.args.includes("upload")).length, 1);
+  assert.equal(expiredBeforeSecretRunner.state.calls.some((call) =>
+    call.args.includes("secret") && call.args.includes("bulk")), false,
+  "window expiry after base upload verification blocks secret staging");
+  assert.equal(expiredBeforeSecretRunner.state.trafficId, BASELINE);
+
+  const deployReadyItems = {
+    ...initial,
+    [F02_KEYCHAIN_ITEMS.bundleState]: "COORDINATOR_STARTED",
+    [F02_KEYCHAIN_ITEMS.lifecycleLease]: `COORDINATOR:PID:${process.pid}`,
+    [F02_KEYCHAIN_ITEMS.coordinatorLease]: `PID:${process.pid}`,
+    [F02_KEYCHAIN_ITEMS.candidateVersion]: CANDIDATE,
+    [F02_KEYCHAIN_ITEMS.readyForFinalGo]: "READY",
+    [F02_KEYCHAIN_ITEMS.finalGoAccepted]: "ACCEPTED",
+  };
+  const deployCandidateVersion = fixtureVersion(
+    CANDIDATE,
+    driverTest.expectedCandidateVars(
+      BASE_VARS, driverTest.OFFER_ROUTE_ISOLATION_MODE, CANARY,
+    ),
+    [...driverTest.STANDING_SECRET_NAMES, ...COMMON_FAULT_NAMES],
+  );
+  windowReads = 0;
+  const expiredBeforeDeployClaimKeychain = memoryF02Keychain(deployReadyItems);
+  const expiredBeforeDeployClaimRunner = makeRunner({
+    versions: { [CANDIDATE]: deployCandidateVersion },
+  });
+  const expiredBeforeDeployClaim = await invokeMain([
+    ...driverTest.DEPLOY_OFFER_ISOLATION_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["DEPLOY_F02_KEYCHAIN_CANDIDATE_ONCE"]), expiredBeforeDeployClaimRunner, {
+    keychainAccess: expiredBeforeDeployClaimKeychain,
+    now: () => ++windowReads <= 2 ? now : Date.parse("2026-08-23T21:00:01.000Z"),
+  });
+  assert.notEqual(expiredBeforeDeployClaim.status, 0);
+  assert.equal(expiredBeforeDeployClaimKeychain.values.has(
+    F02_KEYCHAIN_ITEMS.deployLease), false);
+  assert.equal(expiredBeforeDeployClaimRunner.state.trafficId, BASELINE);
+  assert.equal(expiredBeforeDeployClaimRunner.state.calls.some((call) =>
+    call.args.includes("versions") && call.args.includes("deploy")), false,
+  "window expiry after READY and owner reads but before the final deploy-claim check blocks authority");
+
+  windowReads = 0;
+  const expiredBeforeDeployKeychain = memoryF02Keychain(deployReadyItems);
+  const expiredBeforeDeployRunner = makeRunner({
+    versions: { [CANDIDATE]: deployCandidateVersion },
+  });
+  const expiredBeforeDeploy = await invokeMain([
+    ...driverTest.DEPLOY_OFFER_ISOLATION_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["DEPLOY_F02_KEYCHAIN_CANDIDATE_ONCE"]), expiredBeforeDeployRunner, {
+    keychainAccess: expiredBeforeDeployKeychain,
+    now: () => ++windowReads <= 3 ? now : Date.parse("2026-08-23T21:00:01.000Z"),
+  });
+  assert.notEqual(expiredBeforeDeploy.status, 0);
+  assert.equal(expiredBeforeDeployKeychain.values.get(F02_KEYCHAIN_ITEMS.deployLease), "CLAIMED");
+  assert.equal(expiredBeforeDeployRunner.state.trafficId, BASELINE);
+  assert.equal(expiredBeforeDeployRunner.state.calls.some((call) =>
+    call.args.includes("versions") && call.args.includes("deploy")), false,
+  "window expiry after exact candidate verification blocks the traffic mutation");
+
+  const ambiguousLifecycleEvents = [];
+  const ambiguousDeployKeychain = memoryF02Keychain({
+    ...initial,
+    [F02_KEYCHAIN_ITEMS.bundleState]: "COORDINATOR_STARTED",
+    [F02_KEYCHAIN_ITEMS.lifecycleLease]: `COORDINATOR:PID:${process.pid}`,
+    [F02_KEYCHAIN_ITEMS.coordinatorLease]: `PID:${process.pid}`,
+    [F02_KEYCHAIN_ITEMS.candidateVersion]: CANDIDATE,
+    [F02_KEYCHAIN_ITEMS.readyForFinalGo]: "READY",
+    [F02_KEYCHAIN_ITEMS.finalGoAccepted]: "ACCEPTED",
+  }, ambiguousLifecycleEvents);
+  const ambiguousDeployFixture = makeRunner({
+    ambiguousDeployId: CANDIDATE,
+    ambiguousDeployTrafficId: CANDIDATE,
+    versions: {
+      [CANDIDATE]: fixtureVersion(
+        CANDIDATE,
+        driverTest.expectedCandidateVars(
+          BASE_VARS, driverTest.OFFER_ROUTE_ISOLATION_MODE, CANARY,
+        ),
+        [...driverTest.STANDING_SECRET_NAMES, ...COMMON_FAULT_NAMES],
+      ),
+    },
+  });
+  const ambiguousDeployRunner = {
+    state: ambiguousDeployFixture.state,
+    run: async (command, args, options = {}) => {
+      ambiguousLifecycleEvents.push({
+        type: "run", command, args: [...args], env: { ...(options.env || {}) },
+      });
+      return ambiguousDeployFixture.run(command, args, options);
+    },
+  };
+  const ambiguousDeploy = await invokeMain([
+    ...driverTest.DEPLOY_OFFER_ISOLATION_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["DEPLOY_F02_KEYCHAIN_CANDIDATE_ONCE"]), ambiguousDeployRunner, {
+    keychainAccess: ambiguousDeployKeychain,
+    now: () => now,
+  });
+  assert.notEqual(ambiguousDeploy.status, 0);
+  assert.deepEqual(ambiguousDeploy.output, [
+    "STATUS=REJECTED RESULT=CANDIDATE_DEPLOY_UNCONFIRMED_ROLLBACK_DEFERRED",
+  ]);
+  assert.equal(ambiguousDeployRunner.state.trafficId, CANDIDATE);
+  assert.equal(ambiguousDeployKeychain.values.get(F02_KEYCHAIN_ITEMS.deployLease), "CLAIMED");
+  assert.equal(ambiguousDeployKeychain.values.has(F02_KEYCHAIN_ITEMS.candidateDeployed), false);
+  assert.deepEqual(ambiguousDeployRunner.state.calls.filter((call) =>
+    call.args.includes("deploy")).map((call) =>
+    call.args.find((arg) => /@100%$/.test(arg))), [`${CANDIDATE}@100%`],
+  "ambiguous Keychain deploy defers rollback instead of making an unclaimed inner attempt");
+
+  const rollbackEventStart = ambiguousLifecycleEvents.length;
+  const oneClaimedRollback = await invokeMain([
+    ...driverTest.ROLLBACK_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["ROLLBACK_F02_KEYCHAIN_TO_BASELINE_ONCE"]), ambiguousDeployRunner, {
+    keychainAccess: ambiguousDeployKeychain,
+    now: () => now,
+  });
+  assert.equal(oneClaimedRollback.status, 0);
+  assert.equal(ambiguousDeployRunner.state.trafficId, BASELINE);
+  assert.deepEqual(ambiguousDeployRunner.state.calls.filter((call) =>
+    call.args.includes("deploy")).map((call) =>
+    call.args.find((arg) => /@100%$/.test(arg))), [
+    `${CANDIDATE}@100%`, `${BASELINE}@100%`,
+  ]);
+  const rollbackEvents = ambiguousLifecycleEvents.slice(rollbackEventStart);
+  const rollbackClaimIndex = rollbackEvents.findIndex((event) =>
+    event.type === "keychain-store" && event.account === F02_KEYCHAIN_ITEMS.rollbackLease);
+  const firstAuthenticatedRollbackRead = rollbackEvents.findIndex((event) =>
+    event.type === "run" && Object.hasOwn(event.env || {}, "CLOUDFLARE_API_TOKEN") &&
+      !event.args.includes("--version"));
+  assert.ok(rollbackClaimIndex >= 0 && firstAuthenticatedRollbackRead > rollbackClaimIndex,
+    "durable rollback PID claim precedes the sole authenticated rollback attempt");
+});
+
+check("F-02 Keychain rollback admits one pre-GO emergency and one interrupted-recovery claim only", async () => {
+  const namespace = "f02-20260823t190000z-8abc5678";
+  const now = Date.parse("2026-08-23T22:00:00.000Z");
+  const baseItems = {
+    [F02_KEYCHAIN_ITEMS.bundleState]: "CANDIDATE_COMPLETE",
+    [F02_KEYCHAIN_ITEMS.windowStartUtc]: "2026-08-23T19:00:00.000Z",
+    [F02_KEYCHAIN_ITEMS.windowEndUtc]: "2026-08-23T21:00:00.000Z",
+    [F02_KEYCHAIN_ITEMS.accountId]: ACCOUNT,
+    [F02_KEYCHAIN_ITEMS.reviewedCommit]: COMMIT,
+    [F02_KEYCHAIN_ITEMS.baselineVersion]: BASELINE,
+    [F02_KEYCHAIN_ITEMS.candidateVersion]: CANDIDATE,
+    [F02_KEYCHAIN_ITEMS.workersEditToken]: `worker-edit-${"q".repeat(40)}`,
+  };
+
+  const closureDeadline = Date.parse("2026-08-23T23:00:00.000Z");
+  const expiredKeychain = memoryF02Keychain(baseItems);
+  const expiredRunner = makeRunner();
+  const expired = await invokeMain([
+    ...driverTest.ROLLBACK_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["ROLLBACK_F02_KEYCHAIN_TO_BASELINE_ONCE"]), expiredRunner, {
+    keychainAccess: expiredKeychain,
+    now: () => closureDeadline,
+  });
+  assert.notEqual(expired.status, 0);
+  assert.deepEqual(expired.output, [
+    "STATUS=REJECTED RESULT=F02_KEYCHAIN_INPUT_REJECTED",
+  ]);
+  assert.equal(expiredRunner.state.calls.length, 0,
+    "the half-open closure deadline rejects before any operator child starts");
+  assert.equal(expiredKeychain.values.has(F02_KEYCHAIN_ITEMS.lifecycleLease), false);
+  assert.equal(expiredKeychain.values.has(F02_KEYCHAIN_ITEMS.rollbackLease), false);
+
+  const claimDeadlineKeychain = memoryF02Keychain(baseItems);
+  const claimDeadlineRunner = makeRunner();
+  let claimDeadlineChecks = 0;
+  const claimDeadline = await invokeMain([
+    ...driverTest.ROLLBACK_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["ROLLBACK_F02_KEYCHAIN_TO_BASELINE_ONCE"]), claimDeadlineRunner, {
+    keychainAccess: claimDeadlineKeychain,
+    now: () => (++claimDeadlineChecks === 1 ? now : closureDeadline),
+  });
+  assert.notEqual(claimDeadline.status, 0);
+  assert.deepEqual(claimDeadline.output, [
+    "STATUS=REJECTED RESULT=F02_KEYCHAIN_INPUT_REJECTED",
+  ]);
+  assert.equal(claimDeadlineKeychain.values.has(F02_KEYCHAIN_ITEMS.lifecycleLease), false);
+  assert.equal(claimDeadlineKeychain.values.has(F02_KEYCHAIN_ITEMS.rollbackLease), false);
+  assert.equal(claimDeadlineRunner.state.calls.filter((call) =>
+    Object.hasOwn(call.env, "CLOUDFLARE_API_TOKEN")).length, 0,
+  "deadline drift immediately before the first durable claim permits no authenticated call");
+
+  const crossingKeychain = memoryF02Keychain(baseItems);
+  const crossingStoreNew = crossingKeychain.storeNew.bind(crossingKeychain);
+  let crossingNow = closureDeadline - 1;
+  crossingKeychain.storeNew = async (account, value, validation) => {
+    await crossingStoreNew(account, value, validation);
+    if (account === F02_KEYCHAIN_ITEMS.lifecycleLease) crossingNow = closureDeadline;
+  };
+  const crossingRunner = makeRunner();
+  crossingRunner.state.trafficId = CANDIDATE;
+  const crossing = await invokeMain([
+    ...driverTest.ROLLBACK_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["ROLLBACK_F02_KEYCHAIN_TO_BASELINE_ONCE"]), crossingRunner, {
+    keychainAccess: crossingKeychain,
+    now: () => crossingNow,
+  });
+  assert.notEqual(crossing.status, 0);
+  assert.deepEqual(crossing.output, [
+    "STATUS=REJECTED RESULT=F02_KEYCHAIN_INPUT_REJECTED",
+  ]);
+  assert.equal(crossingRunner.state.trafficId, CANDIDATE,
+    "clock crossing after the lifecycle fence cannot start a provider mutation");
+  assert.equal(crossingKeychain.values.has(F02_KEYCHAIN_ITEMS.lifecycleLease), true);
+  assert.equal(crossingKeychain.values.has(F02_KEYCHAIN_ITEMS.rollbackLease), false);
+  assert.equal(crossingRunner.state.calls.filter((call) =>
+    Object.hasOwn(call.env, "CLOUDFLARE_API_TOKEN")).length, 0);
+
+  const mutationCutoffKeychain = memoryF02Keychain(baseItems);
+  const mutationCutoffStoreNew = mutationCutoffKeychain.storeNew.bind(mutationCutoffKeychain);
+  let mutationCutoffNow = closureDeadline - 1;
+  mutationCutoffKeychain.storeNew = async (account, value, validation) => {
+    await mutationCutoffStoreNew(account, value, validation);
+    if (account === F02_KEYCHAIN_ITEMS.rollbackLease) mutationCutoffNow = closureDeadline;
+  };
+  const mutationCutoffRunner = makeRunner();
+  mutationCutoffRunner.state.trafficId = CANDIDATE;
+  const mutationCutoff = await invokeMain([
+    ...driverTest.ROLLBACK_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["ROLLBACK_F02_KEYCHAIN_TO_BASELINE_ONCE"]), mutationCutoffRunner, {
+    keychainAccess: mutationCutoffKeychain,
+    now: () => mutationCutoffNow,
+  });
+  assert.notEqual(mutationCutoff.status, 0);
+  assert.deepEqual(mutationCutoff.output, [
+    "STATUS=REJECTED RESULT=F02_KEYCHAIN_INPUT_REJECTED",
+  ]);
+  assert.equal(mutationCutoffRunner.state.trafficId, CANDIDATE);
+  assert.equal(mutationCutoffKeychain.values.has(F02_KEYCHAIN_ITEMS.rollbackLease), true);
+  assert.equal(mutationCutoffKeychain.values.has(F02_KEYCHAIN_ITEMS.rollbackComplete), false);
+  assert.equal(mutationCutoffRunner.state.calls.some((call) =>
+    isWranglerCall(call.args, "versions", "deploy")), false,
+  "deadline crossing after the durable action claim permits reads but no provider mutation");
+
+  const emergencyKeychain = memoryF02Keychain(baseItems);
+  const emergencyRunner = makeRunner({
+    versions: {
+      [CANDIDATE]: fixtureVersion(CANDIDATE,
+        driverTest.expectedCandidateVars(BASE_VARS, driverTest.OFFER_ROUTE_ISOLATION_MODE, CANARY),
+        [...driverTest.STANDING_SECRET_NAMES, ...COMMON_FAULT_NAMES]),
+    },
+  });
+  emergencyRunner.state.trafficId = CANDIDATE;
+  const emergency = await invokeMain([
+    ...driverTest.ROLLBACK_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["ROLLBACK_F02_KEYCHAIN_TO_BASELINE_ONCE"]), emergencyRunner, {
+    keychainAccess: emergencyKeychain,
+    now: () => now,
+  });
+  assert.equal(emergency.status, 0);
+  assert.equal(emergencyRunner.state.trafficId, BASELINE);
+  assert.equal(emergencyKeychain.values.has(F02_KEYCHAIN_ITEMS.deployLease), false);
+  assert.equal(emergencyKeychain.values.get(F02_KEYCHAIN_ITEMS.lifecycleLease),
+    `ROLLBACK:PID:${process.pid}`);
+  assert.equal(emergencyKeychain.values.get(F02_KEYCHAIN_ITEMS.rollbackLease), `PID:${process.pid}`);
+  assert.equal(emergencyKeychain.values.get(F02_KEYCHAIN_ITEMS.rollbackComplete), BASELINE);
+
+  const laterCleanupIds = Array.from({ length: COMMON_FAULT_NAMES.length + 1 }, (_, index) =>
+    `81000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`);
+  const laterCleanupRunner = makeRunner({
+    uploadIds: [laterCleanupIds[0]],
+    secretIds: laterCleanupIds.slice(1),
+    nextUploadSecrets: [...driverTest.STANDING_SECRET_NAMES, ...COMMON_FAULT_NAMES],
+  });
+  const laterCleanup = await invokeMain([
+    ...driverTest.CLEANUP_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["CLEANUP_F02_KEYCHAIN_ALL_OFF_ONCE"]), laterCleanupRunner, {
+    keychainAccess: emergencyKeychain,
+    now: () => now,
+    processOwnerPid: 5252,
+    isLocalProcessAlive: () => false,
+  });
+  assert.equal(laterCleanup.status, 0, JSON.stringify(laterCleanup));
+  assert.equal(laterCleanupRunner.state.trafficId, laterCleanupIds.at(-1));
+  assert.equal(emergencyKeychain.values.get(F02_KEYCHAIN_ITEMS.cleanupLease), "PID:5252");
+  assert.equal(emergencyKeychain.values.get(F02_KEYCHAIN_ITEMS.cleanupComplete),
+    laterCleanupIds.at(-1));
+
+  const finalGoPreDeployKeychain = memoryF02Keychain({
+    ...baseItems,
+    [F02_KEYCHAIN_ITEMS.bundleState]: "COORDINATOR_STARTED",
+    [F02_KEYCHAIN_ITEMS.lifecycleLease]: `COORDINATOR:PID:${process.pid}`,
+    [F02_KEYCHAIN_ITEMS.coordinatorLease]: `PID:${process.pid}`,
+    [F02_KEYCHAIN_ITEMS.finalGoAccepted]: "ACCEPTED",
+  });
+  const finalGoPreDeployRunner = makeRunner();
+  const finalGoPreDeployRollback = await invokeMain([
+    ...driverTest.ROLLBACK_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["ROLLBACK_F02_KEYCHAIN_TO_BASELINE_ONCE"]), finalGoPreDeployRunner, {
+    keychainAccess: finalGoPreDeployKeychain,
+    now: () => now,
+  });
+  assert.equal(finalGoPreDeployRollback.status, 0);
+  assert.deepEqual(finalGoPreDeployRollback.output,
+    ["STATUS=COMPLETE RESULT=ROLLBACK_ALREADY_CONFIRMED"]);
+  assert.equal(finalGoPreDeployKeychain.values.has(F02_KEYCHAIN_ITEMS.deployLease), false);
+  assert.equal(finalGoPreDeployKeychain.values.get(F02_KEYCHAIN_ITEMS.rollbackComplete), BASELINE);
+
+  const coordinatorWonKeychain = memoryF02Keychain({
+    ...baseItems,
+    [F02_KEYCHAIN_ITEMS.lifecycleLease]: "COORDINATOR:PID:4242",
+    [F02_KEYCHAIN_ITEMS.coordinatorLease]: "PID:4242",
+  });
+  const coordinatorWonRunner = makeRunner();
+  coordinatorWonRunner.state.trafficId = CANDIDATE;
+  const losingEmergency = await invokeMain([
+    ...driverTest.ROLLBACK_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["ROLLBACK_F02_KEYCHAIN_TO_BASELINE_ONCE"]), coordinatorWonRunner, {
+    keychainAccess: coordinatorWonKeychain,
+    now: () => now,
+  });
+  assert.notEqual(losingEmergency.status, 0);
+  assert.equal(coordinatorWonRunner.state.trafficId, CANDIDATE);
+  assert.equal(coordinatorWonKeychain.values.has(F02_KEYCHAIN_ITEMS.rollbackLease), false);
+  assert.equal(coordinatorWonRunner.state.calls.some((call) =>
+    call.args.includes("deployments") || call.args.includes("versions") && call.args.includes("view")), false,
+  "atomic lifecycle ownership lets coordinator startup or emergency rollback win, never both");
+
+  const liveOwnerKeychain = memoryF02Keychain({
+    ...baseItems,
+    [F02_KEYCHAIN_ITEMS.lifecycleLease]: "ROLLBACK:PID:4242",
+    [F02_KEYCHAIN_ITEMS.rollbackLease]: "PID:4242",
+  });
+  const liveOwnerRunner = makeRunner();
+  liveOwnerRunner.state.trafficId = CANDIDATE;
+  const concurrentRecovery = await invokeMain([
+    ...driverTest.ROLLBACK_RECOVERY_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["ROLLBACK_F02_KEYCHAIN_TO_BASELINE_ONCE"]), liveOwnerRunner, {
+    keychainAccess: liveOwnerKeychain,
+    now: () => now,
+    isLocalProcessAlive: (pid) => pid === 4242,
+  });
+  assert.notEqual(concurrentRecovery.status, 0);
+  assert.equal(liveOwnerRunner.state.trafficId, CANDIDATE);
+  assert.equal(liveOwnerKeychain.values.has(F02_KEYCHAIN_ITEMS.rollbackRecoveryLease), false);
+  assert.equal(liveOwnerRunner.state.calls.some((call) =>
+    call.args.includes("deployments") || call.args.includes("versions") && call.args.includes("view")), false,
+  "a live rollback owner blocks the recovery before any authenticated remote read or mutation");
+
+  const deadCoordinatorKeychain = memoryF02Keychain({
+    ...baseItems,
+    [F02_KEYCHAIN_ITEMS.bundleState]: "REQUEST_ATTEMPTED",
+    [F02_KEYCHAIN_ITEMS.lifecycleLease]: "COORDINATOR:PID:777777777",
+    [F02_KEYCHAIN_ITEMS.coordinatorLease]: "PID:777777777",
+    [F02_KEYCHAIN_ITEMS.deployLease]: "CLAIMED",
+    [F02_KEYCHAIN_ITEMS.candidateDeployed]: CANDIDATE,
+  });
+  const deadCoordinatorRunner = makeRunner();
+  deadCoordinatorRunner.state.trafficId = CANDIDATE;
+  const recoveredDeadCoordinator = await invokeMain([
+    ...driverTest.ROLLBACK_RECOVERY_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["ROLLBACK_F02_KEYCHAIN_TO_BASELINE_ONCE"]), deadCoordinatorRunner, {
+    keychainAccess: deadCoordinatorKeychain,
+    now: () => now,
+    processOwnerPid: 5353,
+    isLocalProcessAlive: () => false,
+  });
+  assert.equal(recoveredDeadCoordinator.status, 0);
+  assert.equal(deadCoordinatorRunner.state.trafficId, BASELINE);
+  assert.equal(deadCoordinatorKeychain.values.get(F02_KEYCHAIN_ITEMS.rollbackLease), "PID:5353");
+  assert.equal(deadCoordinatorKeychain.values.get(F02_KEYCHAIN_ITEMS.rollbackRecoveryLease), "PID:5353");
+  assert.equal(deadCoordinatorKeychain.values.get(F02_KEYCHAIN_ITEMS.rollbackComplete), BASELINE);
+
+  const recoveryCleanupIds = Array.from({ length: COMMON_FAULT_NAMES.length + 1 }, (_, index) =>
+    `82000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`);
+  const recoveryCleanupRunner = makeRunner({
+    uploadIds: [recoveryCleanupIds[0]],
+    secretIds: recoveryCleanupIds.slice(1),
+    nextUploadSecrets: [...driverTest.STANDING_SECRET_NAMES, ...COMMON_FAULT_NAMES],
+  });
+  const recoveryCleanup = await invokeMain([
+    ...driverTest.CLEANUP_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["CLEANUP_F02_KEYCHAIN_ALL_OFF_ONCE"]), recoveryCleanupRunner, {
+    keychainAccess: deadCoordinatorKeychain,
+    now: () => now,
+    processOwnerPid: 5454,
+    isLocalProcessAlive: () => false,
+  });
+  assert.equal(recoveryCleanup.status, 0);
+  assert.equal(recoveryCleanupRunner.state.trafficId, recoveryCleanupIds.at(-1));
+  assert.equal(deadCoordinatorKeychain.values.get(F02_KEYCHAIN_ITEMS.cleanupLease), "PID:5454");
+
+  const coordinatorStartupGapKeychain = memoryF02Keychain({
+    ...baseItems,
+    [F02_KEYCHAIN_ITEMS.lifecycleLease]: "COORDINATOR:PID:888888888",
+  });
+  const coordinatorStartupGapRunner = makeRunner();
+  coordinatorStartupGapRunner.state.trafficId = CANDIDATE;
+  const recoveredCoordinatorStartupGap = await invokeMain([
+    ...driverTest.ROLLBACK_RECOVERY_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["ROLLBACK_F02_KEYCHAIN_TO_BASELINE_ONCE"]), coordinatorStartupGapRunner, {
+    keychainAccess: coordinatorStartupGapKeychain,
+    now: () => now,
+    processOwnerPid: 5555,
+    isLocalProcessAlive: () => false,
+  });
+  assert.equal(recoveredCoordinatorStartupGap.status, 0);
+  assert.equal(coordinatorStartupGapRunner.state.trafficId, BASELINE);
+  assert.equal(coordinatorStartupGapKeychain.values.get(F02_KEYCHAIN_ITEMS.rollbackLease), "PID:5555");
+  assert.equal(coordinatorStartupGapKeychain.values.get(F02_KEYCHAIN_ITEMS.rollbackRecoveryLease),
+    "PID:5555");
+
+  const rollbackStartupGapKeychain = memoryF02Keychain({
+    ...baseItems,
+    [F02_KEYCHAIN_ITEMS.lifecycleLease]: "ROLLBACK:PID:999999998",
+  });
+  const rollbackStartupGapRunner = makeRunner();
+  const recoveredRollbackStartupGap = await invokeMain([
+    ...driverTest.ROLLBACK_RECOVERY_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["ROLLBACK_F02_KEYCHAIN_TO_BASELINE_ONCE"]), rollbackStartupGapRunner, {
+    keychainAccess: rollbackStartupGapKeychain,
+    now: () => now,
+    processOwnerPid: 5656,
+    isLocalProcessAlive: () => false,
+  });
+  assert.equal(recoveredRollbackStartupGap.status, 0);
+  assert.equal(rollbackStartupGapRunner.state.trafficId, BASELINE);
+  assert.equal(rollbackStartupGapKeychain.values.get(F02_KEYCHAIN_ITEMS.rollbackLease), "PID:5656");
+  assert.equal(rollbackStartupGapKeychain.values.get(F02_KEYCHAIN_ITEMS.rollbackRecoveryLease),
+    "PID:5656");
+  const startupGapCleanupIds = Array.from({ length: COMMON_FAULT_NAMES.length + 1 }, (_, index) =>
+    `83000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`);
+  const startupGapCleanupRunner = makeRunner({
+    uploadIds: [startupGapCleanupIds[0]],
+    secretIds: startupGapCleanupIds.slice(1),
+    nextUploadSecrets: [...driverTest.STANDING_SECRET_NAMES, ...COMMON_FAULT_NAMES],
+  });
+  const startupGapCleanup = await invokeMain([
+    ...driverTest.CLEANUP_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["CLEANUP_F02_KEYCHAIN_ALL_OFF_ONCE"]), startupGapCleanupRunner, {
+    keychainAccess: rollbackStartupGapKeychain,
+    now: () => now,
+    processOwnerPid: 5757,
+    isLocalProcessAlive: () => false,
+  });
+  assert.equal(startupGapCleanup.status, 0);
+  assert.equal(startupGapCleanupRunner.state.trafficId, startupGapCleanupIds.at(-1));
+  assert.equal(rollbackStartupGapKeychain.values.get(F02_KEYCHAIN_ITEMS.cleanupLease), "PID:5757");
+
+  const recoveryKeychain = memoryF02Keychain({
+    ...baseItems,
+    [F02_KEYCHAIN_ITEMS.lifecycleLease]: "ROLLBACK:PID:999999999",
+    [F02_KEYCHAIN_ITEMS.rollbackLease]: "PID:999999999",
+  });
+  const recoveryRunner = makeRunner({
+    versions: {
+      [CANDIDATE]: fixtureVersion(CANDIDATE,
+        driverTest.expectedCandidateVars(BASE_VARS, driverTest.OFFER_ROUTE_ISOLATION_MODE, CANARY),
+        [...driverTest.STANDING_SECRET_NAMES, ...COMMON_FAULT_NAMES]),
+    },
+  });
+  recoveryRunner.state.trafficId = CANDIDATE;
+  const recovered = await invokeMain([
+    ...driverTest.ROLLBACK_RECOVERY_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["ROLLBACK_F02_KEYCHAIN_TO_BASELINE_ONCE"]), recoveryRunner, {
+    keychainAccess: recoveryKeychain,
+    now: () => now,
+    isLocalProcessAlive: () => false,
+  });
+  assert.equal(recovered.status, 0);
+  assert.equal(recoveryRunner.state.trafficId, BASELINE);
+  assert.equal(recoveryKeychain.values.get(F02_KEYCHAIN_ITEMS.rollbackRecoveryLease), `PID:${process.pid}`);
+  assert.equal(recoveryKeychain.values.get(F02_KEYCHAIN_ITEMS.rollbackComplete), BASELINE);
+
+  const callsBeforeThirdAttempt = recoveryRunner.state.calls.length;
+  const thirdAttempt = await invokeMain([
+    ...driverTest.ROLLBACK_RECOVERY_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["ROLLBACK_F02_KEYCHAIN_TO_BASELINE_ONCE"]), recoveryRunner, {
+    keychainAccess: recoveryKeychain,
+    now: () => now,
+    isLocalProcessAlive: () => false,
+  });
+  assert.notEqual(thirdAttempt.status, 0);
+  assert.equal(recoveryRunner.state.trafficId, BASELINE);
+  assert.equal(recoveryRunner.state.calls.slice(callsBeforeThirdAttempt)
+    .some((call) => call.args.includes("deployments")), false,
+  "completed rollback cannot acquire another recovery or reach remote traffic state");
+
+  const ambiguousRollbackKeychain = memoryF02Keychain({
+    ...baseItems,
+    [F02_KEYCHAIN_ITEMS.bundleState]: "REQUEST_ATTEMPTED",
+    [F02_KEYCHAIN_ITEMS.lifecycleLease]: `COORDINATOR:PID:${process.pid}`,
+    [F02_KEYCHAIN_ITEMS.coordinatorLease]: `PID:${process.pid}`,
+    [F02_KEYCHAIN_ITEMS.deployLease]: "CLAIMED",
+    [F02_KEYCHAIN_ITEMS.candidateDeployed]: CANDIDATE,
+  });
+  const ambiguousRollbackRunner = makeRunner({
+    ambiguousDeployId: BASELINE,
+    ambiguousDeployTrafficId: BASELINE,
+  });
+  ambiguousRollbackRunner.state.trafficId = CANDIDATE;
+  const ambiguousRollback = await invokeMain([
+    ...driverTest.ROLLBACK_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["ROLLBACK_F02_KEYCHAIN_TO_BASELINE_ONCE"]), ambiguousRollbackRunner, {
+    keychainAccess: ambiguousRollbackKeychain,
+    now: () => now,
+  });
+  assert.notEqual(ambiguousRollback.status, 0);
+  assert.deepEqual(ambiguousRollback.output, ["STATUS=REJECTED RESULT=ROLLBACK_UNCONFIRMED"]);
+  assert.equal(ambiguousRollbackKeychain.values.has(F02_KEYCHAIN_ITEMS.rollbackComplete), false);
+  assert.equal(ambiguousRollbackRunner.state.calls.filter((call) =>
+    call.args.includes("deploy")).length, 1,
+  "an ambiguous rollback is never retried inside the same command");
+
+  const separatelyRecovered = await invokeMain([
+    ...driverTest.ROLLBACK_RECOVERY_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["ROLLBACK_F02_KEYCHAIN_TO_BASELINE_ONCE"]), ambiguousRollbackRunner, {
+    keychainAccess: ambiguousRollbackKeychain,
+    now: () => now,
+    processOwnerPid: 5858,
+    isLocalProcessAlive: () => false,
+  });
+  assert.equal(separatelyRecovered.status, 0);
+  assert.deepEqual(separatelyRecovered.output, [
+    "STATUS=COMPLETE RESULT=ROLLBACK_ALREADY_CONFIRMED",
+  ]);
+  assert.equal(ambiguousRollbackKeychain.values.get(F02_KEYCHAIN_ITEMS.rollbackComplete), BASELINE);
+  assert.equal(ambiguousRollbackRunner.state.calls.filter((call) =>
+    call.args.includes("deploy")).length, 1,
+  "the explicitly selected recovery confirms an already-restored baseline without another mutation");
+
+  const ambiguousRecoveryKeychain = memoryF02Keychain({
+    ...baseItems,
+    [F02_KEYCHAIN_ITEMS.bundleState]: "REQUEST_ATTEMPTED",
+    [F02_KEYCHAIN_ITEMS.lifecycleLease]: "COORDINATOR:PID:595959591",
+    [F02_KEYCHAIN_ITEMS.coordinatorLease]: "PID:595959591",
+    [F02_KEYCHAIN_ITEMS.deployLease]: "CLAIMED",
+    [F02_KEYCHAIN_ITEMS.candidateDeployed]: CANDIDATE,
+  });
+  const ambiguousRecoveryRunner = makeRunner({
+    ambiguousDeployId: BASELINE,
+    ambiguousDeployTrafficId: BASELINE,
+  });
+  ambiguousRecoveryRunner.state.trafficId = CANDIDATE;
+  const ambiguousRecovery = await invokeMain([
+    ...driverTest.ROLLBACK_RECOVERY_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["ROLLBACK_F02_KEYCHAIN_TO_BASELINE_ONCE"]), ambiguousRecoveryRunner, {
+    keychainAccess: ambiguousRecoveryKeychain,
+    now: () => now,
+    processOwnerPid: 595959592,
+    isLocalProcessAlive: () => false,
+  });
+  assert.notEqual(ambiguousRecovery.status, 0);
+  assert.deepEqual(ambiguousRecovery.output, ["STATUS=REJECTED RESULT=ROLLBACK_UNCONFIRMED"]);
+  assert.equal(ambiguousRecoveryKeychain.values.get(
+    F02_KEYCHAIN_ITEMS.rollbackRecoveryLease), "PID:595959592");
+  assert.equal(ambiguousRecoveryKeychain.values.has(
+    F02_KEYCHAIN_ITEMS.rollbackComplete), false);
+  assert.equal(ambiguousRecoveryRunner.state.calls.filter((call) =>
+    call.args.includes("deploy")).length, 1,
+  "an ambiguous recovery consumes its sole immutable rollback attempt");
+  const callsBeforeRecoveryRetry = ambiguousRecoveryRunner.state.calls.length;
+  const rejectedRecoveryRetry = await invokeMain([
+    ...driverTest.ROLLBACK_RECOVERY_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["ROLLBACK_F02_KEYCHAIN_TO_BASELINE_ONCE"]), ambiguousRecoveryRunner, {
+    keychainAccess: ambiguousRecoveryKeychain,
+    now: () => now,
+    processOwnerPid: 595959593,
+    isLocalProcessAlive: () => false,
+  });
+  assert.notEqual(rejectedRecoveryRetry.status, 0);
+  assert.equal(ambiguousRecoveryRunner.state.calls.slice(callsBeforeRecoveryRetry)
+    .some((call) => call.args.includes("deployments") || call.args.includes("deploy")), false,
+  "an interrupted or ambiguous recovery is terminal and cannot self-retry provider work");
+
+  const interruptedCleanupCandidate = "84000000-0000-4000-8000-000000000001";
+  const interruptedCleanupKeychain = memoryF02Keychain({
+    ...baseItems,
+    [F02_KEYCHAIN_ITEMS.bundleState]: "REQUEST_ATTEMPTED",
+    [F02_KEYCHAIN_ITEMS.lifecycleLease]: "COORDINATOR:PID:606060601",
+    [F02_KEYCHAIN_ITEMS.coordinatorLease]: "PID:606060601",
+    [F02_KEYCHAIN_ITEMS.deployLease]: "CLAIMED",
+    [F02_KEYCHAIN_ITEMS.candidateDeployed]: CANDIDATE,
+    [F02_KEYCHAIN_ITEMS.rollbackLease]: "PID:606060601",
+    [F02_KEYCHAIN_ITEMS.rollbackComplete]: BASELINE,
+    [F02_KEYCHAIN_ITEMS.cleanupLease]: "PID:606060602",
+    [F02_KEYCHAIN_ITEMS.cleanupCandidateVersion]: interruptedCleanupCandidate,
+  });
+  const interruptedCleanupRunner = makeRunner({
+    versions: {
+      [interruptedCleanupCandidate]: fixtureVersion(
+        interruptedCleanupCandidate, BASE_VARS, driverTest.STANDING_SECRET_NAMES,
+      ),
+    },
+  });
+  interruptedCleanupRunner.state.trafficId = interruptedCleanupCandidate;
+  const recoveredInterruptedCleanup = await invokeMain([
+    ...driverTest.ROLLBACK_RECOVERY_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["ROLLBACK_F02_KEYCHAIN_TO_BASELINE_ONCE"]), interruptedCleanupRunner, {
+    keychainAccess: interruptedCleanupKeychain,
+    now: () => now,
+    processOwnerPid: 606060603,
+    isLocalProcessAlive: () => false,
+  });
+  assert.equal(recoveredInterruptedCleanup.status, 0);
+  assert.equal(interruptedCleanupRunner.state.trafficId, BASELINE);
+  assert.equal(interruptedCleanupKeychain.values.get(
+    F02_KEYCHAIN_ITEMS.cleanupRecoveryLease), "PID:606060603");
+  assert.equal(interruptedCleanupKeychain.values.get(
+    F02_KEYCHAIN_ITEMS.cleanupComplete), BASELINE);
+  assert.deepEqual(interruptedCleanupRunner.state.calls.filter((call) =>
+    call.args.includes("deploy")).map((call) =>
+    call.args.find((arg) => /@100%$/.test(arg))), [`${BASELINE}@100%`],
+  "dead-owner cleanup recovery admits the exact recorded clean candidate and rolls back once");
+
+  const ambiguousCleanupRecoveryKeychain = memoryF02Keychain({
+    ...baseItems,
+    [F02_KEYCHAIN_ITEMS.bundleState]: "REQUEST_ATTEMPTED",
+    [F02_KEYCHAIN_ITEMS.lifecycleLease]: "COORDINATOR:PID:616161611",
+    [F02_KEYCHAIN_ITEMS.coordinatorLease]: "PID:616161611",
+    [F02_KEYCHAIN_ITEMS.deployLease]: "CLAIMED",
+    [F02_KEYCHAIN_ITEMS.candidateDeployed]: CANDIDATE,
+    [F02_KEYCHAIN_ITEMS.rollbackLease]: "PID:616161611",
+    [F02_KEYCHAIN_ITEMS.rollbackComplete]: BASELINE,
+    [F02_KEYCHAIN_ITEMS.cleanupLease]: "PID:616161612",
+    [F02_KEYCHAIN_ITEMS.cleanupCandidateVersion]: interruptedCleanupCandidate,
+  });
+  const ambiguousCleanupRecoveryRunner = makeRunner({
+    versions: {
+      [interruptedCleanupCandidate]: fixtureVersion(
+        interruptedCleanupCandidate, BASE_VARS, driverTest.STANDING_SECRET_NAMES,
+      ),
+    },
+    ambiguousDeployId: BASELINE,
+    ambiguousDeployTrafficId: BASELINE,
+  });
+  ambiguousCleanupRecoveryRunner.state.trafficId = interruptedCleanupCandidate;
+  const ambiguousCleanupRecovery = await invokeMain([
+    ...driverTest.ROLLBACK_RECOVERY_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["ROLLBACK_F02_KEYCHAIN_TO_BASELINE_ONCE"]), ambiguousCleanupRecoveryRunner, {
+    keychainAccess: ambiguousCleanupRecoveryKeychain,
+    now: () => now,
+    processOwnerPid: 616161613,
+    isLocalProcessAlive: () => false,
+  });
+  assert.notEqual(ambiguousCleanupRecovery.status, 0);
+  assert.deepEqual(ambiguousCleanupRecovery.output,
+    ["STATUS=REJECTED RESULT=ROLLBACK_UNCONFIRMED"]);
+  assert.equal(ambiguousCleanupRecoveryKeychain.values.get(
+    F02_KEYCHAIN_ITEMS.cleanupRecoveryLease), "PID:616161613");
+  assert.equal(ambiguousCleanupRecoveryKeychain.values.has(
+    F02_KEYCHAIN_ITEMS.cleanupComplete), false);
+  assert.equal(ambiguousCleanupRecoveryRunner.state.calls.filter((call) =>
+    call.args.includes("deploy")).length, 1,
+  "an ambiguous cleanup recovery also consumes exactly one immutable rollback attempt");
+  const callsBeforeCleanupRecoveryRetry = ambiguousCleanupRecoveryRunner.state.calls.length;
+  const rejectedCleanupRecoveryRetry = await invokeMain([
+    ...driverTest.ROLLBACK_RECOVERY_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["ROLLBACK_F02_KEYCHAIN_TO_BASELINE_ONCE"]), ambiguousCleanupRecoveryRunner, {
+    keychainAccess: ambiguousCleanupRecoveryKeychain,
+    now: () => now,
+    processOwnerPid: 616161614,
+    isLocalProcessAlive: () => false,
+  });
+  assert.notEqual(rejectedCleanupRecoveryRetry.status, 0);
+  assert.equal(ambiguousCleanupRecoveryRunner.state.calls.slice(callsBeforeCleanupRecoveryRetry)
+    .some((call) => call.args.includes("deployments") || call.args.includes("deploy")), false,
+  "an ambiguous cleanup recovery remains terminal and cannot self-retry provider work");
+
+  const preCandidateCleanupKeychain = memoryF02Keychain({
+    ...baseItems,
+    [F02_KEYCHAIN_ITEMS.bundleState]: "REQUEST_ATTEMPTED",
+    [F02_KEYCHAIN_ITEMS.lifecycleLease]: "COORDINATOR:PID:707070701",
+    [F02_KEYCHAIN_ITEMS.coordinatorLease]: "PID:707070701",
+    [F02_KEYCHAIN_ITEMS.rollbackLease]: "PID:707070701",
+    [F02_KEYCHAIN_ITEMS.rollbackComplete]: BASELINE,
+    [F02_KEYCHAIN_ITEMS.cleanupLease]: "PID:707070702",
+  });
+  const preCandidateCleanupRunner = makeRunner();
+  const recoveredPreCandidateCleanup = await invokeMain([
+    ...driverTest.ROLLBACK_RECOVERY_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["ROLLBACK_F02_KEYCHAIN_TO_BASELINE_ONCE"]), preCandidateCleanupRunner, {
+    keychainAccess: preCandidateCleanupKeychain,
+    now: () => now,
+    processOwnerPid: 707070703,
+    isLocalProcessAlive: () => false,
+  });
+  assert.equal(recoveredPreCandidateCleanup.status, 0);
+  assert.equal(preCandidateCleanupRunner.state.calls.some((call) =>
+    call.args.includes("deploy")), false);
+  assert.equal(preCandidateCleanupKeychain.values.get(
+    F02_KEYCHAIN_ITEMS.cleanupComplete), BASELINE,
+  "cleanup recovery before a clean UUID exists confirms the already-clean baseline without mutation");
+
+  const partialCleanupUpload = "85000000-0000-4000-8000-000000000001";
+  const partialCleanupDelete = "85000000-0000-4000-8000-000000000002";
+  const partialCleanupKeychain = memoryF02Keychain({
+    ...baseItems,
+    [F02_KEYCHAIN_ITEMS.bundleState]: "REQUEST_ATTEMPTED",
+    [F02_KEYCHAIN_ITEMS.lifecycleLease]: "ROLLBACK:PID:808080801",
+    [F02_KEYCHAIN_ITEMS.rollbackLease]: "PID:808080801",
+    [F02_KEYCHAIN_ITEMS.rollbackComplete]: BASELINE,
+  });
+  const partialCleanupBaseRunner = makeRunner({
+    uploadIds: [partialCleanupUpload],
+    secretIds: [partialCleanupDelete],
+    nextUploadSecrets: [...driverTest.STANDING_SECRET_NAMES, ...COMMON_FAULT_NAMES],
+  });
+  const partialCleanupRunner = interceptRunner(partialCleanupBaseRunner, ({ args }) =>
+    args[2] === "versions" && args[3] === "secret" && args[4] === "delete"
+      ? { code: 1, stdout: "", stderr: "fixture interrupted secret cleanup" }
+      : null);
+  const partialCleanup = await invokeMain([
+    ...driverTest.CLEANUP_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["CLEANUP_F02_KEYCHAIN_ALL_OFF_ONCE"]), partialCleanupRunner, {
+    keychainAccess: partialCleanupKeychain,
+    now: () => now,
+    processOwnerPid: 808080802,
+    isLocalProcessAlive: () => false,
+  });
+  assert.notEqual(partialCleanup.status, 0);
+  assert.deepEqual(partialCleanup.output, [
+    "STATUS=REJECTED RESULT=CLEANUP_REJECTED_BASELINE_TRAFFIC_CONFIRMED",
+  ]);
+  assert.equal(partialCleanupRunner.state.trafficId, BASELINE);
+  assert.equal(partialCleanupKeychain.values.has(
+    F02_KEYCHAIN_ITEMS.cleanupCandidateVersion), false,
+  "a failed intermediate cleanup version is never promoted to the durable clean-candidate claim");
+  assert.equal(partialCleanupKeychain.values.get(
+    F02_KEYCHAIN_ITEMS.cleanupComplete), BASELINE,
+  "confirmed baseline traffic closes a cleanup that failed before the final candidate claim");
+  assert.equal(partialCleanupRunner.state.calls.some((call) =>
+    call.args.includes("deploy")), false,
+  "an intermediate cleanup failure never deploys or retries a version");
+
+  const wrongCompletionKeychain = memoryF02Keychain({
+    ...baseItems,
+    [F02_KEYCHAIN_ITEMS.lifecycleLease]: `ROLLBACK:PID:${process.pid}`,
+    [F02_KEYCHAIN_ITEMS.rollbackLease]: `PID:${process.pid}`,
+    [F02_KEYCHAIN_ITEMS.rollbackComplete]: CANDIDATE,
+  });
+  const wrongCompletionRunner = makeRunner({ uploadIds: [CLEANUP] });
+  const rejectedCleanup = await invokeMain([
+    ...driverTest.CLEANUP_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["CLEANUP_F02_KEYCHAIN_ALL_OFF_ONCE"]), wrongCompletionRunner, {
+    keychainAccess: wrongCompletionKeychain,
+    now: () => now,
+  });
+  assert.notEqual(rejectedCleanup.status, 0);
+  assert.equal(wrongCompletionKeychain.values.has(F02_KEYCHAIN_ITEMS.cleanupLease), false);
+  assert.equal(wrongCompletionRunner.state.calls.some((call) =>
+    call.args.includes("upload") || Object.hasOwn(call.env, "CLOUDFLARE_API_TOKEN")), false,
+  "cleanup requires an exact baseline completion marker before remote work");
+
+  const poisonNamespace = "f02-20260823t190000z-9abc1235";
+  const poisonRoot = mkdtempSync(resolve(tmpdir(), "project2-f02-operator-poison-"));
+  const poisonPath = resolve(poisonRoot, `${poisonNamespace}.lock`);
+  const poisonXdg = mkdtempSync(resolve(tmpdir(), "spartan-f02-wrangler-xdg-validator-"));
+  chmodSync(poisonXdg, 0o700);
+  try {
+    const poisonKeychain = memoryF02Keychain(baseItems);
+    const poisonRunner = makeRunner({
+      versions: {
+        [CANDIDATE]: fixtureVersion(CANDIDATE,
+          driverTest.expectedCandidateVars(
+            BASE_VARS, driverTest.OFFER_ROUTE_ISOLATION_MODE, CANARY,
+          ),
+          [...driverTest.STANDING_SECRET_NAMES, ...COMMON_FAULT_NAMES]),
+      },
+    });
+    const poisonController = new AbortController();
+    let poisonAbortCalls = 0;
+    const unprovedCliScope = {
+      signal: poisonController.signal,
+      run: async () => { throw new Error("unused"); },
+      abortAllSync: () => ({ requested: true, activeCount: 1 }),
+      abortAll: async () => {
+        poisonAbortCalls += 1;
+        return { ok: false, activeCount: 1 };
+      },
+      scopedTimeoutSignal: () => Object.freeze({
+        signal: new AbortController().signal,
+        dispose() {},
+      }),
+    };
+    const poisoned = await invokeMain([
+      ...driverTest.ROLLBACK_ARGS, F02_KEYCHAIN_FLAG, poisonNamespace,
+    ], promptFrom(["ROLLBACK_F02_KEYCHAIN_TO_BASELINE_ONCE"]), poisonRunner, {
+      keychainAccess: poisonKeychain,
+      now: () => now,
+      processScope: unprovedCliScope,
+      processScopeOwned: true,
+      operationLockRoot: poisonRoot,
+      createPrivateOperatorXdgHomeImpl: () => poisonXdg,
+    });
+    assert.equal(poisonAbortCalls, 1,
+      "the standalone CLI-owned scope is proved before namespace unwind");
+    assert.deepEqual(poisoned, {
+      status: 3,
+      output: ["STATUS=REJECTED RESULT=F02_KEYCHAIN_INPUT_REJECTED"],
+    }, "an internally buffered candidate COMPLETE cannot escape unproved cleanup");
+    const poisonMarker = readFileSync(poisonPath, "ascii");
+    assert.match(poisonMarker, /^MAIN:[1-9][0-9]{0,9}:ACTION:[a-f0-9]{32}$/);
+    const lockModuleUrl = new URL("./project2-f02-keychain.mjs", import.meta.url).href;
+    const probe = spawnSync(process.execPath, [
+      "--input-type=module", "--eval", [
+        "const [moduleUrl, namespace, operationLockRoot] = process.argv.slice(1)",
+        "const {__test} = await import(moduleUrl)",
+        "try { await __test.acquireF02NamespaceOperationLock(namespace, {operationLockRoot}); process.exitCode=2 }",
+        "catch { process.exitCode=0 }",
+      ].join("\n"),
+      lockModuleUrl, poisonNamespace, poisonRoot,
+    ], { encoding: "utf8", timeout: 5_000 });
+    assert.equal(probe.status, 0,
+      "fresh-process acquisition is blocked after standalone cleanup ambiguity");
+    assert.equal(readFileSync(poisonPath, "ascii"), poisonMarker);
+  } finally {
+    if (existsSync(poisonXdg)) driverTest.cleanupPrivateOperatorXdgHome(poisonXdg);
+    rmSync(poisonRoot, { recursive: true, force: true });
+  }
+});
+
+check("ordinary Keychain operator XDG cleanup drift retains the durable namespace fence", async () => {
+  const namespace = "f02-20260823t190000z-9abc1237";
+  const now = Date.parse("2026-08-23T19:01:00.000Z");
+  const operationLockRoot = mkdtempSync(resolve(tmpdir(), "project2-f02-operator-xdg-poison-"));
+  const operationLockPath = resolve(operationLockRoot, `${namespace}.lock`);
+  let privateXdgHome = "";
+  try {
+    const keychain = memoryF02Keychain({
+      [F02_KEYCHAIN_ITEMS.bundleState]: "CANDIDATE_COMPLETE",
+      [F02_KEYCHAIN_ITEMS.windowStartUtc]: "2026-08-23T19:00:00.000Z",
+      [F02_KEYCHAIN_ITEMS.windowEndUtc]: "2026-08-23T21:00:00.000Z",
+      [F02_KEYCHAIN_ITEMS.accountId]: ACCOUNT,
+      [F02_KEYCHAIN_ITEMS.reviewedCommit]: COMMIT,
+      [F02_KEYCHAIN_ITEMS.baselineVersion]: BASELINE,
+      [F02_KEYCHAIN_ITEMS.candidateVersion]: CANDIDATE,
+      [F02_KEYCHAIN_ITEMS.workersEditToken]: `worker-edit-${"z".repeat(40)}`,
+    });
+    const originalStoreNew = keychain.storeNew.bind(keychain);
+    keychain.storeNew = async (account, value, validation) => {
+      await originalStoreNew(account, value, validation);
+      if (account === F02_KEYCHAIN_ITEMS.rollbackComplete) {
+        assert.notEqual(privateXdgHome, "");
+        chmodSync(privateXdgHome, 0o755);
+      }
+    };
+    const runner = makeRunner({
+      versions: {
+        [CANDIDATE]: fixtureVersion(CANDIDATE,
+          driverTest.expectedCandidateVars(
+            BASE_VARS, driverTest.OFFER_ROUTE_ISOLATION_MODE, CANARY,
+          ),
+          [...driverTest.STANDING_SECRET_NAMES, ...COMMON_FAULT_NAMES]),
+      },
+    });
+    runner.state.trafficId = CANDIDATE;
+    const processScope = createProcessScope();
+    const result = await invokeMain([
+      ...driverTest.ROLLBACK_ARGS, F02_KEYCHAIN_FLAG, namespace,
+    ], promptFrom(["ROLLBACK_F02_KEYCHAIN_TO_BASELINE_ONCE"]), runner, {
+      keychainAccess: keychain,
+      now: () => now,
+      processScope,
+      processScopeOwned: true,
+      operationLockRoot,
+      createPrivateOperatorXdgHomeImpl: () => {
+        privateXdgHome = driverTest.createPrivateOperatorXdgHome();
+        return privateXdgHome;
+      },
+    });
+    assert.equal(processScope.signal.aborted, true,
+      "ordinary operator XDG cleanup is attempted only after the owned process scope is reaped");
+    assert.deepEqual(result, {
+      status: 3,
+      output: ["STATUS=REJECTED RESULT=F02_KEYCHAIN_INPUT_REJECTED"],
+    });
+    const marker = readFileSync(operationLockPath, "ascii");
+    assert.match(marker, /^MAIN:[1-9][0-9]{0,9}:ACTION:[a-f0-9]{32}$/,
+      "ordinary operator XDG cleanup drift preserves the durable marker");
+    const lockModuleUrl = new URL("./project2-f02-keychain.mjs", import.meta.url).href;
+    const probe = spawnSync(process.execPath, [
+      "--input-type=module", "--eval", [
+        "const [moduleUrl, candidateNamespace, lockRoot] = process.argv.slice(1)",
+        "const {__test} = await import(moduleUrl)",
+        "try { await __test.acquireF02NamespaceOperationLock(candidateNamespace, {operationLockRoot:lockRoot}); process.exitCode=2 }",
+        "catch { process.exitCode=0 }",
+      ].join("\n"),
+      lockModuleUrl, namespace, operationLockRoot,
+    ], { encoding: "utf8", timeout: 5_000 });
+    assert.equal(probe.status, 0,
+      "fresh-process acquisition is blocked after ordinary operator XDG cleanup ambiguity");
+    assert.equal(readFileSync(operationLockPath, "ascii"), marker);
+  } finally {
+    if (privateXdgHome !== "" && existsSync(privateXdgHome)) {
+      chmodSync(privateXdgHome, 0o700);
+      driverTest.cleanupPrivateOperatorXdgHome(privateXdgHome);
+    }
+    rmSync(operationLockRoot, { recursive: true, force: true });
+  }
 });
 
 check("F-04 helper emits three mode-bound six-secret blocks with one shared hidden lineage", async () => {
@@ -3993,16 +5396,73 @@ check("cleanup refuses an unknown secret and performs no broad deletion", async 
   assert.equal(runner.state.calls.filter((call) => call.args.includes("delete")).length, 0);
 });
 
-let passed = 0;
-for (const { name, fn } of checks) {
-  try {
-    await fn();
-    passed += 1;
-    process.stdout.write(`PASS ${name}\n`);
-  } catch (error) {
-    process.stderr.write(`FAIL ${name}: ${error?.stack || error}\n`);
-    process.exitCode = 1;
-  }
+async function runKeychainTempCleanupPoisonChild(operationLockRoot, namespace) {
+  const now = Date.parse("2026-08-23T19:01:00.000Z");
+  const workersToken = `worker-edit-${"x".repeat(40)}`;
+  const targetDigest = await computeSandboxFaultTargetDigest(
+    driverTest.OFFER_ROUTE_ISOLATION_MODE, CANARY, HASH_SECRET, RUN_TOKEN,
+  );
+  const appsDigest = await computeSandboxFaultAppsUrlDigest(
+    driverTest.OFFER_ROUTE_ISOLATION_MODE, APPS_URL, HASH_SECRET, RUN_TOKEN,
+  );
+  const forbiddenDigest = await computeSandboxFaultAppsUrlDigest(
+    driverTest.OFFER_ROUTE_ISOLATION_MODE, FORBIDDEN_APPS_URL, HASH_SECRET, RUN_TOKEN,
+  );
+  const keychain = memoryF02Keychain({
+    [F02_KEYCHAIN_ITEMS.bundleState]: "HELPER_COMPLETE",
+    [F02_KEYCHAIN_ITEMS.windowStartUtc]: "2026-08-23T19:00:00.000Z",
+    [F02_KEYCHAIN_ITEMS.windowEndUtc]: "2026-08-23T21:00:00.000Z",
+    [F02_KEYCHAIN_ITEMS.accountId]: ACCOUNT,
+    [F02_KEYCHAIN_ITEMS.reviewedCommit]: COMMIT,
+    [F02_KEYCHAIN_ITEMS.baselineVersion]: BASELINE,
+    [F02_KEYCHAIN_ITEMS.canary]: CANARY,
+    [F02_KEYCHAIN_ITEMS.coupon]: "F02-KEYCHAIN-TEMP-DRIFT-001",
+    [F02_KEYCHAIN_ITEMS.hashSecret]: HASH_SECRET,
+    [F02_KEYCHAIN_ITEMS.sandboxAppsUrl]: APPS_URL,
+    [F02_KEYCHAIN_ITEMS.forbiddenAppsUrl]: FORBIDDEN_APPS_URL,
+    [F02_KEYCHAIN_ITEMS.targetDigest]: targetDigest,
+    [F02_KEYCHAIN_ITEMS.runToken]: RUN_TOKEN,
+    [F02_KEYCHAIN_ITEMS.appsUrlDigest]: appsDigest,
+    [F02_KEYCHAIN_ITEMS.forbiddenAppsUrlDigest]: forbiddenDigest,
+    [F02_KEYCHAIN_ITEMS.workersEditToken]: workersToken,
+    [F02_KEYCHAIN_ITEMS.readBundleToken]: `read-bundle-${"y".repeat(40)}`,
+  });
+  const runner = makeRunner({
+    uploadIds: [UPLOAD],
+    secretIds: [CANDIDATE],
+    uploadConfigMutation: "content",
+  });
+  const result = await invokeMain([
+    ...driverTest.PREPARE_OFFER_ISOLATION_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["LOAD_F02_OPERATOR_KEYCHAIN_ONCE"]), runner, {
+    keychainAccess: keychain,
+    now: () => now,
+    operationLockRoot,
+  });
+  return {
+    result,
+    state: keychain.values.get(F02_KEYCHAIN_ITEMS.bundleState),
+    reserved: keychain.values.has(F02_KEYCHAIN_ITEMS.candidateVersion),
+    uploads: runner.state.calls.filter((call) => call.args.includes("upload")).length,
+  };
 }
 
-if (!process.exitCode) process.stdout.write(`Square sandbox fault-window driver validation passed (${passed} checks).\n`);
+if (process.argv[2] === "--keychain-temp-cleanup-poison-child") {
+  const childResult = await runKeychainTempCleanupPoisonChild(process.argv[3], process.argv[4]);
+  process.stdout.write(JSON.stringify(childResult));
+} else {
+  let passed = 0;
+  for (const { name, fn } of checks) {
+    try {
+      await fn();
+      passed += 1;
+      process.stdout.write(`PASS ${name}\n`);
+    } catch (error) {
+      process.stderr.write(`FAIL ${name}: ${error?.stack || error}\n`);
+      process.exitCode = 1;
+    }
+  }
+  if (!process.exitCode) {
+    process.stdout.write(`Square sandbox fault-window driver validation passed (${passed} checks).\n`);
+  }
+}

@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
 import {
   chmodSync,
   lstatSync,
@@ -8,11 +10,11 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  rmSync,
   rmdirSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { spawn } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -20,6 +22,35 @@ import {
   computeSandboxFaultAppsUrlDigest,
   computeSandboxFaultTargetDigest,
 } from "../square-worker/src/sandbox-faults.mjs";
+import {
+  abortF02NamespaceOperationLocks,
+  abortF02NamespaceOperationLocksSync,
+  assertF02NamespaceOperationLockOwned,
+  assertF02KeychainWindow,
+  abortF02KeychainSecurityProcesses,
+  abortF02KeychainSecurityProcessesSync,
+  createF02KeychainAccess,
+  f02ShutdownReapVerified,
+  F02_CANDIDATE_RESERVATION,
+  F02_KEYCHAIN_ITEMS,
+  F02_KEYCHAIN_LIFECYCLE_OWNER_PATTERN,
+  F02_KEYCHAIN_PID_OWNER_PATTERN,
+  F02_KEYCHAIN_STATE_PATTERN,
+  f02KeychainLifecycleOwner,
+  f02KeychainPidOwner,
+  isF02NamespaceOperationLockHeld,
+  requireF02KeychainProcessAck,
+  retainF02NamespaceOperationLockFailStickySync,
+  retainF02NamespaceOperationLocksFailStickySync,
+  retainF02NamespaceOperationLocksForShutdownSync,
+  splitF02KeychainArgs,
+  withF02NamespaceOperationLock,
+} from "./project2-f02-keychain.mjs";
+import {
+  createProcessScope,
+  PROCESS_RESULT_REASONS,
+  runBoundedProcess,
+} from "./project2-f02-process-scope.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CONFIG = resolve(ROOT, "square-worker/wrangler.sandbox.toml");
@@ -83,6 +114,13 @@ const QUEUE_CANARY_SENTINEL = "sandbox-queue-control";
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 const PROCESS_TIMEOUT_MS = 120_000;
 const ACTIVE_TEMP_CONFIGS = new Set();
+const ACTIVE_PRIVATE_XDG_HOMES = new Set();
+const TEMP_CONFIG_CLEANUP_CONTEXT = new AsyncLocalStorage();
+
+function markTemporaryConfigCleanupUnverified() {
+  const tracker = TEMP_CONFIG_CLEANUP_CONTEXT.getStore();
+  if (tracker) tracker.unverified = true;
+}
 const CHILD_ENV_ALLOWLIST = new Set([
   "HOME", "USER", "LOGNAME", "PATH", "SHELL", "TMPDIR", "TMP", "TEMP",
   "LANG", "LC_ALL", "LC_CTYPE", "TERM", "COLORTERM", "XDG_CONFIG_HOME",
@@ -474,6 +512,10 @@ const ROLLBACK_ARGS = Object.freeze([
   "--execute", "--rollback",
   "--ack-sandbox-only", "--ack-exact-rollback-version", "--ack-rollback-now",
 ]);
+const ROLLBACK_RECOVERY_ARGS = Object.freeze([
+  ...ROLLBACK_ARGS,
+  "--recover-interrupted-keychain-rollback",
+]);
 const CLEANUP_ARGS = Object.freeze([
   "--execute", "--cleanup",
   "--ack-sandbox-only", "--ack-reviewed-commit", "--ack-all-off-baseline",
@@ -589,6 +631,16 @@ function fail(code, exitCode = 2) {
   throw new OperatorError(code, exitCode);
 }
 
+function isLocalProcessAlive(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 1 || pid > 9_999_999_999) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
 function sha256(text) {
   return createHash("sha256").update(text).digest("hex");
 }
@@ -673,6 +725,38 @@ function childEnvironment(overrides = {}, source = process.env) {
   return { ...result, CI: "1", NO_COLOR: "1", FORCE_COLOR: "0" };
 }
 
+function credentialFreeChildSourceEnvironment(source = process.env) {
+  const result = {};
+  for (const name of CHILD_ENV_ALLOWLIST) {
+    if (/^(?:CLOUDFLARE_|CF_|SQUARE_ACCEPTANCE_)/.test(name) || name === "XDG_CONFIG_HOME") continue;
+    if (typeof source?.[name] === "string") result[name] = source[name];
+  }
+  return result;
+}
+
+function assertPrivateOperatorXdgHome(directory) {
+  const prefix = `${resolve(tmpdir())}/spartan-f02-wrangler-xdg-`;
+  const metadata = lstatSync(directory);
+  if (!directory.startsWith(prefix) || !metadata.isDirectory() || metadata.isSymbolicLink() ||
+      (metadata.mode & 0o777) !== 0o700) {
+    throw new Error("F02_XDG_CLEANUP_REJECTED");
+  }
+}
+
+function createPrivateOperatorXdgHome() {
+  const directory = mkdtempSync(resolve(tmpdir(), "spartan-f02-wrangler-xdg-"));
+  chmodSync(directory, 0o700);
+  assertPrivateOperatorXdgHome(directory);
+  ACTIVE_PRIVATE_XDG_HOMES.add(directory);
+  return directory;
+}
+
+function cleanupPrivateOperatorXdgHome(directory) {
+  assertPrivateOperatorXdgHome(directory);
+  rmSync(directory, { recursive: true, force: false });
+  ACTIVE_PRIVATE_XDG_HOMES.delete(directory);
+}
+
 function assertNoWranglerDotenvFiles(directories, readDirectory = readdirSync) {
   try {
     for (const directory of new Set(directories.map((value) => resolve(value)))) {
@@ -706,13 +790,35 @@ function wranglerConfigDirectories(command, args) {
   return directories;
 }
 
-function defaultRun(command, args, { input = "", env = {}, timeoutMs = PROCESS_TIMEOUT_MS } = {}) {
+function exactNpxWranglerCommand(command, args) {
+  return command === "npx" && Array.isArray(args) && args.length >= 3 &&
+    args.every((value) => typeof value === "string") &&
+    args[0] === "--no-install" && args[1] === "wrangler";
+}
+
+function f02KeychainWranglerClass(command, args) {
+  if (!exactNpxWranglerCommand(command, args)) return "not-wrangler";
+  const wrangler = args.slice(2);
+  if (wrangler.length === 1 && wrangler[0] === "--version") return "credential-free";
+  if (wrangler[0] === "whoami" && wrangler.includes("--json")) return "edit-credential";
+  if (wrangler[0] === "deployments" && wrangler[1] === "status" && wrangler.includes("--json")) {
+    return "edit-credential";
+  }
+  if (wrangler[0] === "versions" && ["view", "upload", "deploy"].includes(wrangler[1])) {
+    return "edit-credential";
+  }
+  if (wrangler[0] === "versions" && wrangler[1] === "secret" &&
+      ["bulk", "delete"].includes(wrangler[2])) return "edit-credential";
+  return "rejected";
+}
+
+function portableDefaultRun(command, args, {
+  input = "", env = {}, sourceEnv = process.env, timeoutMs = PROCESS_TIMEOUT_MS,
+} = {}) {
   return new Promise((resolvePromise) => {
-    const dotenvDirectories = wranglerConfigDirectories(command, args);
-    if (dotenvDirectories.length > 0) assertNoWranglerDotenvFiles(dotenvDirectories);
     const child = spawn(command, args, {
       cwd: ROOT,
-      env: childEnvironment(env),
+      env: childEnvironment(env, sourceEnv),
       stdio: ["pipe", "pipe", "pipe"],
     });
     const stdout = [];
@@ -743,20 +849,71 @@ function defaultRun(command, args, { input = "", env = {}, timeoutMs = PROCESS_T
         stderr: Buffer.concat(stderr).toString("utf8"),
       });
     });
+    child.stdin.on("error", () => {});
     child.stdin.end(input);
   });
 }
 
-function restoreTerminal() {
+async function defaultRun(command, args, {
+  input = "", env = {}, sourceEnv = process.env, timeoutMs = PROCESS_TIMEOUT_MS,
+  processScope, processRunner, sentinels = [],
+} = {}) {
+  const dotenvDirectories = wranglerConfigDirectories(command, args);
+  if (dotenvDirectories.length > 0) assertNoWranglerDotenvFiles(dotenvDirectories);
+  if (processScope === undefined && processRunner === undefined) {
+    return portableDefaultRun(command, args, { input, env, sourceEnv, timeoutMs });
+  }
+  const boundedRunner = processRunner || runBoundedProcess;
+  if (typeof boundedRunner !== "function" ||
+      (processScope !== undefined &&
+        (processScope === null || typeof processScope !== "object" ||
+          typeof processScope.signal?.aborted !== "boolean"))) {
+    return { code: -1, stdout: "", stderr: "" };
+  }
+  let result;
+  try {
+    result = await boundedRunner(command, args, {
+      cwd: ROOT,
+      env: childEnvironment(env, sourceEnv),
+      input,
+      timeoutMs,
+      maxOutputBytes: MAX_OUTPUT_BYTES,
+      ...(processScope === undefined ? {} : { scope: processScope }),
+      sentinels,
+    });
+  } catch {
+    return { code: -1, stdout: "", stderr: "" };
+  }
+  const completed = result?.reason === PROCESS_RESULT_REASONS.COMPLETED && result?.ok === true;
+  const nonzero = result?.reason === PROCESS_RESULT_REASONS.NONZERO &&
+    Number.isInteger(result?.exitCode);
+  return {
+    code: completed ? 0 : nonzero ? result.exitCode : -1,
+    stdout: completed || nonzero ? String(result.stdout || "") : "",
+    stderr: completed || nonzero ? String(result.stderr || "") : "",
+  };
+}
+
+function restoreTerminalOnly() {
   try {
     if (process.stdin.isTTY && process.stdin.isRaw && typeof process.stdin.setRawMode === "function") {
       process.stdin.setRawMode(false);
     }
     process.stdin.pause();
   } catch {}
+}
+
+function restoreTerminal() {
+  restoreTerminalOnly();
+  let cleanupVerified = true;
   for (const temporary of [...ACTIVE_TEMP_CONFIGS]) {
-    try { temporary.cleanup(); } catch {}
+    try { temporary.cleanup(); } catch { cleanupVerified = false; }
   }
+  for (const directory of [...ACTIVE_PRIVATE_XDG_HOMES]) {
+    try { cleanupPrivateOperatorXdgHome(directory); } catch { cleanupVerified = false; }
+  }
+  return cleanupVerified && ACTIVE_TEMP_CONFIGS.size === 0 &&
+    ACTIVE_PRIVATE_XDG_HOMES.size === 0;
 }
 
 async function readHiddenLine(promptText, maxLength) {
@@ -809,6 +966,127 @@ async function promptValue(prompt, label, maxLength, pattern, code = "HIDDEN_INP
   const value = await prompt(`${label} (hidden): `, maxLength);
   if (typeof value !== "string" || !pattern.test(value)) fail(code);
   return value;
+}
+
+function createF02OperatorKeychainPrompt(keychain) {
+  if (!keychain || typeof keychain.read !== "function") fail("F02_KEYCHAIN_DEPENDENCY_REJECTED");
+  const entries = Object.freeze([
+    Object.freeze({
+      prompt: "Expected Cloudflare account ID (hidden): ", maxLength: 32,
+      account: F02_KEYCHAIN_ITEMS.accountId,
+      validation: { maxBytes: 32, pattern: /^[a-f0-9]{32}$/ },
+    }),
+    Object.freeze({
+      prompt: "Reviewed full Git commit (hidden): ", maxLength: 40,
+      account: F02_KEYCHAIN_ITEMS.reviewedCommit,
+      validation: { maxBytes: 40, pattern: /^[a-f0-9]{40}$/ },
+    }),
+    Object.freeze({
+      prompt: "Reviewed all-off rollback version (hidden): ", maxLength: 36,
+      account: F02_KEYCHAIN_ITEMS.baselineVersion,
+      validation: { maxBytes: 36, pattern: UUID },
+    }),
+    Object.freeze({
+      prompt: "Exact approved synthetic offer canary (hidden): ", maxLength: 80,
+      account: F02_KEYCHAIN_ITEMS.canary,
+      validation: { maxBytes: 80, pattern: OFFER_CANARY },
+    }),
+    Object.freeze({
+      prompt: "Prepared target digest (hidden): ", maxLength: 64,
+      account: F02_KEYCHAIN_ITEMS.targetDigest,
+      validation: { maxBytes: 64, pattern: HEX_DIGEST },
+    }),
+    Object.freeze({
+      prompt: "Prepared opaque run token (hidden): ", maxLength: 128,
+      account: F02_KEYCHAIN_ITEMS.runToken,
+      validation: { maxBytes: 128, pattern: RUN_TOKEN },
+    }),
+    Object.freeze({
+      prompt: "Prepared sandbox Apps URL digest (hidden): ", maxLength: 64,
+      account: F02_KEYCHAIN_ITEMS.appsUrlDigest,
+      validation: { maxBytes: 64, pattern: HEX_DIGEST },
+    }),
+    Object.freeze({
+      prompt: "Prepared forbidden Apps URL digest (hidden): ", maxLength: 64,
+      account: F02_KEYCHAIN_ITEMS.forbiddenAppsUrlDigest,
+      validation: { maxBytes: 64, pattern: HEX_DIGEST },
+    }),
+    Object.freeze({
+      prompt: "Temporary fault HMAC secret (hidden): ", maxLength: 256,
+      account: F02_KEYCHAIN_ITEMS.hashSecret,
+      validation: { maxBytes: 256, pattern: /^[^\0\r\n]+$/u },
+    }),
+  ]);
+  let index = 0;
+  return Object.freeze({
+    async read(promptText, maxLength) {
+      const entry = entries[index];
+      if (!entry || promptText !== entry.prompt || maxLength !== entry.maxLength) {
+        fail("F02_KEYCHAIN_PROMPT_ORDER_REJECTED");
+      }
+      index += 1;
+      const value = await keychain.read(entry.account, entry.validation);
+      if (entry.account === F02_KEYCHAIN_ITEMS.hashSecret &&
+          Buffer.byteLength(value, "utf8") < 32) fail("CASE_INPUT_REJECTED");
+      return value;
+    },
+    complete() {
+      if (index !== entries.length) fail("F02_KEYCHAIN_PROMPT_ORDER_REJECTED");
+    },
+  });
+}
+
+function createF02ActionKeychainPrompt(keychain, action) {
+  if (!keychain || typeof keychain.read !== "function") fail("F02_KEYCHAIN_DEPENDENCY_REJECTED");
+  const common = Object.freeze({
+    account: Object.freeze({
+      prompt: "Expected Cloudflare account ID (hidden): ", maxLength: 32,
+      account: F02_KEYCHAIN_ITEMS.accountId,
+      validation: { maxBytes: 32, pattern: ACCOUNT_ID },
+    }),
+    commit: Object.freeze({
+      prompt: "Reviewed full Git commit (hidden): ", maxLength: 40,
+      account: F02_KEYCHAIN_ITEMS.reviewedCommit,
+      validation: { maxBytes: 40, pattern: COMMIT },
+    }),
+    baseline: Object.freeze({
+      prompt: "Reviewed all-off rollback version (hidden): ", maxLength: 36,
+      account: F02_KEYCHAIN_ITEMS.baselineVersion,
+      validation: { maxBytes: 36, pattern: UUID },
+    }),
+    candidate: Object.freeze({
+      prompt: "Exact candidate version (hidden): ", maxLength: 36,
+      account: F02_KEYCHAIN_ITEMS.candidateVersion,
+      validation: { maxBytes: 36, pattern: UUID },
+    }),
+    canary: Object.freeze({
+      prompt: "Exact approved synthetic offer canary (hidden): ", maxLength: 80,
+      account: F02_KEYCHAIN_ITEMS.canary,
+      validation: { maxBytes: 80, pattern: OFFER_CANARY },
+    }),
+  });
+  const entries = action === "deploy"
+    ? [common.account, common.commit, common.baseline, common.candidate, common.canary]
+    : action === "rollback"
+      ? [common.account, common.baseline, common.candidate]
+      : action === "cleanup"
+        ? [common.account, common.commit, common.baseline]
+        : null;
+  if (!entries) fail("F02_KEYCHAIN_DEPENDENCY_REJECTED");
+  let index = 0;
+  return Object.freeze({
+    async read(promptText, maxLength) {
+      const entry = entries[index];
+      if (!entry || promptText !== entry.prompt || maxLength !== entry.maxLength) {
+        fail("F02_KEYCHAIN_PROMPT_ORDER_REJECTED");
+      }
+      index += 1;
+      return keychain.read(entry.account, entry.validation);
+    },
+    complete() {
+      if (index !== entries.length) fail("F02_KEYCHAIN_PROMPT_ORDER_REJECTED");
+    },
+  });
 }
 
 async function commonInputs(prompt, {
@@ -1099,7 +1377,7 @@ async function verifyWrangler(run) {
   if (result.stdout.trim() !== WRANGLER_VERSION) fail("WRANGLER_VERSION_REJECTED");
 }
 
-async function verifyBaseline(run, inputs, baseVars, { localGit = true } = {}) {
+async function verifyBaselineLocalPreflight(run, inputs, { localGit = true } = {}) {
   validateLocalBoundary();
   for (const name of FAULT_SECRET_NAMES) {
     if (Object.hasOwn(process.env, name)) fail("FAULT_SECRET_ENV_REJECTED");
@@ -1107,6 +1385,13 @@ async function verifyBaseline(run, inputs, baseVars, { localGit = true } = {}) {
   if (Object.hasOwn(process.env, "SQUARE_SANDBOX_CONTROL_PROFILE")) fail("CHILD_ENV_REJECTED");
   if (localGit) await verifyLocalGit(run, inputs.reviewedCommit);
   await verifyWrangler(run);
+}
+
+async function verifyBaseline(run, inputs, baseVars, {
+  localGit = true,
+  localPreflight = true,
+} = {}) {
+  if (localPreflight) await verifyBaselineLocalPreflight(run, inputs, { localGit });
   await verifyAccount(run, inputs.accountId);
   const baseline = await getVersion(run, inputs.accountId, inputs.baselineVersion);
   assertVersionMetadata(baseline, {
@@ -1248,11 +1533,15 @@ function createPrivateTemporaryFile(prefix, filename, rendered) {
         if (stat && (stat.isFile() || stat.isSymbolicLink())) unlinkSync(path);
         rmdirSync(directory);
       } catch {
+        markTemporaryConfigCleanupUnverified();
         fail("TEMP_CONFIG_CLEANUP_REJECTED", 3);
       }
       cleaned = true;
       ACTIVE_TEMP_CONFIGS.delete(temporary);
-      if (validationDrift) fail("TEMP_CONFIG_DRIFT_REMOVED", 3);
+      if (validationDrift) {
+        markTemporaryConfigCleanupUnverified();
+        fail("TEMP_CONFIG_DRIFT_REMOVED", 3);
+      }
     },
   };
   ACTIVE_TEMP_CONFIGS.add(temporary);
@@ -1304,7 +1593,27 @@ async function deployVersion(run, accountId, versionId, message) {
   ), { env: cloudflareEnv(accountId) }, "TRAFFIC_MUTATION_UNCERTAIN");
 }
 
-async function rollbackWithImmutableControl(run, accountId, baselineVersion, candidateVersion) {
+function exactRollbackCandidates(candidateVersionOrVersions, baselineVersion) {
+  const candidates = Array.isArray(candidateVersionOrVersions)
+    ? [...candidateVersionOrVersions]
+    : [candidateVersionOrVersions];
+  if (candidates.length < 1 || candidates.length > 2 ||
+      new Set(candidates.map((value) => String(value).toLowerCase())).size !== candidates.length ||
+      candidates.some((value) => !UUID.test(String(value || "")) ||
+        String(value).toLowerCase() === String(baselineVersion).toLowerCase())) {
+    fail("ROLLBACK_CANDIDATE_BOUNDARY_REJECTED");
+  }
+  return candidates;
+}
+
+async function rollbackWithImmutableControl(
+  run, accountId, baselineVersion, candidateVersionOrVersions,
+  { beforeMutation = null } = {},
+) {
+  if (beforeMutation !== null && typeof beforeMutation !== "function") {
+    fail("F02_KEYCHAIN_DEPENDENCY_REJECTED");
+  }
+  const candidateVersions = exactRollbackCandidates(candidateVersionOrVersions, baselineVersion);
   const temporary = createRollbackControlConfig();
   try {
     const configArgs = ["--config", temporary.path, "--name", WORKER];
@@ -1324,9 +1633,18 @@ async function rollbackWithImmutableControl(run, accountId, baselineVersion, can
       assertTraffic(before, baselineVersion);
       alreadyBaseline = true;
     } catch {
-      assertTraffic(before, candidateVersion);
+      let exactCandidate = false;
+      for (const candidateVersion of candidateVersions) {
+        try {
+          assertTraffic(before, candidateVersion);
+          exactCandidate = true;
+          break;
+        } catch {}
+      }
+      if (!exactCandidate) fail("TRAFFIC_BOUNDARY_REJECTED");
     }
     if (!alreadyBaseline) {
+      if (beforeMutation) await beforeMutation();
       await invoke(run, "npx", npxArgs(
         "versions", "deploy", `${baselineVersion}@100%`, ...configArgs,
         "--yes", "--message", "SANDBOX ONLY - immutable exact all-off rollback",
@@ -1342,9 +1660,17 @@ async function rollbackWithImmutableControl(run, accountId, baselineVersion, can
   }
 }
 
-async function rollbackAfterAmbiguousMutation(run, accountId, baselineVersion, candidateVersion) {
+async function rollbackAfterAmbiguousMutation(
+  run,
+  accountId,
+  baselineVersion,
+  candidateVersion,
+  { beforeMutation = null } = {},
+) {
   try {
-    await rollbackWithImmutableControl(run, accountId, baselineVersion, candidateVersion);
+    await rollbackWithImmutableControl(
+      run, accountId, baselineVersion, candidateVersion, { beforeMutation },
+    );
     return true;
   } catch {
     return false;
@@ -1688,15 +2014,24 @@ async function prepareF04Chain(run, prompt, print) {
         sourceDigest: "",
       });
       try {
-        const secretResult = await invoke(run, "npx", npxArgs(
-          "versions", "secret", "bulk", "--config", CONFIG, "--name", WORKER,
-          "--message", block.mode === F04_SEARCH_MODE
-            ? "SANDBOX ONLY - temporary F04 search-fault controls"
-            : block.mode === F04_APPS_FINALIZE_MODE
-              ? "SANDBOX ONLY - temporary F04 Apps-finalize-fault controls"
-              : "SANDBOX ONLY - temporary F04 offer-recovery controls",
-        ), { input: JSON.stringify(secrets), env: cloudflareEnv(inputs.accountId) },
-        "SECRET_STAGE_STATE_UNCERTAIN");
+        const secretInput = Buffer.from(JSON.stringify(secrets), "utf8");
+        let secretResult;
+        try {
+          secretResult = await invoke(run, "npx", npxArgs(
+            "versions", "secret", "bulk", "--config", CONFIG, "--name", WORKER,
+            "--message", block.mode === F04_SEARCH_MODE
+              ? "SANDBOX ONLY - temporary F04 search-fault controls"
+              : block.mode === F04_APPS_FINALIZE_MODE
+                ? "SANDBOX ONLY - temporary F04 Apps-finalize-fault controls"
+                : "SANDBOX ONLY - temporary F04 offer-recovery controls",
+          ), {
+            input: secretInput,
+            env: cloudflareEnv(inputs.accountId),
+            sentinels: Object.values(secrets),
+          }, "SECRET_STAGE_STATE_UNCERTAIN");
+        } finally {
+          secretInput.fill(0);
+        }
         const captured = `${secretResult.stdout}\n${secretResult.stderr}`;
         if (containsAny(captured, Object.values(secrets))) fail("SECRET_OUTPUT_DETECTED", 3);
         const candidateId = secretMutationVersionIdFromOutput(captured);
@@ -1812,7 +2147,17 @@ async function prepareCandidate(run, prompt, print, {
   allowedModes = null,
   fixedMode = "",
   priorMode = "",
+  storeCandidate = null,
+  redactCandidate = false,
+  onInputsReady = null,
+  beforeMutation = null,
 } = {}) {
+  if ((storeCandidate !== null && typeof storeCandidate !== "function") ||
+      (redactCandidate && typeof storeCandidate !== "function") ||
+      (onInputsReady !== null && typeof onInputsReady !== "function") ||
+      (beforeMutation !== null && typeof beforeMutation !== "function")) {
+    fail("F02_KEYCHAIN_DEPENDENCY_REJECTED");
+  }
   const local = validateLocalBoundary();
   const inputs = await commonInputs(prompt, { withPriorCandidate: Boolean(priorMode) });
   const fixedKind = SEED_KINDS.has(seedKind) ? seedKind : "";
@@ -1820,9 +2165,13 @@ async function prepareCandidate(run, prompt, print, {
     ? { mode: fixedKind, canary: "" }
     : await readCaseInputs(prompt, { withSecrets: true, fixedMode, allowedModes });
   if (allowedModes && !allowedModes.has(caseInputs.mode)) fail("CASE_MODE_ACKNOWLEDGEMENTS_REQUIRED");
+  if (onInputsReady) {
+    await verifyBaselineLocalPreflight(run, inputs);
+    await onInputsReady(caseInputs, inputs);
+  }
   let secrets = faultSecretObject(caseInputs);
   try {
-    await verifyBaseline(run, inputs, local.vars);
+    await verifyBaseline(run, inputs, local.vars, { localPreflight: !onInputsReady });
     if (priorMode) {
       const priorSecrets = FAULT_SECRET_NAMES.filter((name) =>
         name !== "SQUARE_SANDBOX_FAULT_SOURCE_DIGEST");
@@ -1832,6 +2181,7 @@ async function prepareCandidate(run, prompt, print, {
         expectedSecrets: [...STANDING_SECRET_NAMES, ...priorSecrets],
       });
     }
+    if (beforeMutation) await beforeMutation(inputs);
     const candidateVars = expectedCandidateVars(local.vars, caseInputs.mode, caseInputs.canary);
     const baseVersionId = await uploadVersion(
       run, inputs.accountId, candidateVars,
@@ -1867,27 +2217,37 @@ async function prepareCandidate(run, prompt, print, {
     });
     let candidateVersionId = baseVersionId;
     if (!fixedKind) {
-      const secretJson = JSON.stringify(secrets);
-      const secretResult = await invoke(run, "npx", npxArgs(
-        "versions", "secret", "bulk", "--config", CONFIG, "--name", WORKER,
-        "--message", caseInputs.mode === OFFER_ROUTE_ISOLATION_MODE
-          ? "SANDBOX ONLY - temporary offer isolation controls"
-        : caseInputs.mode === P01_ISOLATION_MODE
-          ? "SANDBOX ONLY - temporary P01 group-add fault offer controls"
-        : caseInputs.mode === P01_RECOVERY_ISOLATION_MODE
-          ? "SANDBOX ONLY - temporary P01 group-add recovery offer controls"
-        : caseInputs.mode === REPLAY_ISOLATION_MODE
-            ? "SANDBOX ONLY - temporary exact webhook replay isolation controls"
-          : caseInputs.mode === Q02_ISOLATION_MODE
-            ? "SANDBOX ONLY - temporary Q02 DLQ-redrive consumer-only controls"
-          : caseInputs.mode === P02_ISOLATION_MODE
-            ? "SANDBOX ONLY - temporary P02 group-removal consumer-only controls"
-          : caseInputs.mode === REFUND_BEFORE_PAYMENT_ISOLATION_MODE
-            ? "SANDBOX ONLY - temporary refund-before-payment isolation controls"
-          : caseInputs.mode === Q01_ISOLATION_MODE
-            ? "SANDBOX ONLY - temporary Q01 payment-webhook consumer-only controls"
-          : "SANDBOX ONLY - temporary one-case fault secrets",
-      ), { input: secretJson, env: cloudflareEnv(inputs.accountId) }, "SECRET_STAGE_STATE_UNCERTAIN");
+      if (beforeMutation) await beforeMutation(inputs);
+      const secretInput = Buffer.from(JSON.stringify(secrets), "utf8");
+      let secretResult;
+      try {
+        secretResult = await invoke(run, "npx", npxArgs(
+          "versions", "secret", "bulk", "--config", CONFIG, "--name", WORKER,
+          "--message", caseInputs.mode === OFFER_ROUTE_ISOLATION_MODE
+            ? "SANDBOX ONLY - temporary offer isolation controls"
+          : caseInputs.mode === P01_ISOLATION_MODE
+            ? "SANDBOX ONLY - temporary P01 group-add fault offer controls"
+          : caseInputs.mode === P01_RECOVERY_ISOLATION_MODE
+            ? "SANDBOX ONLY - temporary P01 group-add recovery offer controls"
+          : caseInputs.mode === REPLAY_ISOLATION_MODE
+              ? "SANDBOX ONLY - temporary exact webhook replay isolation controls"
+            : caseInputs.mode === Q02_ISOLATION_MODE
+              ? "SANDBOX ONLY - temporary Q02 DLQ-redrive consumer-only controls"
+            : caseInputs.mode === P02_ISOLATION_MODE
+              ? "SANDBOX ONLY - temporary P02 group-removal consumer-only controls"
+            : caseInputs.mode === REFUND_BEFORE_PAYMENT_ISOLATION_MODE
+              ? "SANDBOX ONLY - temporary refund-before-payment isolation controls"
+            : caseInputs.mode === Q01_ISOLATION_MODE
+              ? "SANDBOX ONLY - temporary Q01 payment-webhook consumer-only controls"
+            : "SANDBOX ONLY - temporary one-case fault secrets",
+        ), {
+          input: secretInput,
+          env: cloudflareEnv(inputs.accountId),
+          sentinels: Object.values(secrets),
+        }, "SECRET_STAGE_STATE_UNCERTAIN");
+      } finally {
+        secretInput.fill(0);
+      }
       const captured = `${secretResult.stdout}\n${secretResult.stderr}`;
       if (containsAny(captured, Object.values(secrets))) fail("SECRET_OUTPUT_DETECTED", 3);
       candidateVersionId = secretMutationVersionIdFromOutput(captured);
@@ -1922,7 +2282,13 @@ async function prepareCandidate(run, prompt, print, {
         : caseInputs.mode === Q01_ISOLATION_MODE
           ? "SANDBOX_Q01_ISOLATION_CANDIDATE_READY"
         : "SANDBOX_CANDIDATE_READY";
-    print(`STATUS=PREPARED RESULT=${result} CANDIDATE_VERSION=${candidateVersionId}`);
+    if (storeCandidate !== null) {
+      if (typeof storeCandidate !== "function") fail("F02_KEYCHAIN_DEPENDENCY_REJECTED");
+      await storeCandidate(candidateVersionId);
+    }
+    print(redactCandidate
+      ? `STATUS=PREPARED RESULT=${result} CANDIDATE_VERSION=[KEYCHAIN]`
+      : `STATUS=PREPARED RESULT=${result} CANDIDATE_VERSION=${candidateVersionId}`);
   } finally {
     for (const name of Object.keys(secrets)) secrets[name] = "";
     secrets = {};
@@ -1935,7 +2301,17 @@ async function deployCandidate(run, prompt, print, {
   allowedModes = null,
   fixedMode = "",
   priorMode = "",
+  onInputsReady = null,
+  onComplete = null,
+  beforeMutation = null,
+  rollbackAmbiguous = true,
 } = {}) {
+  if ((onInputsReady !== null && typeof onInputsReady !== "function") ||
+      (onComplete !== null && typeof onComplete !== "function") ||
+      (beforeMutation !== null && typeof beforeMutation !== "function") ||
+      typeof rollbackAmbiguous !== "boolean") {
+    fail("F02_KEYCHAIN_DEPENDENCY_REJECTED");
+  }
   const local = validateLocalBoundary();
   const inputs = await commonInputs(prompt, {
     withCandidate: true,
@@ -1946,7 +2322,11 @@ async function deployCandidate(run, prompt, print, {
     ? { mode: fixedKind, canary: "" }
     : await readCaseInputs(prompt, { fixedMode, allowedModes });
   if (allowedModes && !allowedModes.has(caseInputs.mode)) fail("CASE_MODE_ACKNOWLEDGEMENTS_REQUIRED");
-  await verifyBaseline(run, inputs, local.vars);
+  if (onInputsReady) {
+    await verifyBaselineLocalPreflight(run, inputs);
+    await onInputsReady(caseInputs, inputs);
+  }
+  await verifyBaseline(run, inputs, local.vars, { localPreflight: !onInputsReady });
   const candidateVars = expectedCandidateVars(local.vars, caseInputs.mode, caseInputs.canary);
   const expectedFaultSecrets = fixedKind ? [] : FAULT_SECRET_NAMES.filter((name) =>
     name !== "SQUARE_SANDBOX_FAULT_SOURCE_DIGEST" ||
@@ -1966,6 +2346,7 @@ async function deployCandidate(run, prompt, print, {
       expectedSecrets: [...STANDING_SECRET_NAMES, ...priorSecrets],
     });
   }
+  if (beforeMutation) await beforeMutation(inputs);
   try {
     await deployVersion(run, inputs.accountId, inputs.candidateVersion,
       fixedKind === O01_SEED_KIND
@@ -1992,7 +2373,11 @@ async function deployCandidate(run, prompt, print, {
             ? "SANDBOX ONLY - injecting Q01 payment-webhook consumer-only traffic"
           : "SANDBOX ONLY - exact one-case fault traffic");
     assertTraffic(await getTraffic(run, inputs.accountId), inputs.candidateVersion);
+    if (onComplete) await onComplete(inputs, caseInputs);
   } catch {
+    if (!rollbackAmbiguous) {
+      fail("CANDIDATE_DEPLOY_UNCONFIRMED_ROLLBACK_DEFERRED", 3);
+    }
     const rolledBack = await rollbackAfterAmbiguousMutation(
       run, inputs.accountId, inputs.baselineVersion, inputs.candidateVersion,
     );
@@ -2034,22 +2419,51 @@ async function diagnoseRollbackLocal(run, inputs) {
   assertTraffic(await getTraffic(run, inputs.accountId), inputs.baselineVersion);
 }
 
-async function rollbackCandidate(run, prompt, print, { diagnose = diagnoseRollbackLocal } = {}) {
+async function rollbackCandidate(run, prompt, print, {
+  diagnose = diagnoseRollbackLocal,
+  onInputsReady = null,
+  onComplete = null,
+  beforeMutation = null,
+  recoverAmbiguous = false,
+} = {}) {
+  if ((onInputsReady !== null && typeof onInputsReady !== "function") ||
+      (onComplete !== null && typeof onComplete !== "function") ||
+      (beforeMutation !== null && typeof beforeMutation !== "function") ||
+      typeof recoverAmbiguous !== "boolean") {
+    fail("F02_KEYCHAIN_DEPENDENCY_REJECTED");
+  }
   const inputs = await commonInputs(prompt, { withCommit: false, withCandidate: true });
   await verifyWrangler(run);
+  const additionalCandidates = onInputsReady ? await onInputsReady(inputs) : undefined;
+  if (additionalCandidates !== undefined &&
+      (!Array.isArray(additionalCandidates) ||
+       additionalCandidates.some((value) => !UUID.test(String(value || ""))))) {
+    fail("F02_KEYCHAIN_DEPENDENCY_REJECTED");
+  }
+  const rollbackCandidates = [
+    inputs.candidateVersion,
+    ...(additionalCandidates || []),
+  ];
   await verifyAccount(run, inputs.accountId);
   let alreadyBaseline;
   try {
     alreadyBaseline = await rollbackWithImmutableControl(
-      run, inputs.accountId, inputs.baselineVersion, inputs.candidateVersion,
+      run, inputs.accountId, inputs.baselineVersion, rollbackCandidates,
+      { beforeMutation },
     );
   } catch (error) {
+    if (/^F02_KEYCHAIN_[A-Z0-9_]{3,80}$/.test(String(error?.code || ""))) throw error;
     if (error instanceof OperatorError && error.code === "TEMP_CONFIG_DRIFT_REMOVED") throw error;
-    fail("ROLLBACK_UNCONFIRMED", 3);
+    if (!recoverAmbiguous || !await rollbackAfterAmbiguousMutation(
+      run, inputs.accountId, inputs.baselineVersion, inputs.candidateVersion,
+      { beforeMutation },
+    )) fail("ROLLBACK_UNCONFIRMED", 3);
+    alreadyBaseline = false;
   }
   let diagnosticReady = true;
   try { await diagnose(run, inputs); } catch { diagnosticReady = false; }
   const result = alreadyBaseline ? "ROLLBACK_ALREADY_CONFIRMED" : "EXACT_ALL_OFF_ROLLBACK_CONFIRMED";
+  if (onComplete) await onComplete(inputs, { alreadyBaseline, diagnosticReady });
   print(`STATUS=COMPLETE RESULT=${result}${diagnosticReady ? "" : "_LOCAL_DIAGNOSTIC_REJECTED"}`);
 }
 
@@ -2173,12 +2587,30 @@ async function recoverInterruptedLegacyBaselineMigration(run, prompt, print) {
   );
 }
 
-async function cleanupCandidate(run, prompt, print) {
+async function cleanupCandidate(run, prompt, print, {
+  onInputsReady = null,
+  onCandidateReady = null,
+  onComplete = null,
+  onRollbackComplete = null,
+  beforeMutation = null,
+} = {}) {
+  if ((onInputsReady !== null && typeof onInputsReady !== "function") ||
+      (onCandidateReady !== null && typeof onCandidateReady !== "function") ||
+      (onComplete !== null && typeof onComplete !== "function") ||
+      (onRollbackComplete !== null && typeof onRollbackComplete !== "function") ||
+      (beforeMutation !== null && typeof beforeMutation !== "function")) {
+    fail("F02_KEYCHAIN_DEPENDENCY_REJECTED");
+  }
   const local = validateLocalBoundary();
   const inputs = await commonInputs(prompt);
-  await verifyBaseline(run, inputs, local.vars);
+  if (onInputsReady) {
+    await verifyBaselineLocalPreflight(run, inputs);
+    await onInputsReady(inputs);
+  }
+  await verifyBaseline(run, inputs, local.vars, { localPreflight: !onInputsReady });
   let finalVersionId;
   try {
+    if (beforeMutation) await beforeMutation(inputs);
     finalVersionId = await uploadVersion(run, inputs.accountId, local.vars,
       "SANDBOX ONLY - clean all-off post-case candidate");
     let metadata = await getVersion(run, inputs.accountId, finalVersionId);
@@ -2190,6 +2622,7 @@ async function cleanupCandidate(run, prompt, print) {
     });
     const presentFaultNames = FAULT_SECRET_NAMES.filter((name) => inspected.secretNames.includes(name));
     for (const name of presentFaultNames) {
+      if (beforeMutation) await beforeMutation(inputs);
       const deletion = await invoke(run, "npx", npxArgs(
         "versions", "secret", "delete", name, "--config", CONFIG, "--name", WORKER,
         "--message", `SANDBOX ONLY - remove temporary ${name}`,
@@ -2205,10 +2638,14 @@ async function cleanupCandidate(run, prompt, print) {
       expectedSecrets: STANDING_SECRET_NAMES,
     });
     assertTraffic(await getTraffic(run, inputs.accountId), inputs.baselineVersion);
+    if (onCandidateReady) await onCandidateReady(inputs, finalVersionId);
+    if (beforeMutation) await beforeMutation(inputs);
     await deployVersion(run, inputs.accountId, finalVersionId,
       "SANDBOX ONLY - final clean all-off version");
     assertTraffic(await getTraffic(run, inputs.accountId), finalVersionId);
-  } catch {
+    if (onComplete) await onComplete(inputs, finalVersionId);
+  } catch (error) {
+    if (/^F02_KEYCHAIN_[A-Z0-9_]{3,80}$/.test(String(error?.code || ""))) throw error;
     // No traffic mutation can precede finalVersionId. Using the baseline as
     // the alternate in that early-failure case still permits only exact
     // baseline traffic; once a clean candidate exists, only that candidate or
@@ -2218,17 +2655,194 @@ async function cleanupCandidate(run, prompt, print) {
       : inputs.baselineVersion;
     const rolledBack = await rollbackAfterAmbiguousMutation(
       run, inputs.accountId, inputs.baselineVersion, rollbackCandidateVersion,
+      { beforeMutation },
     );
+    if (rolledBack && onRollbackComplete) {
+      await onRollbackComplete(inputs, rollbackCandidateVersion);
+    }
     fail(rolledBack ? "CLEANUP_REJECTED_BASELINE_TRAFFIC_CONFIRMED" : "ROLLBACK_UNCONFIRMED", rolledBack ? 2 : 3);
   }
   print("STATUS=COMPLETE RESULT=SANDBOX_CLEAN_ALL_OFF_DEPLOYED");
 }
 
 export async function sandboxFaultWindowMain(argv = process.argv.slice(2), dependencies = {}) {
+  if (!TEMP_CONFIG_CLEANUP_CONTEXT.getStore()) {
+    return TEMP_CONFIG_CLEANUP_CONTEXT.run(
+      { unverified: false },
+      () => sandboxFaultWindowMain(argv, dependencies),
+    );
+  }
+  const temporaryCleanupTracker = TEMP_CONFIG_CLEANUP_CONTEXT.getStore();
   const print = dependencies.print || ((line) => process.stdout.write(`${line}\n`));
-  const run = dependencies.run || defaultRun;
-  const prompt = dependencies.readHiddenLine || readHiddenLine;
+  if ((dependencies.processScopeOwned !== undefined &&
+      typeof dependencies.processScopeOwned !== "boolean") ||
+      (dependencies.processScopeOwned === true && dependencies.processScope === undefined)) {
+    print("STATUS=REJECTED RESULT=F02_KEYCHAIN_INPUT_REJECTED");
+    return 3;
+  }
+  if (dependencies.createPrivateOperatorXdgHomeImpl !== undefined &&
+      typeof dependencies.createPrivateOperatorXdgHomeImpl !== "function") {
+    print("STATUS=REJECTED RESULT=F02_KEYCHAIN_INPUT_REJECTED");
+    return 3;
+  }
+  const defaultPrompt = dependencies.readHiddenLine || readHiddenLine;
+  const keychainSelections = [
+    ["prepare", splitF02KeychainArgs(argv, PREPARE_OFFER_ISOLATION_ARGS)],
+    ["deploy", splitF02KeychainArgs(argv, DEPLOY_OFFER_ISOLATION_ARGS)],
+    ["rollback-recovery", splitF02KeychainArgs(argv, ROLLBACK_RECOVERY_ARGS)],
+    ["rollback", splitF02KeychainArgs(argv, ROLLBACK_ARGS)],
+    ["cleanup", splitF02KeychainArgs(argv, CLEANUP_ARGS)],
+  ].filter(([, selection]) => selection.enabled);
+  const keychainAction = keychainSelections.length === 1 ? keychainSelections[0][0] : "";
+  const keychainSelection = keychainSelections.length === 1
+    ? keychainSelections[0][1]
+    : Object.freeze({ enabled: false, argv: [...argv] });
+  if (keychainSelection.enabled &&
+      !isF02NamespaceOperationLockHeld(keychainSelection.namespace)) {
+    const buffered = [];
+    try {
+      const status = await withF02NamespaceOperationLock(
+        keychainSelection.namespace,
+        () => sandboxFaultWindowMain(argv, {
+          ...dependencies,
+          print: (line) => buffered.push(line),
+        }),
+        dependencies,
+      );
+      for (const line of buffered) print(line);
+      return status;
+    } catch {
+      print("STATUS=REJECTED RESULT=F02_KEYCHAIN_INPUT_REJECTED");
+      return 3;
+    }
+  }
+  if (keychainSelection.enabled) argv = keychainSelection.argv;
+  const useProcessScope = keychainSelection.enabled ||
+    dependencies.processScope !== undefined || dependencies.processRunner !== undefined;
+  const processRunner = useProcessScope
+    ? (dependencies.processRunner || runBoundedProcess)
+    : undefined;
+  const ownedProcessScope = dependencies.run === undefined && useProcessScope &&
+      dependencies.processScope === undefined
+    ? createProcessScope()
+    : null;
+  const processScope = dependencies.processScope || ownedProcessScope || undefined;
+  const cleanupProcessScope = ownedProcessScope !== null || dependencies.processScopeOwned === true;
+  const baseRun = dependencies.run || ((command, args, options = {}) => defaultRun(command, args, {
+    ...options,
+    ...(processRunner === undefined ? {} : { processRunner }),
+    ...(processScope === undefined ? {} : { processScope }),
+  }));
+  let run = baseRun;
+  let prompt = defaultPrompt;
+  let keychain = null;
+  let keychainPrompt = null;
+  let keychainState = "";
+  const processOwnerPid = dependencies.processOwnerPid === undefined
+    ? process.pid
+    : dependencies.processOwnerPid;
+  let processOwner = "";
+  let coordinatorLifecycleOwner = "";
+  let rollbackLifecycleOwner = "";
+  const requireCurrentCoordinatorOwner = async () => {
+    const lifecycleOwner = await keychain.read(F02_KEYCHAIN_ITEMS.lifecycleLease, {
+      maxBytes: 26, pattern: F02_KEYCHAIN_LIFECYCLE_OWNER_PATTERN,
+    });
+    const coordinatorOwner = await keychain.read(F02_KEYCHAIN_ITEMS.coordinatorLease, {
+      maxBytes: 14, pattern: F02_KEYCHAIN_PID_OWNER_PATTERN,
+    });
+    if (lifecycleOwner !== coordinatorLifecycleOwner || coordinatorOwner !== processOwner) {
+      fail("F02_KEYCHAIN_COORDINATOR_OWNER_REJECTED");
+    }
+  };
+  const requireLoadedKeychainState = async (expected = keychainState) => {
+    const current = await keychain.read(F02_KEYCHAIN_ITEMS.bundleState, {
+      maxBytes: 32, pattern: F02_KEYCHAIN_STATE_PATTERN,
+    });
+    if (current !== expected || current === "DELETION_STARTED") {
+      fail("F02_KEYCHAIN_STATE_REJECTED");
+    }
+  };
+  let editToken = "";
+  let privateXdgHome = "";
   try {
+    if (keychainSelection.enabled) {
+      await assertF02NamespaceOperationLockOwned(keychainSelection.namespace);
+      if (!Number.isSafeInteger(processOwnerPid) || processOwnerPid <= 1 ||
+          processOwnerPid > 9_999_999_999) {
+        fail("F02_KEYCHAIN_DEPENDENCY_REJECTED");
+      }
+      processOwner = f02KeychainPidOwner(processOwnerPid);
+      coordinatorLifecycleOwner = f02KeychainLifecycleOwner("COORDINATOR", processOwnerPid);
+      rollbackLifecycleOwner = f02KeychainLifecycleOwner("ROLLBACK", processOwnerPid);
+      await requireF02KeychainProcessAck(
+        defaultPrompt,
+        keychainAction === "prepare"
+          ? "operator"
+          : keychainAction === "rollback-recovery"
+            ? "rollback"
+            : keychainAction,
+      );
+      keychain = dependencies.keychainAccess || createF02KeychainAccess({
+        namespace: keychainSelection.namespace,
+      });
+      if (!keychain || typeof keychain.read !== "function" ||
+          typeof keychain.has !== "function" || typeof keychain.assertAbsent !== "function" ||
+          typeof keychain.storeNew !== "function" ||
+          typeof keychain.replaceExact !== "function") {
+        fail("F02_KEYCHAIN_DEPENDENCY_REJECTED");
+      }
+      await assertF02KeychainWindow(
+        keychain,
+        keychainSelection.namespace,
+        dependencies.now || Date.now,
+        {
+          allowPostWindowClosure: ["rollback", "rollback-recovery", "cleanup"]
+            .includes(keychainAction),
+        },
+      );
+      keychainState = await keychain.read(F02_KEYCHAIN_ITEMS.bundleState, {
+        maxBytes: 32, pattern: F02_KEYCHAIN_STATE_PATTERN,
+      });
+      if ((keychainAction === "prepare" && keychainState !== "HELPER_COMPLETE") ||
+          (keychainAction === "deploy" && keychainState !== "COORDINATOR_STARTED") ||
+          (["rollback", "rollback-recovery", "cleanup"].includes(keychainAction) &&
+            !["CANDIDATE_COMPLETE", "COORDINATOR_STARTED", "REQUEST_ATTEMPTED"].includes(keychainState))) {
+        fail("F02_KEYCHAIN_STATE_REJECTED");
+      }
+      editToken = await keychain.read(F02_KEYCHAIN_ITEMS.workersEditToken, {
+        maxBytes: 512, pattern: /^[^\s\0]{32,512}$/,
+      });
+      privateXdgHome = (dependencies.createPrivateOperatorXdgHomeImpl ||
+        createPrivateOperatorXdgHome)();
+      assertPrivateOperatorXdgHome(privateXdgHome);
+      ACTIVE_PRIVATE_XDG_HOMES.add(privateXdgHome);
+      const sourceEnv = credentialFreeChildSourceEnvironment();
+      run = (command, args, options = {}) => {
+        const wranglerClass = f02KeychainWranglerClass(command, args);
+        if (wranglerClass === "rejected") fail("F02_KEYCHAIN_COMMAND_REJECTED");
+        const wranglerChild = wranglerClass !== "not-wrangler";
+        const credentialChild = wranglerClass === "edit-credential";
+        return baseRun(command, args, {
+          ...options,
+          sourceEnv,
+          sentinels: [...(Array.isArray(options.sentinels) ? options.sentinels : []), editToken],
+          env: {
+            ...(options.env || {}),
+            ...(credentialChild ? { CLOUDFLARE_API_TOKEN: editToken } : {}),
+            ...(wranglerChild ? { HOME: privateXdgHome } : {}),
+            ...(wranglerChild ? { XDG_CONFIG_HOME: privateXdgHome } : {}),
+          },
+        });
+      };
+      keychainPrompt = keychainAction === "prepare"
+        ? createF02OperatorKeychainPrompt(keychain)
+        : createF02ActionKeychainPrompt(
+          keychain,
+          keychainAction === "rollback-recovery" ? "rollback" : keychainAction,
+        );
+      prompt = keychainPrompt.read;
+    }
     if (argv.length === 0) {
       print("STATUS=INERT RESULT=NO_ACTION");
       return 0;
@@ -2269,10 +2883,114 @@ export async function sandboxFaultWindowMain(argv = process.argv.slice(2), depen
       return 0;
     }
     if (sameArgs(argv, PREPARE_OFFER_ISOLATION_ARGS)) {
-      await prepareCandidate(run, prompt, print, {
+      let deferredLine = "";
+      const candidatePrint = keychainSelection.enabled
+        ? ((line) => {
+          if (deferredLine !== "" || typeof line !== "string" || !line.startsWith("STATUS=PREPARED ")) {
+            fail("F02_KEYCHAIN_OUTPUT_REJECTED");
+          }
+          deferredLine = line;
+        })
+        : print;
+      await prepareCandidate(run, prompt, candidatePrint, {
         allowedModes: new Set([OFFER_ROUTE_ISOLATION_MODE]),
         fixedMode: OFFER_ROUTE_ISOLATION_MODE,
+        ...(keychainSelection.enabled ? {
+          onInputsReady: async (caseInputs) => {
+            await assertF02NamespaceOperationLockOwned(keychainSelection.namespace);
+            keychainPrompt.complete();
+            await assertF02KeychainWindow(
+              keychain, keychainSelection.namespace, dependencies.now || Date.now,
+            );
+            let sandboxAppsUrl = "";
+            let forbiddenAppsUrl = "";
+            try {
+              sandboxAppsUrl = await keychain.read(F02_KEYCHAIN_ITEMS.sandboxAppsUrl, {
+                maxBytes: 2048,
+                pattern: /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]{20,256}\/exec$/,
+              });
+              forbiddenAppsUrl = await keychain.read(F02_KEYCHAIN_ITEMS.forbiddenAppsUrl, {
+                maxBytes: 2048,
+                pattern: /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]{20,256}\/exec$/,
+              });
+              if (sandboxAppsUrl === forbiddenAppsUrl) fail("CASE_INPUT_REJECTED");
+              const [targetDigest, appsUrlDigest, forbiddenAppsUrlDigest] = await Promise.all([
+                computeSandboxFaultTargetDigest(
+                  OFFER_ROUTE_ISOLATION_MODE, caseInputs.canary,
+                  caseInputs.hashSecret, caseInputs.runToken,
+                ),
+                computeSandboxFaultAppsUrlDigest(
+                  OFFER_ROUTE_ISOLATION_MODE, sandboxAppsUrl,
+                  caseInputs.hashSecret, caseInputs.runToken,
+                ),
+                computeSandboxFaultAppsUrlDigest(
+                  OFFER_ROUTE_ISOLATION_MODE, forbiddenAppsUrl,
+                  caseInputs.hashSecret, caseInputs.runToken,
+                ),
+              ]);
+              if (caseInputs.targetDigest !== targetDigest ||
+                  caseInputs.appsUrlDigest !== appsUrlDigest ||
+                  caseInputs.forbiddenAppsUrlDigest !== forbiddenAppsUrlDigest ||
+                  appsUrlDigest === forbiddenAppsUrlDigest) fail("CASE_INPUT_REJECTED");
+              await assertF02KeychainWindow(
+                keychain, keychainSelection.namespace, dependencies.now || Date.now,
+              );
+              await keychain.storeNew(
+                F02_KEYCHAIN_ITEMS.operatorLease,
+                processOwner,
+                { maxBytes: 14, pattern: F02_KEYCHAIN_PID_OWNER_PATTERN },
+              );
+              await keychain.assertAbsent([F02_KEYCHAIN_ITEMS.candidateVersion]);
+              await keychain.storeNew(
+                F02_KEYCHAIN_ITEMS.candidateVersion,
+                F02_CANDIDATE_RESERVATION,
+                { maxBytes: 36, pattern: UUID },
+              );
+              await keychain.replaceExact(
+                F02_KEYCHAIN_ITEMS.bundleState,
+                "HELPER_COMPLETE",
+                "OPERATOR_STARTED",
+                { maxBytes: 32, pattern: F02_KEYCHAIN_STATE_PATTERN },
+              );
+            } finally {
+              sandboxAppsUrl = "";
+              forbiddenAppsUrl = "";
+            }
+          },
+          beforeMutation: async () => {
+            await assertF02NamespaceOperationLockOwned(keychainSelection.namespace);
+            await requireLoadedKeychainState("OPERATOR_STARTED");
+            await assertF02KeychainWindow(
+              keychain, keychainSelection.namespace, dependencies.now || Date.now,
+            );
+          },
+          storeCandidate: async (candidateVersionId) => {
+            await keychain.replaceExact(
+              F02_KEYCHAIN_ITEMS.candidateVersion,
+              F02_CANDIDATE_RESERVATION,
+              candidateVersionId,
+              { maxBytes: 36, pattern: UUID },
+            );
+            await keychain.replaceExact(
+              F02_KEYCHAIN_ITEMS.bundleState,
+              "OPERATOR_STARTED",
+              "CANDIDATE_COMPLETE",
+              { maxBytes: 32, pattern: F02_KEYCHAIN_STATE_PATTERN },
+            );
+          },
+          redactCandidate: true,
+        } : {}),
       });
+      if (keychainSelection.enabled) {
+        if (deferredLine !==
+            "STATUS=PREPARED RESULT=SANDBOX_OFFER_ISOLATION_CANDIDATE_READY CANDIDATE_VERSION=[KEYCHAIN]") {
+          fail("F02_KEYCHAIN_OUTPUT_REJECTED");
+        }
+        editToken = "";
+        keychainPrompt = null;
+        keychain = null;
+        print(deferredLine);
+      }
       return 0;
     }
     if (sameArgs(argv, PREPARE_REPLAY_ISOLATION_ARGS)) {
@@ -2366,10 +3084,74 @@ export async function sandboxFaultWindowMain(argv = process.argv.slice(2), depen
       return 0;
     }
     if (sameArgs(argv, DEPLOY_OFFER_ISOLATION_ARGS)) {
-      await deployCandidate(run, prompt, print, {
+      let deferredLine = "";
+      const actionPrint = keychainSelection.enabled
+        ? ((line) => {
+          if (deferredLine !== "" || typeof line !== "string" || !line.startsWith("STATUS=COMPLETE ")) {
+            fail("F02_KEYCHAIN_OUTPUT_REJECTED");
+          }
+          deferredLine = line;
+        })
+        : print;
+      await deployCandidate(run, prompt, actionPrint, {
         allowedModes: new Set([OFFER_ROUTE_ISOLATION_MODE]),
         fixedMode: OFFER_ROUTE_ISOLATION_MODE,
+        ...(keychainSelection.enabled ? {
+          rollbackAmbiguous: false,
+          onInputsReady: async (_caseInputs, inputs) => {
+            await assertF02NamespaceOperationLockOwned(keychainSelection.namespace);
+            keychainPrompt.complete();
+            await assertF02KeychainWindow(
+              keychain, keychainSelection.namespace, dependencies.now || Date.now,
+            );
+            await requireCurrentCoordinatorOwner();
+            const ready = await keychain.read(F02_KEYCHAIN_ITEMS.readyForFinalGo, {
+              maxBytes: 5, pattern: /^READY$/,
+            });
+            const finalGo = await keychain.read(F02_KEYCHAIN_ITEMS.finalGoAccepted, {
+              maxBytes: 8, pattern: /^ACCEPTED$/,
+            });
+            if (ready !== "READY" || finalGo !== "ACCEPTED" ||
+                inputs.candidateVersion === F02_CANDIDATE_RESERVATION) {
+              fail("F02_KEYCHAIN_STATE_REJECTED");
+            }
+            await keychain.assertAbsent([F02_KEYCHAIN_ITEMS.candidateDeployed]);
+            await assertF02KeychainWindow(
+              keychain, keychainSelection.namespace, dependencies.now || Date.now,
+            );
+            await keychain.storeNew(
+              F02_KEYCHAIN_ITEMS.deployLease,
+              "CLAIMED",
+              { maxBytes: 7, pattern: /^CLAIMED$/ },
+            );
+            await requireLoadedKeychainState("COORDINATOR_STARTED");
+          },
+          beforeMutation: async () => {
+            await assertF02NamespaceOperationLockOwned(keychainSelection.namespace);
+            await requireCurrentCoordinatorOwner();
+            await requireLoadedKeychainState("COORDINATOR_STARTED");
+            await assertF02KeychainWindow(
+              keychain, keychainSelection.namespace, dependencies.now || Date.now,
+            );
+          },
+          onComplete: async (inputs) => {
+            await keychain.storeNew(
+              F02_KEYCHAIN_ITEMS.candidateDeployed,
+              inputs.candidateVersion,
+              { maxBytes: 36, pattern: UUID },
+            );
+          },
+        } : {}),
       });
+      if (keychainSelection.enabled) {
+        if (deferredLine !== "STATUS=COMPLETE RESULT=SANDBOX_OFFER_ISOLATION_TRAFFIC_ACTIVE") {
+          fail("F02_KEYCHAIN_OUTPUT_REJECTED");
+        }
+        editToken = "";
+        keychainPrompt = null;
+        keychain = null;
+        print(deferredLine);
+      }
       return 0;
     }
     if (sameArgs(argv, DEPLOY_REPLAY_ISOLATION_ARGS)) {
@@ -2438,24 +3220,462 @@ export async function sandboxFaultWindowMain(argv = process.argv.slice(2), depen
       await deployCandidate(run, prompt, print, { seedKind: O01_SEED_KIND });
       return 0;
     }
-    if (sameArgs(argv, ROLLBACK_ARGS)) {
-      await rollbackCandidate(run, prompt, print, {
+    const rollbackRecoveryMode = sameArgs(argv, ROLLBACK_RECOVERY_ARGS);
+    if (sameArgs(argv, ROLLBACK_ARGS) || rollbackRecoveryMode) {
+      if (rollbackRecoveryMode && !keychainSelection.enabled) {
+        fail("F02_KEYCHAIN_RECOVERY_REQUIRED");
+      }
+      const processAlive = dependencies.isLocalProcessAlive || isLocalProcessAlive;
+      if (typeof processAlive !== "function") {
+        fail("F02_KEYCHAIN_DEPENDENCY_REJECTED");
+      }
+      const rollbackOwner = processOwner;
+      let cleanupRecoveryActive = false;
+      let deferredLine = "";
+      const actionPrint = keychainSelection.enabled
+        ? ((line) => {
+          if (deferredLine !== "" || typeof line !== "string" || !line.startsWith("STATUS=COMPLETE ")) {
+            fail("F02_KEYCHAIN_OUTPUT_REJECTED");
+          }
+          deferredLine = line;
+        })
+        : print;
+      await rollbackCandidate(run, prompt, actionPrint, {
         diagnose: dependencies.diagnoseRollbackLocal || diagnoseRollbackLocal,
+        ...(keychainSelection.enabled ? {
+          onInputsReady: async (inputs) => {
+            await assertF02NamespaceOperationLockOwned(keychainSelection.namespace);
+            keychainPrompt.complete();
+            if (inputs.candidateVersion === F02_CANDIDATE_RESERVATION) {
+              fail("F02_KEYCHAIN_STATE_REJECTED");
+            }
+            if (rollbackRecoveryMode) {
+              const cleanupLeaseExists = await keychain.has(F02_KEYCHAIN_ITEMS.cleanupLease);
+              const cleanupCompleteExists = await keychain.has(
+                F02_KEYCHAIN_ITEMS.cleanupComplete,
+              );
+              if (cleanupCompleteExists) fail("F02_KEYCHAIN_STATE_REJECTED");
+              cleanupRecoveryActive = cleanupLeaseExists;
+              if (!cleanupRecoveryActive) {
+                await keychain.assertAbsent([F02_KEYCHAIN_ITEMS.rollbackComplete]);
+              }
+              const lifecycleOwner = await keychain.read(F02_KEYCHAIN_ITEMS.lifecycleLease, {
+                maxBytes: 26, pattern: F02_KEYCHAIN_LIFECYCLE_OWNER_PATTERN,
+              });
+              const lifecycleMatch = F02_KEYCHAIN_LIFECYCLE_OWNER_PATTERN.exec(lifecycleOwner);
+              const lifecycleKind = lifecycleMatch?.[1] || "";
+              const lifecyclePid = Number(lifecycleMatch?.[2]);
+              if (!Number.isSafeInteger(lifecyclePid)) {
+                fail("F02_KEYCHAIN_STATE_REJECTED");
+              }
+              let lifecycleOwnerAlive = true;
+              try { lifecycleOwnerAlive = processAlive(lifecyclePid); } catch {}
+              if (lifecycleOwnerAlive !== false) {
+                fail("F02_KEYCHAIN_ROLLBACK_OWNER_ACTIVE");
+              }
+              if (lifecycleKind === "COORDINATOR") {
+                if (await keychain.has(F02_KEYCHAIN_ITEMS.coordinatorLease)) {
+                  const coordinatorOwner = await keychain.read(F02_KEYCHAIN_ITEMS.coordinatorLease, {
+                    maxBytes: 14, pattern: F02_KEYCHAIN_PID_OWNER_PATTERN,
+                  });
+                  if (coordinatorOwner !== f02KeychainPidOwner(lifecyclePid)) {
+                    fail("F02_KEYCHAIN_STATE_REJECTED");
+                  }
+                } else if (keychainState !== "CANDIDATE_COMPLETE") {
+                  fail("F02_KEYCHAIN_STATE_REJECTED");
+                }
+              } else {
+                await keychain.assertAbsent([F02_KEYCHAIN_ITEMS.coordinatorLease]);
+              }
+              if (cleanupRecoveryActive) {
+                const cleanupOwner = await keychain.read(F02_KEYCHAIN_ITEMS.cleanupLease, {
+                  maxBytes: 14, pattern: F02_KEYCHAIN_PID_OWNER_PATTERN,
+                });
+                const cleanupOwnerPid = Number(
+                  F02_KEYCHAIN_PID_OWNER_PATTERN.exec(cleanupOwner)?.[1],
+                );
+                let cleanupOwnerAlive = true;
+                try { cleanupOwnerAlive = processAlive(cleanupOwnerPid); } catch {}
+                if (!Number.isSafeInteger(cleanupOwnerPid) || cleanupOwnerAlive !== false) {
+                  fail("F02_KEYCHAIN_ROLLBACK_OWNER_ACTIVE");
+                }
+                const completedBaseline = await keychain.read(
+                  F02_KEYCHAIN_ITEMS.rollbackComplete,
+                  { maxBytes: 36, pattern: UUID },
+                );
+                if (completedBaseline.toLowerCase() !== inputs.baselineVersion.toLowerCase()) {
+                  fail("F02_KEYCHAIN_STATE_REJECTED");
+                }
+                const priorRollbackOwner = await keychain.read(
+                  F02_KEYCHAIN_ITEMS.rollbackLease,
+                  { maxBytes: 14, pattern: F02_KEYCHAIN_PID_OWNER_PATTERN },
+                );
+                const priorRollbackPid = Number(
+                  F02_KEYCHAIN_PID_OWNER_PATTERN.exec(priorRollbackOwner)?.[1],
+                );
+                let priorRollbackAlive = true;
+                try { priorRollbackAlive = processAlive(priorRollbackPid); } catch {}
+                if (!Number.isSafeInteger(priorRollbackPid) || priorRollbackAlive !== false) {
+                  fail("F02_KEYCHAIN_ROLLBACK_OWNER_ACTIVE");
+                }
+                if (priorRollbackPid !== lifecyclePid) {
+                  const priorRecoveryOwner = await keychain.read(
+                    F02_KEYCHAIN_ITEMS.rollbackRecoveryLease,
+                    { maxBytes: 14, pattern: F02_KEYCHAIN_PID_OWNER_PATTERN },
+                  );
+                  if (priorRecoveryOwner !== priorRollbackOwner) {
+                    fail("F02_KEYCHAIN_STATE_REJECTED");
+                  }
+                }
+                const additionalCandidates = [];
+                if (await keychain.has(F02_KEYCHAIN_ITEMS.cleanupCandidateVersion)) {
+                  const cleanupCandidate = await keychain.read(
+                    F02_KEYCHAIN_ITEMS.cleanupCandidateVersion,
+                    { maxBytes: 36, pattern: UUID },
+                  );
+                  if (cleanupCandidate.toLowerCase() === inputs.baselineVersion.toLowerCase() ||
+                      cleanupCandidate.toLowerCase() === inputs.candidateVersion.toLowerCase()) {
+                    fail("F02_KEYCHAIN_STATE_REJECTED");
+                  }
+                  additionalCandidates.push(cleanupCandidate);
+                }
+                await assertF02KeychainWindow(
+                  keychain, keychainSelection.namespace, dependencies.now || Date.now,
+                  { allowPostWindowClosure: true },
+                );
+                await keychain.storeNew(
+                  F02_KEYCHAIN_ITEMS.cleanupRecoveryLease,
+                  rollbackOwner,
+                  { maxBytes: 14, pattern: F02_KEYCHAIN_PID_OWNER_PATTERN },
+                );
+                await requireLoadedKeychainState();
+                return additionalCandidates;
+              }
+              const rollbackClaimed = await keychain.has(F02_KEYCHAIN_ITEMS.rollbackLease);
+              if (rollbackClaimed) {
+                const priorOwner = await keychain.read(F02_KEYCHAIN_ITEMS.rollbackLease, {
+                  maxBytes: 14, pattern: F02_KEYCHAIN_PID_OWNER_PATTERN,
+                });
+                if (priorOwner !== f02KeychainPidOwner(lifecyclePid)) {
+                  fail("F02_KEYCHAIN_STATE_REJECTED");
+                }
+              } else {
+                if (lifecycleKind === "COORDINATOR") {
+                  if (await keychain.has(F02_KEYCHAIN_ITEMS.deployLease)) {
+                    const deployClaim = await keychain.read(F02_KEYCHAIN_ITEMS.deployLease, {
+                      maxBytes: 7, pattern: /^CLAIMED$/,
+                    });
+                    if (deployClaim !== "CLAIMED") fail("F02_KEYCHAIN_STATE_REJECTED");
+                  }
+                } else if (lifecycleKind === "ROLLBACK") {
+                  await keychain.assertAbsent([F02_KEYCHAIN_ITEMS.deployLease]);
+                } else {
+                  fail("F02_KEYCHAIN_STATE_REJECTED");
+                }
+              }
+              await assertF02KeychainWindow(
+                keychain, keychainSelection.namespace, dependencies.now || Date.now,
+                { allowPostWindowClosure: true },
+              );
+              await keychain.storeNew(
+                F02_KEYCHAIN_ITEMS.rollbackRecoveryLease,
+                rollbackOwner,
+                { maxBytes: 14, pattern: F02_KEYCHAIN_PID_OWNER_PATTERN },
+              );
+              if (!rollbackClaimed) {
+                await keychain.storeNew(
+                  F02_KEYCHAIN_ITEMS.rollbackLease,
+                  rollbackOwner,
+                  { maxBytes: 14, pattern: F02_KEYCHAIN_PID_OWNER_PATTERN },
+                );
+              }
+              await requireLoadedKeychainState();
+            } else {
+              await keychain.assertAbsent([F02_KEYCHAIN_ITEMS.rollbackComplete]);
+              await keychain.assertAbsent([
+                F02_KEYCHAIN_ITEMS.rollbackLease,
+                F02_KEYCHAIN_ITEMS.rollbackRecoveryLease,
+              ]);
+              if (keychainState === "CANDIDATE_COMPLETE") {
+                await assertF02KeychainWindow(
+                  keychain, keychainSelection.namespace, dependencies.now || Date.now,
+                  { allowPostWindowClosure: true },
+                );
+                await keychain.storeNew(
+                  F02_KEYCHAIN_ITEMS.lifecycleLease,
+                  rollbackLifecycleOwner,
+                  { maxBytes: 23, pattern: F02_KEYCHAIN_LIFECYCLE_OWNER_PATTERN },
+                );
+                await keychain.assertAbsent([
+                  F02_KEYCHAIN_ITEMS.coordinatorLease,
+                  F02_KEYCHAIN_ITEMS.deployLease,
+                  F02_KEYCHAIN_ITEMS.finalGoAccepted,
+                  F02_KEYCHAIN_ITEMS.candidateDeployed,
+                  F02_KEYCHAIN_ITEMS.requestAttempted,
+                ]);
+              } else {
+                await requireCurrentCoordinatorOwner();
+              }
+              const deployClaimed = await keychain.has(F02_KEYCHAIN_ITEMS.deployLease);
+              if (deployClaimed) {
+                const deployClaim = await keychain.read(F02_KEYCHAIN_ITEMS.deployLease, {
+                  maxBytes: 7, pattern: /^CLAIMED$/,
+                });
+                if (deployClaim !== "CLAIMED") fail("F02_KEYCHAIN_STATE_REJECTED");
+              } else if (keychainState === "CANDIDATE_COMPLETE") {
+                // The lifecycle lease above atomically fenced coordinator startup.
+              } else if (keychainState === "COORDINATOR_STARTED") {
+                await keychain.assertAbsent([
+                  F02_KEYCHAIN_ITEMS.candidateDeployed,
+                  F02_KEYCHAIN_ITEMS.requestAttempted,
+                ]);
+                if (await keychain.has(F02_KEYCHAIN_ITEMS.finalGoAccepted)) {
+                  const finalGo = await keychain.read(F02_KEYCHAIN_ITEMS.finalGoAccepted, {
+                    maxBytes: 8, pattern: /^ACCEPTED$/,
+                  });
+                  if (finalGo !== "ACCEPTED") fail("F02_KEYCHAIN_STATE_REJECTED");
+                }
+              } else {
+                fail("F02_KEYCHAIN_STATE_REJECTED");
+              }
+              await assertF02KeychainWindow(
+                keychain, keychainSelection.namespace, dependencies.now || Date.now,
+                { allowPostWindowClosure: true },
+              );
+              await keychain.storeNew(
+                F02_KEYCHAIN_ITEMS.rollbackLease,
+                rollbackOwner,
+                { maxBytes: 14, pattern: F02_KEYCHAIN_PID_OWNER_PATTERN },
+              );
+              await requireLoadedKeychainState();
+            }
+            return [];
+          },
+          beforeMutation: async () => {
+            await assertF02NamespaceOperationLockOwned(keychainSelection.namespace);
+            await requireLoadedKeychainState();
+            await assertF02KeychainWindow(
+              keychain, keychainSelection.namespace, dependencies.now || Date.now,
+              { allowPostWindowClosure: true },
+            );
+          },
+          onComplete: async (inputs) => {
+            if (cleanupRecoveryActive) {
+              await keychain.storeNew(
+                F02_KEYCHAIN_ITEMS.cleanupComplete,
+                inputs.baselineVersion,
+                { maxBytes: 36, pattern: UUID },
+              );
+            } else {
+              await keychain.storeNew(
+                F02_KEYCHAIN_ITEMS.rollbackComplete,
+                inputs.baselineVersion,
+                { maxBytes: 36, pattern: UUID },
+              );
+            }
+          },
+        } : {}),
       });
+      if (keychainSelection.enabled) {
+        if (!/^STATUS=COMPLETE RESULT=(?:ROLLBACK_ALREADY_CONFIRMED|EXACT_ALL_OFF_ROLLBACK_CONFIRMED)(?:_LOCAL_DIAGNOSTIC_REJECTED)?$/.test(deferredLine)) {
+          fail("F02_KEYCHAIN_OUTPUT_REJECTED");
+        }
+        editToken = "";
+        keychainPrompt = null;
+        keychain = null;
+        print(deferredLine);
+      }
       return 0;
     }
     if (sameArgs(argv, CLEANUP_ARGS)) {
-      await cleanupCandidate(run, prompt, print);
+      let deferredLine = "";
+      const actionPrint = keychainSelection.enabled
+        ? ((line) => {
+          if (deferredLine !== "" || typeof line !== "string" || !line.startsWith("STATUS=COMPLETE ")) {
+            fail("F02_KEYCHAIN_OUTPUT_REJECTED");
+          }
+          deferredLine = line;
+        })
+        : print;
+      await cleanupCandidate(run, prompt, actionPrint, {
+        ...(keychainSelection.enabled ? {
+          onInputsReady: async (inputs) => {
+            await assertF02NamespaceOperationLockOwned(keychainSelection.namespace);
+            keychainPrompt.complete();
+            const processAlive = dependencies.isLocalProcessAlive || isLocalProcessAlive;
+            if (typeof processAlive !== "function") fail("F02_KEYCHAIN_DEPENDENCY_REJECTED");
+            const lifecycleOwner = await keychain.read(F02_KEYCHAIN_ITEMS.lifecycleLease, {
+              maxBytes: 26, pattern: F02_KEYCHAIN_LIFECYCLE_OWNER_PATTERN,
+            });
+            const lifecycleMatch = F02_KEYCHAIN_LIFECYCLE_OWNER_PATTERN.exec(lifecycleOwner);
+            const lifecycleKind = lifecycleMatch?.[1] || "";
+            const lifecyclePid = Number(lifecycleMatch?.[2]);
+            if (!Number.isSafeInteger(lifecyclePid)) fail("F02_KEYCHAIN_STATE_REJECTED");
+            if (lifecycleKind === "COORDINATOR") {
+              if (await keychain.has(F02_KEYCHAIN_ITEMS.coordinatorLease)) {
+                const coordinatorOwner = await keychain.read(F02_KEYCHAIN_ITEMS.coordinatorLease, {
+                  maxBytes: 14, pattern: F02_KEYCHAIN_PID_OWNER_PATTERN,
+                });
+                if (coordinatorOwner !== f02KeychainPidOwner(lifecyclePid)) {
+                  fail("F02_KEYCHAIN_STATE_REJECTED");
+                }
+              } else if (keychainState !== "CANDIDATE_COMPLETE") {
+                fail("F02_KEYCHAIN_STATE_REJECTED");
+              }
+            } else {
+              await keychain.assertAbsent([F02_KEYCHAIN_ITEMS.coordinatorLease]);
+            }
+            const rollbackClaim = await keychain.read(F02_KEYCHAIN_ITEMS.rollbackLease, {
+              maxBytes: 14, pattern: F02_KEYCHAIN_PID_OWNER_PATTERN,
+            });
+            const rollbackOwnerPid = Number(F02_KEYCHAIN_PID_OWNER_PATTERN.exec(rollbackClaim)?.[1]);
+            let predecessorOwner = rollbackClaim;
+            let recoveryOwner = "";
+            if (await keychain.has(F02_KEYCHAIN_ITEMS.rollbackRecoveryLease)) {
+              recoveryOwner = await keychain.read(F02_KEYCHAIN_ITEMS.rollbackRecoveryLease, {
+                maxBytes: 14, pattern: F02_KEYCHAIN_PID_OWNER_PATTERN,
+              });
+              predecessorOwner = recoveryOwner;
+            }
+            if (lifecycleKind === "ROLLBACK" && lifecyclePid !== rollbackOwnerPid &&
+                (recoveryOwner === "" || rollbackClaim !== recoveryOwner)) {
+              fail("F02_KEYCHAIN_STATE_REJECTED");
+            }
+            const predecessorPid = Number(
+              F02_KEYCHAIN_PID_OWNER_PATTERN.exec(predecessorOwner)?.[1],
+            );
+            if (!Number.isSafeInteger(predecessorPid)) fail("F02_KEYCHAIN_STATE_REJECTED");
+            if (predecessorOwner !== processOwner) {
+              let predecessorAlive = true;
+              try { predecessorAlive = processAlive(predecessorPid); } catch {}
+              if (predecessorAlive !== false) fail("F02_KEYCHAIN_ROLLBACK_OWNER_ACTIVE");
+            }
+            const rollbackComplete = await keychain.read(F02_KEYCHAIN_ITEMS.rollbackComplete, {
+              maxBytes: 36, pattern: UUID,
+            });
+            if (!Number.isSafeInteger(rollbackOwnerPid) ||
+                rollbackComplete.toLowerCase() !== inputs.baselineVersion.toLowerCase()) {
+              fail("F02_KEYCHAIN_STATE_REJECTED");
+            }
+            await keychain.assertAbsent([F02_KEYCHAIN_ITEMS.cleanupComplete]);
+            await assertF02KeychainWindow(
+              keychain, keychainSelection.namespace, dependencies.now || Date.now,
+              { allowPostWindowClosure: true },
+            );
+            await keychain.storeNew(
+              F02_KEYCHAIN_ITEMS.cleanupLease,
+              processOwner,
+              { maxBytes: 14, pattern: F02_KEYCHAIN_PID_OWNER_PATTERN },
+            );
+            await requireLoadedKeychainState();
+          },
+          beforeMutation: async () => {
+            await assertF02NamespaceOperationLockOwned(keychainSelection.namespace);
+            await requireLoadedKeychainState();
+            await assertF02KeychainWindow(
+              keychain, keychainSelection.namespace, dependencies.now || Date.now,
+              { allowPostWindowClosure: true },
+            );
+          },
+          onCandidateReady: async (inputs, finalVersionId) => {
+            const originalCandidate = await keychain.read(
+              F02_KEYCHAIN_ITEMS.candidateVersion,
+              { maxBytes: 36, pattern: UUID },
+            );
+            if (finalVersionId.toLowerCase() === inputs.baselineVersion.toLowerCase() ||
+                finalVersionId.toLowerCase() === originalCandidate.toLowerCase()) {
+              fail("F02_KEYCHAIN_STATE_REJECTED");
+            }
+            await keychain.storeNew(
+              F02_KEYCHAIN_ITEMS.cleanupCandidateVersion,
+              finalVersionId,
+              { maxBytes: 36, pattern: UUID },
+            );
+          },
+          onComplete: async (_inputs, finalVersionId) => {
+            const recordedCandidate = await keychain.read(
+              F02_KEYCHAIN_ITEMS.cleanupCandidateVersion,
+              { maxBytes: 36, pattern: UUID },
+            );
+            if (recordedCandidate.toLowerCase() !== finalVersionId.toLowerCase()) {
+              fail("F02_KEYCHAIN_STATE_REJECTED");
+            }
+            await keychain.storeNew(
+              F02_KEYCHAIN_ITEMS.cleanupComplete,
+              finalVersionId,
+              { maxBytes: 36, pattern: UUID },
+            );
+          },
+          onRollbackComplete: async (inputs, rollbackCandidateVersion) => {
+            if (await keychain.has(F02_KEYCHAIN_ITEMS.cleanupCandidateVersion)) {
+              const recordedCandidate = await keychain.read(
+                F02_KEYCHAIN_ITEMS.cleanupCandidateVersion,
+                { maxBytes: 36, pattern: UUID },
+              );
+              if (recordedCandidate.toLowerCase() !== rollbackCandidateVersion.toLowerCase()) {
+                fail("F02_KEYCHAIN_STATE_REJECTED");
+              }
+            }
+            await keychain.storeNew(
+              F02_KEYCHAIN_ITEMS.cleanupComplete,
+              inputs.baselineVersion,
+              { maxBytes: 36, pattern: UUID },
+            );
+          },
+        } : {}),
+      });
+      if (keychainSelection.enabled) {
+        if (deferredLine !== "STATUS=COMPLETE RESULT=SANDBOX_CLEAN_ALL_OFF_DEPLOYED") {
+          fail("F02_KEYCHAIN_OUTPUT_REJECTED");
+        }
+        editToken = "";
+        keychainPrompt = null;
+        keychain = null;
+        print(deferredLine);
+      }
       return 0;
     }
     fail("EXPLICIT_MODE_AND_ACKNOWLEDGEMENTS_REQUIRED");
   } catch (error) {
-    const code = error instanceof OperatorError ? error.code : "OPERATOR_DRIVER_FAILED";
+    editToken = "";
+    keychainPrompt = null;
+    keychain = null;
+    keychainState = "";
+    const code = error instanceof OperatorError
+        ? error.code
+        : /^F02_KEYCHAIN_[A-Z0-9_]{3,80}$/.test(String(error?.code || ""))
+          ? "F02_KEYCHAIN_INPUT_REJECTED"
+          : "OPERATOR_DRIVER_FAILED";
     const exitCode = error instanceof OperatorError ? error.exitCode : 3;
     print(`STATUS=REJECTED RESULT=${code}`);
     return exitCode;
   } finally {
-    restoreTerminal();
+    let cleanupResults = [];
+    try {
+      cleanupResults = await Promise.all([
+        abortF02KeychainSecurityProcesses(),
+        cleanupProcessScope && processScope
+          ? processScope.abortAll()
+          : Promise.resolve(Object.freeze({ ok: true, activeCount: 0 })),
+      ]);
+    } catch {}
+    let cleanupVerified = f02ShutdownReapVerified(...cleanupResults) &&
+      temporaryCleanupTracker?.unverified !== true;
+    editToken = "";
+    keychainPrompt = null;
+    keychain = null;
+    keychainState = "";
+    if (cleanupVerified && privateXdgHome) {
+      try { cleanupPrivateOperatorXdgHome(privateXdgHome); } catch { cleanupVerified = false; }
+    }
+    if (cleanupVerified) {
+      privateXdgHome = "";
+    }
+    if (!cleanupVerified && keychainSelection.enabled &&
+        !retainF02NamespaceOperationLockFailStickySync(keychainSelection.namespace)) {
+      retainF02NamespaceOperationLocksFailStickySync();
+    }
+    restoreTerminalOnly();
   }
 }
 
@@ -2480,22 +3700,59 @@ export const __test = Object.freeze({
   PREPARE_Q02_ISOLATION_ARGS, Q02_ISOLATION_MODE,
   PREPARE_REPLAY_ISOLATION_ARGS, PREPARE_REPLAY_SEED_ARGS, PREPARE_SEED_ARGS,
   QUEUE_CANARY_SENTINEL, QUEUE_MODES, REFUND_BEFORE_PAYMENT_ISOLATION_MODE,
-  RECOVER_LEGACY_BASELINE_ARGS, REPLAY_ISOLATION_MODE, REPLAY_SEED_KIND, ROLLBACK_ARGS, SEED_KIND,
+  RECOVER_LEGACY_BASELINE_ARGS, REPLAY_ISOLATION_MODE, REPLAY_SEED_KIND,
+  ROLLBACK_ARGS, ROLLBACK_RECOVERY_ARGS, SEED_KIND,
   ROLLBACK_F04_APPS_FINALIZE_ARGS, ROLLBACK_F04_RECOVERY_ARGS, ROLLBACK_F04_SEARCH_ARGS,
   ROOT, SANDBOX_ENTRYPOINT, SANDBOX_MIGRATIONS_DIR, STANDING_SECRET_NAMES, WORKER, WRANGLER_VERSION,
   assertAnyCaseCandidate, assertNoWranglerDotenvFiles, assertTraffic, assertVersionMetadata,
   childEnvironment, expectedCandidateVars,
+  cleanupPrivateOperatorXdgHome, createPrivateOperatorXdgHome,
+  defaultRun, f02KeychainWranglerClass, isLocalProcessAlive,
   createTemporaryConfig, renderTemporaryConfig, versionIdFromOutput, versionUploadArgs, wranglerConfigDirectories,
 });
 
 const invokedPath = process.argv[1] ? pathToFileURL(process.argv[1]).href : "";
 if (invokedPath === import.meta.url) {
-  const exitForSignal = (signalCode) => {
-    restoreTerminal();
+  const cliArgs = process.argv.slice(2);
+  const processScope = cliArgs.includes(F02_KEYCHAIN_FLAG) && process.platform !== "win32"
+    ? createProcessScope()
+    : null;
+  let terminating = false;
+  const exitForSignal = async (signalCode) => {
+    if (terminating) return;
+    terminating = true;
+    retainF02NamespaceOperationLocksForShutdownSync();
+    abortF02KeychainSecurityProcessesSync();
+    processScope?.abortAllSync();
+    let descendantResults = [];
+    try {
+      descendantResults = await Promise.all([
+        abortF02KeychainSecurityProcesses(),
+        processScope?.abortAll?.() ||
+          Promise.resolve(Object.freeze({ ok: true, activeCount: 0 })),
+      ]);
+    } catch {}
+    const descendantsReaped = f02ShutdownReapVerified(...descendantResults);
+    let resourcesCleaned = false;
+    if (descendantsReaped) resourcesCleaned = restoreTerminal() === true;
+    else restoreTerminalOnly();
+    let lockClosed = false;
+    if (descendantsReaped && resourcesCleaned) {
+      abortF02NamespaceOperationLocksSync();
+      try { lockClosed = await abortF02NamespaceOperationLocks() === true; } catch {}
+    }
+    if (!lockClosed) return;
     process.exit(128 + signalCode);
   };
-  process.once("exit", restoreTerminal);
-  process.once("SIGINT", () => exitForSignal(2));
-  process.once("SIGTERM", () => exitForSignal(15));
-  process.exitCode = await sandboxFaultWindowMain();
+  process.once("exit", () => {
+    abortF02KeychainSecurityProcessesSync();
+    processScope?.abortAllSync();
+    restoreTerminalOnly();
+    abortF02NamespaceOperationLocksSync();
+  });
+  process.on("SIGINT", () => { void exitForSignal(2); });
+  process.on("SIGTERM", () => { void exitForSignal(15); });
+  process.on("SIGHUP", () => { void exitForSignal(1); });
+  process.exitCode = await sandboxFaultWindowMain(cliArgs,
+    processScope ? { processScope, processScopeOwned: true } : {});
 }

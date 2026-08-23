@@ -1682,7 +1682,8 @@ check("the preparation helper is offline, hidden-input-only, and bounded-output"
   assert.doesNotMatch(preparationSource, /\bfetch\s*\(|https?\.request|process\.env|writeFile|appendFile|createWriteStream/);
   assert.match(preparationSource, /process\.stdin\.setRawMode\(true\)/);
   assert.match(preparationSource, /process\.stdin\.setRawMode\(false\)/);
-  assert.match(preparationSource, /process\.once\("SIGTERM"/);
+  assert.match(preparationSource, /process\.on\("SIGTERM"/);
+  assert.doesNotMatch(preparationSource, /process\.once\("SIGTERM"/);
 
   const selector = "synthetic-event-private-marker-001";
   const sandboxUrl = baseSandboxEnv().APPS_SCRIPT_URL;

@@ -1,6 +1,6 @@
 # Project 2 — activation decision record
 
-Last reviewed: August 22, 2026
+Last reviewed: August 23, 2026
 
 Decision status: **NOT APPROVED**
 
@@ -25,6 +25,8 @@ Technical sources of truth:
 | Window date and UTC start/end | `[REVIEW/FILL]` |
 | Exact reviewed full commit evidence | `[REVIEW/FILL — reference only; no value]` |
 | If F-02: offline PTY-validator PASS bound to that exact reviewed full commit | `[REVIEW/FILL — reference only; no value]` |
+| If F-02 Keychain mode: custody and process-scope validator PASS bound to that exact reviewed full commit | `[REVIEW/FILL — reference only; no value]` |
+| If F-02 Keychain mode: fresh attempt namespace recorded privately, with no raw value in this record | `[REVIEW/FILL — reference only; no value]` |
 | Technical worksheet section independently checked | `[REVIEW/FILL]` |
 | Separate legacy-to-current all-off migration and monitored closure complete, if required | `[REVIEW/FILL]` |
 | All-off baseline and exact rollback target recorded privately | `[REVIEW/FILL]` |
@@ -67,12 +69,17 @@ Record each decision separately. `NOT APPLICABLE` requires a reason in the priva
 | If F-02: run the default-off exact-one-request coordinator and sandbox-only canary gate | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
 | If F-02: run the coordinator's aggregate read-only Queue and D1 evidence checks | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
 | If F-02: direct managed pseudo-terminal rehearsal passed; no Expect/Tcl, pipe or heredoc | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
+| If F-02 Keychain mode: stage one fresh namespaced private bundle and delete it only after closure | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
+| If F-02: Workers Scripts Edit credential for the fixed sandbox operator only | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
+| If F-02: Workers Scripts Read, D1 Read and Queues Read bundle for fixed aggregate observation only | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
 
 Temporary provider authorization must follow the linked least-scope boundary, remain separate from the standing connector and be fully revoked after any result.
 
 If the selected case is F-02, the coordinator must privately bind the approved candidate, synthetic submission ID and coupon to this one window. It may send only consent `no`, must require the candidate's remotely verified canary before transport and must accept only one exact HTTP `400` / `CONSENT_REQUIRED` response. A missing completion handshake, second callback, unexpected response or sent-but-unconfirmed request is not retry authority: it requires immediate rollback. The F-02 request path performs no Turnstile, provider, Apps or Square call and no Queue or D1 mutation. The coordinator separately performs only the aggregate read-only Queue and D1 evidence checks approved in this record; those checks are evidence collection, not request-path business activity, and they do not authorize message inspection or a write. Shared evidence may retain only fixed result/checkpoint names, bounded time, aggregate zero-delta/Queue evidence and either HTTP `400` / request count `1` with the fixed completion handshake, or HTTP `000` / request count `0` for a fixed pre-request stop. For the zero-request path, every candidate-traffic and request checkpoint that was not reached must be recorded exactly as `NOT REACHED`; it must never be represented as a request attempt, success or retry authority. The record must not retain the canary, coupon, URL, request/response body, header, cookie, credential or version ID. This sandbox-only preflight does not change the common production request order.
 
-Before an F-02 final `GO`, run `node scripts/validate-square-sandbox-f02-pty.mjs` from the exact reviewed full commit and record only its fixed local PASS. The live coordinator must then use the same direct managed pseudo-terminal pattern: wait for each exact prompt and manually supply one private value. Do not use Expect, pexpect, Tcl, AppleScript, browser/UI automation, pipes, heredocs or shell-generated prompt matchers, and do not automate or supply live prompt values through arguments, environment variables or files. The validator runs the production coordinator main and default hidden reader inside an isolated pseudo-terminal while replacing every first side-effect boundary with fail-closed tripwires. The dummy rehearsal is not case readiness and grants no credential, candidate, traffic or request authority.
+Before an F-02 final `GO`, run `node scripts/validate-square-sandbox-f02-pty.mjs`, `node scripts/validate-project2-f02-keychain.mjs` and `node scripts/validate-project2-f02-process-scope.mjs` from the exact reviewed full commit and record only their fixed local PASS results. The portable default live coordinator must use the same direct managed pseudo-terminal pattern: wait for each exact prompt and manually supply one private value. The opt-in macOS Keychain path instead stages approved private values in one fresh default-login-Keychain namespace and supplies only fixed nonsecret acknowledgements at its terminal prompts. Do not use Expect, pexpect, Tcl, AppleScript, browser/UI automation, pipes, heredocs or shell-generated prompt matchers to automate private values. Do not automate or supply live prompt values through arguments, environment variables or files. Both modes run the production coordinator main and default hidden reader inside an isolated pseudo-terminal; the Keychain mode additionally binds every child and the one request to one cancellable process scope. The dummy rehearsal is not case readiness and grants no credential, candidate, traffic or request authority.
+
+At `READY_OFFER_ISOLATION_DEPLOY_QUEUES_REPORTED_EMPTY`, stop for the business owner's separate FINAL F-02 SANDBOX GO. In Keychain mode, the exact confirmation supplied after that approval causes the already-running coordinator—not a second ad hoc launcher—to invoke the fixed candidate deploy, permit at most one request, perform the required exact rollback and cleanup, and complete monitored all-off verification before its sole terminal line. A pre-request stop performs no deployment. A post-deploy stop still requires closure, but never authorizes a second request.
 
 ## Queue credentials
 
@@ -83,10 +90,14 @@ Queue access is separate from provider and deployment authority. Do not record c
 | Temporary Queues Read access | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
 | Temporary Queues Write access | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
 | Exact-target DLQ inspect/redrive | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
+| Temporary Workers Scripts Edit access, F-02 fixed sandbox operator only | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
+| Temporary Workers Scripts Read plus D1 Read access, F-02 aggregate observer only | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
 
 Whole-Queue purge, arbitrary replay, message editing and D1 editing are never authorized by this record.
 
 For F-02, complete every field below with a non-identifying private reference only. Do not copy the credential value, account value, Queue ID or operational URL into this record or shared evidence.
+
+F-02 requires two distinct temporary account-restricted credentials. `W` has only Workers Scripts Edit and is injected only into the fixed `spartan-square-connector-sandbox` Wrangler children. `R` has only Workers Scripts Read, D1 Read and Queues Read, with no corresponding write permission, and is injected only into fixed metadata, aggregate `SELECT`-only D1, topology and Queue-metrics reads. The two values must differ and may not be replaced by cached Wrangler OAuth or one combined broad credential. Their approved expiry must cover the derived closure-claim cutoff and bounded settlement/verification of a provider request started before it. Retain both only through terminal rollback, cleanup and monitored all-off closure, then revoke and prove each unusable. The Keychain utility stores or deletes approved values but never creates, broadens, revokes or verifies a provider credential.
 
 | Temporary Queues Read custody field | Private owner record reference |
 | --- | --- |
@@ -132,13 +143,15 @@ A `GO` preauthorizes the rollback operator to stop traffic, restore the reviewed
 
 For F-02, a launcher failure, pseudo-terminal loss or exit before one fixed terminal result is `STOP`, grants no retry and requires the approved rollback if the candidate may be active. The earlier offline PTY PASS grants no credential, candidate, traffic or request authority.
 
+The owner-approved Keychain window must be at least one hour and no more than four hours. Its immutable closure-claim cutoff is `window end + approved window duration`. Required rollback and cleanup may claim one finite action after the case window expires only while the clock remains strictly before that derived cutoff and only through the attempt's durable one-use claims and exact baseline/candidate remote-state checks. The operator rechecks the cutoff after local state and owner-liveness review, immediately before every action claim and immediately before every provider mutation. A provider request started before the cutoff may settle after it, but no later mutation or retry may start. At or after the cutoff no new rollback, recovery or cleanup claim is admitted without new owner authority and fresh exact-state review. An interrupted rollback has one separately claimed immutable recovery path, subject to the same cutoff. A dead cleanup owner may use that same selector only through a separate cleanup-recovery PID claim and only with the exact recorded clean candidate, if one exists. If a durable nonempty operation marker remains, neither recovery may begin until independent exact process/provider review and separately authorized marker disposition. Either recovery is itself single-attempt; an interrupted or ambiguous recovery remains terminal fail-closed and needs new owner authority plus independent exact-state review before any later intervention. Recovery is not a general retry and cannot send a request or select an unrecorded version.
+
 ## Live-window sequence
 
 1. Complete and sign this record for one case/window.
 2. Give private inputs to the custodian and issue only approved temporary credentials.
 3. Confirm the all-off baseline, rollback readiness, isolation and linked worksheet prerequisites.
 4. Hold the final `GO`/`NO-GO`; any changed prerequisite returns to `NO-GO`.
-5. Run only the selected case and retain only permitted bounded evidence. For F-02, start the exact-one-request coordinator in the approved direct pseudo-terminal before candidate deployment; deploy only after its read-only readiness checkpoint, and never send the request manually or retry an ambiguous send. A launcher failure, pseudo-terminal loss or exit before one fixed terminal result is `STOP`, grants no retry and requires the approved rollback if the candidate may be active. The earlier offline PTY PASS grants no credential, candidate, traffic or request authority.
+5. Run only the selected case and retain only permitted bounded evidence. For F-02, start the exact-one-request coordinator in the approved direct pseudo-terminal before candidate deployment. At its read-only readiness checkpoint, obtain the separate owner final `GO`; only then may the same Keychain-mode coordinator invoke the fixed deployment and permit one request. Never send the request manually, launch a second request coordinator or retry an ambiguous send. A launcher failure, pseudo-terminal loss or exit before one fixed terminal result is `STOP`, grants no retry and requires the approved rollback if the candidate may be active. The earlier offline validator passes grant no credential, candidate, traffic or request authority.
 6. Roll back after pass or stop, clean up and revoke temporary authorizations.
 7. Reconcile all-off state, transfer evidence and obtain independent review before another case.
 
@@ -148,7 +161,7 @@ Raw coordinator, operator and Wrangler transcripts are private evidence. Candida
 
 ### F-02 bounded shared-evidence chronology
 
-Complete this table only for F-02. Each row records a fixed code or fixed category plus its UTC time; it never records a canary, coupon, URL, version, credential, request/response body, header, cookie or private locator. If the coordinator stops before candidate traffic or before its fetch-attempt marker, preserve HTTP `000`, requests `0` and the fixed terminal stop, and mark each later checkpoint `NOT REACHED`. Do not invent a handshake or request.
+Complete this table only for F-02. Each row records a fixed code or fixed category plus its UTC time; it never records a canary, coupon, URL, version, credential, request/response body, header, cookie or private locator. If the coordinator stops before candidate traffic or before its durable request-attempt reservation, preserve HTTP `000`, requests `0` and the fixed terminal stop, and mark each later checkpoint `NOT REACHED`. After that reservation, a stopped `REQUESTS=1` means the one request slot was consumed and a fetch may have been attempted; it is not proof of a network call. Do not invent a handshake or request. Only the completion handshake together with terminal PASS confirms that one request occurred.
 
 | Fixed shared checkpoint or closure category | Fixed/count/time-only shared record |
 | --- | --- |
@@ -156,7 +169,7 @@ Complete this table only for F-02. Each row records a fixed code or fixed catego
 | `READY_OFFER_ISOLATION_DEPLOY_QUEUES_REPORTED_EMPTY`, or `NOT REACHED` after a prior fixed stop | `[REVIEW/FILL]` |
 | Fixed candidate-traffic activation result without candidate UUID, or `NOT REACHED` | `[REVIEW/FILL]` |
 | `READY_F02_ONE_REQUEST_CANDIDATE_ACTIVE`, or `NOT REACHED` | `[REVIEW/FILL]` |
-| `OBSERVED_F02_REQUEST_COMPLETION_HANDSHAKE`, HTTP `400`, requests `1`; or HTTP `000`, requests `0`, `NOT REACHED` | `[REVIEW/FILL]` |
+| `OBSERVED_F02_REQUEST_COMPLETION_HANDSHAKE`, HTTP `400`, requests `1` with terminal PASS; or HTTP `000`, conservative request marker `0` or `1`, `NOT REACHED` | `[REVIEW/FILL]` |
 | Terminal fixed pass, stop or inconclusive result | `[REVIEW/FILL]` |
 | Exact rollback and all-off verification | `[REVIEW/FILL]` |
 | Cleanup, credential revocation and three-check unusability proof | `[REVIEW/FILL]` |
@@ -170,7 +183,7 @@ Complete this table only for F-02. Each row records a fixed code or fixed catego
 | Read-only and mutating provider authorizations | `[REVIEW/FILL]` | Full revocation and unusability proof confirmed: `[REVIEW/FILL]` |
 | Queue credentials | `[REVIEW/FILL]` | Revocation confirmed: `[REVIEW/FILL]` |
 | Temporary Apps and fault-window material | `[REVIEW/FILL]` | Disabled/removed as required: `[REVIEW/FILL]` |
-| F-02 conditional completion handshake and aggregate evidence | `[REVIEW/FILL]` | Exact-one request confirmed only if sent; otherwise HTTP `000`, requests `0` and `NOT REACHED` checkpoints confirmed: `[REVIEW/FILL]` |
+| F-02 conditional completion handshake and aggregate evidence | `[REVIEW/FILL]` | Exact-one request confirmed only by handshake plus terminal PASS; otherwise HTTP `000`, conservative request marker `0` or `1` and `NOT REACHED` checkpoints confirmed: `[REVIEW/FILL]` |
 | Raw coordinator/operator/Wrangler transcripts and candidate/rollback outputs | `[REVIEW/FILL]` | Private custody and sanitized shared extract confirmed: `[REVIEW/FILL]` |
 | Shared evidence record | `[REVIEW/FILL]` | Contains only allowed fixed codes, counts and times: `[REVIEW/FILL]` |
 
@@ -189,7 +202,7 @@ Complete this table only for F-02. Each row records a fixed code or fixed catego
 | Closure item | Recorded result |
 | --- | --- |
 | Case result: pass, stop or inconclusive; UTC end time | `[REVIEW/FILL]` |
-| If F-02: actual request count `0` or `1`; completion handshake only if sent; `NOT REACHED` checkpoints and no-retry closure | `[REVIEW/FILL]` |
+| If F-02: conservative request marker `0` or `1`; actual one request only if completion handshake and terminal PASS; `NOT REACHED` checkpoints and no-retry closure | `[REVIEW/FILL]` |
 | If F-02: fixed/count/time-only causal checkpoint chronology complete | `[REVIEW/FILL]` |
 | Exact rollback and all-off verification complete | `[REVIEW/FILL]` |
 | Temporary cleanup and credential revocation complete | `[REVIEW/FILL]` |

@@ -19,6 +19,10 @@ import {
   watchReplayTerminal,
 } from "./observe-square-sandbox-acceptance.mjs";
 import { sendF02DeclinedConsent } from "./run-square-sandbox-f02.mjs";
+import {
+  createProcessScope,
+  PROCESS_RESULT_REASONS,
+} from "./project2-f02-process-scope.mjs";
 
 const configText = readFileSync("square-worker/wrangler.sandbox.toml", "utf8");
 const expected = __test.parseExpectedBoundary(configText);
@@ -1391,6 +1395,92 @@ for (const invalidDependencies of [
   baseDeps({ now: null }),
 ]) {
   await fixedFailure(() => captureSnapshot(invalidDependencies), "STOP_DEPENDENCY_INVALID");
+}
+
+{
+  const processScope = createProcessScope();
+  const processCalls = [];
+  const cloudflareToken = `observer-read-${"r".repeat(40)}`;
+  const commandEnvironment = {
+    PATH: process.env.PATH || "/usr/bin:/bin",
+    CLOUDFLARE_API_TOKEN: cloudflareToken,
+    SQUARE_ACCEPTANCE_QUEUES_READ_TOKEN: cloudflareToken,
+    UNRELATED_SECRET: "must-not-flow",
+  };
+  const output = await __test.defaultCommandRunner({
+    operation: "whoami",
+    accountId,
+    commandEnvironment,
+    processScope,
+    processRunner: async (command, args, options) => {
+      processCalls.push({ command, args, options });
+      return {
+        ok: true,
+        reason: PROCESS_RESULT_REASONS.COMPLETED,
+        exitCode: 0,
+        stdout: JSON.stringify({ loggedIn: true, accounts: [{ id: accountId }] }),
+        stderr: "",
+      };
+    },
+  });
+  assert.equal(JSON.parse(output).accounts[0].id, accountId);
+  assert.equal(processCalls.length, 1);
+  assert.equal(processCalls[0].options.scope, processScope);
+  assert.equal(processCalls[0].options.env.CLOUDFLARE_API_TOKEN, cloudflareToken);
+  assert.equal(Object.hasOwn(processCalls[0].options.env, "SQUARE_ACCEPTANCE_QUEUES_READ_TOKEN"), false);
+  assert.equal(Object.hasOwn(processCalls[0].options.env, "UNRELATED_SECRET"), false);
+  assert.deepEqual(processCalls[0].options.sentinels, [cloudflareToken]);
+
+  for (const reason of [
+    PROCESS_RESULT_REASONS.TIMEOUT,
+    PROCESS_RESULT_REASONS.SCOPE_ABORT,
+    PROCESS_RESULT_REASONS.SENSITIVE_OUTPUT,
+  ]) {
+    await fixedFailure(() => __test.defaultCommandRunner({
+      operation: "whoami",
+      accountId,
+      commandEnvironment,
+      processScope,
+      processRunner: async () => ({
+        ok: false, reason, exitCode: null,
+        stdout: reason === PROCESS_RESULT_REASONS.SENSITIVE_OUTPUT ? cloudflareToken : "",
+        stderr: "",
+      }),
+    }), "STOP_READ_ONLY_COMMAND_FAILED");
+  }
+  await processScope.abortAll();
+}
+
+{
+  const processScope = createProcessScope();
+  let bodySignal;
+  const delayedBodyFetch = async (_url, init) => {
+    bodySignal = init.signal;
+    const body = new ReadableStream({
+      start(controller) {
+        init.signal.addEventListener("abort", () => {
+          controller.error(new Error("dummy scoped body aborted"));
+        }, { once: true });
+      },
+    });
+    return new Response(body, {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  const pendingMetric = __test.queueMetric(
+    mainQueueId,
+    { accountId, token: readToken },
+    new Date(baseNow),
+    delayedBodyFetch,
+    processScope,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(bodySignal?.aborted, false, "scope lease remains live after response headers");
+  processScope.abortAllSync();
+  await fixedFailure(() => pendingMetric, "STOP_HTTP_RESPONSE_INVALID");
+  assert.equal(bodySignal.aborted, true, "scope abort reaches the still-reading response body");
+  await processScope.abortAll();
 }
 
 const invalidQueueCredentialCases = Object.freeze([
@@ -4918,8 +5008,9 @@ function makeOfferIsolationWatchFixture({
     sleep: async (delay) => { fixtureNow += delay; },
     onCheckpoint: async (checkpoint) => { checkpoints.push(checkpoint); },
     ...(caseId === "F02" ? {
-      executeF02Request: async ({ candidateCanary }) => {
+      executeF02Request: async ({ candidateCanary, verifyBeforeTransport }) => {
         requestCalls.push(candidateCanary);
+        assert.equal(await verifyBeforeTransport(), "F02_CANDIDATE_PRETRANSPORT_CONFIRMED");
         return {
           result_code: "F02_CANARY_DECLINED_CONSENT_CONFIRMED",
           http_status: 400,
@@ -4965,7 +5056,7 @@ assert.deepEqual(offerIsolationF02Result, {
   monitored_zero_delta_stable: true,
   provider_and_apps_evidence: "NOT_OBSERVED",
   queue_evidence: "REPORTED_EMPTY_AT_BASELINE_AND_POST_REQUEST_TERMINAL",
-  polls: 4,
+  polls: 5,
   elapsed_ms: 1,
 });
 assert.deepEqual(offerIsolationF02Run.checkpoints, [
@@ -4974,18 +5065,48 @@ assert.deepEqual(offerIsolationF02Run.checkpoints, [
   { ok: true, result_code: "OBSERVED_F02_REQUEST_COMPLETION_HANDSHAKE" },
 ]);
 assert.deepEqual(offerIsolationF02Run.requestCalls, [offerIsolationCanary]);
-assert.equal(offerIsolationF02Run.calls.length, 34,
+assert.equal(offerIsolationF02Run.calls.length, 43,
   "successful F02 watch stays within its fixed command ceiling");
-assert.equal(offerIsolationF02Run.fetchCalls.length, 12,
+assert.equal(offerIsolationF02Run.fetchCalls.length, 16,
   "successful F02 watch performs predeploy, active-pre-request and terminal Queue snapshots");
+
+const offerIsolationF02IntegratedActive = makeOfferIsolationWatchFixture({
+  caseId: "F02",
+  options: { candidateActiveAfterReady: true },
+});
+assert.equal((await watchOfferIsolation(
+  offerIsolationBaseline,
+  offerIsolationF02IntegratedActive.dependencies,
+  offerIsolationF02IntegratedActive.options,
+)).result_code, "PASS_F02_CANARY_DECLINED_CONSENT_NO_LOCAL_DELTA",
+"the integrated READY callback may return only after candidate deployment is already active");
+
+const offerIsolationF02IntegratedAlternated = makeOfferIsolationWatchFixture({
+  caseId: "F02",
+  activeValues: [
+    versionId, versionId, versionId,
+    ...Array.from({ length: 12 }, () => offerIsolationVersionId),
+  ],
+  options: { candidateActiveAfterReady: true },
+});
+await fixedFailure(() => watchOfferIsolation(
+  offerIsolationBaseline,
+  offerIsolationF02IntegratedAlternated.dependencies,
+  offerIsolationF02IntegratedAlternated.options,
+), "STOP_OFFER_ISOLATION_VERSION_ALTERNATED");
+assert.equal(offerIsolationF02IntegratedAlternated.requestCalls.length, 0,
+  "a baseline poll after an in-process verified deployment stops before any request");
 
 const offerIsolationF02Composed = makeOfferIsolationWatchFixture({ caseId: "F02" });
 let offerIsolationF02ComposedFetches = 0;
-offerIsolationF02Composed.dependencies.executeF02Request = ({ candidateCanary }) =>
+offerIsolationF02Composed.dependencies.executeF02Request = ({
+  candidateCanary, verifyBeforeTransport,
+}) =>
   sendF02DeclinedConsent({
     candidateCanary,
     submissionId: offerIsolationCanary,
     couponCode: "OWNERTEST-001",
+    verifyBeforeTransport,
     fetchImpl: async () => {
       offerIsolationF02ComposedFetches += 1;
       return jsonResponse({ ok: false, error_code: "CONSENT_REQUIRED" }, 400);
@@ -5010,11 +5131,14 @@ const offerIsolationF02PostRequestQueueDrift = makeOfferIsolationWatchFixture({
   ],
 });
 let offerIsolationF02PostDriftFetches = 0;
-offerIsolationF02PostRequestQueueDrift.dependencies.executeF02Request = ({ candidateCanary }) =>
+offerIsolationF02PostRequestQueueDrift.dependencies.executeF02Request = ({
+  candidateCanary, verifyBeforeTransport,
+}) =>
   sendF02DeclinedConsent({
     candidateCanary,
     submissionId: offerIsolationCanary,
     couponCode: "OWNERTEST-001",
+    verifyBeforeTransport,
     fetchImpl: async () => {
       offerIsolationF02PostDriftFetches += 1;
       return jsonResponse({ ok: false, error_code: "CONSENT_REQUIRED" }, 400);
@@ -5024,9 +5148,9 @@ await fixedFailure(() => watchOfferIsolation(
   offerIsolationBaseline,
   offerIsolationF02PostRequestQueueDrift.dependencies,
   offerIsolationF02PostRequestQueueDrift.options,
-), "STOP_OFFER_ISOLATION_UNRELATED_WORK_DETECTED");
-assert.equal(offerIsolationF02PostDriftFetches, 1,
-  "post-request Queue drift stops after exactly one request and never retries");
+), "STOP_OFFER_ISOLATION_F02_PRETRANSPORT_NOT_STABLE");
+assert.equal(offerIsolationF02PostDriftFetches, 0,
+  "fresh post-claim Queue drift verification stops before transport and never retries");
 
 const offerIsolationF03Run = makeOfferIsolationWatchFixture({ caseId: "F03" });
 const offerIsolationF03Result = await watchOfferIsolation(
@@ -5110,8 +5234,11 @@ assert.deepEqual(offerIsolationF02NoCoordinator.calls, [],
   "F02 without the direct request coordinator performs no remote reads");
 
 const offerIsolationF02BadEvidence = makeOfferIsolationWatchFixture({ caseId: "F02" });
-offerIsolationF02BadEvidence.dependencies.executeF02Request = async ({ candidateCanary }) => {
+offerIsolationF02BadEvidence.dependencies.executeF02Request = async ({
+  candidateCanary, verifyBeforeTransport,
+}) => {
   offerIsolationF02BadEvidence.requestCalls.push(candidateCanary);
+  await verifyBeforeTransport();
   return {
     result_code: "F02_CANARY_DECLINED_CONSENT_CONFIRMED",
     http_status: 400,
@@ -5316,8 +5443,8 @@ await fixedFailure(() => watchOfferIsolation(
 ), "STOP_OFFER_ISOLATION_WATCH_TIMEOUT");
 assert.equal(offerIsolationConfirmationTimeout.calls.filter(
   (call) => call.operation === "d1_offer_isolation",
-).length, 3,
-  "offer-isolation confirmation timeout includes the active pre-request checkpoint but no post-dwell read");
+).length, 4,
+  "offer-isolation confirmation timeout includes both pre-request proofs but no post-dwell read");
 
 const offerIsolationStalled = makeOfferIsolationWatchFixture({
   caseId: "F03",
@@ -6397,7 +6524,8 @@ await fixedFailure(() => captureSnapshot(baseDeps({ commandRunner: invalidD1 }))
 const source = readFileSync("scripts/observe-square-sandbox-acceptance.mjs", "utf8");
 assert.match(source, /--execute-read-only/);
 assert.match(source, /defaultCommandRunner/);
-assert.match(source, /env: sanitizedCommandEnvironment\(process\.env, request\.accountId\)/);
+assert.match(source, /env: sanitizedCommandEnvironment\(commandEnvironment, request\.accountId\)/);
+assert.match(source, /request\.commandEnvironment === undefined\s*\?\s*process\.env/);
 assert.match(source, /cwd: REPO_ROOT/);
 assert.match(source, /CONFIG_SHA256/);
 assert.match(source, /assertNoWranglerDotenvFiles\(\)/);

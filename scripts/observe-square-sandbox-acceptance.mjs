@@ -4,6 +4,7 @@ import { lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { PROCESS_RESULT_REASONS, runBoundedProcess } from "./project2-f02-process-scope.mjs";
 
 const execFile = promisify(execFileCallback);
 const CHILD_ENV_ALLOWLIST = new Set([
@@ -2907,82 +2908,108 @@ async function readBoundedResponse(response) {
   }
 }
 
-async function queueMetric(queueId, credential, now, fetchImpl) {
+function scopedHttpLease(processScope) {
+  if (processScope === undefined) return null;
+  if (processScope === null || typeof processScope !== "object" ||
+      typeof processScope.signal?.aborted !== "boolean" ||
+      typeof processScope.scopedTimeoutSignal !== "function") {
+    stop("STOP_DEPENDENCY_INVALID");
+  }
+  return processScope.scopedTimeoutSignal(5_000);
+}
+
+async function queueMetric(queueId, credential, now, fetchImpl, processScope) {
   const url = `${API_ORIGIN}/client/v4/accounts/${credential.accountId}/queues/${queueId}/metrics`;
-  let response;
+  const lease = scopedHttpLease(processScope);
   try {
-    response = await fetchImpl(url, {
-      method: "GET",
-      headers: { Accept: "application/json", Authorization: `Bearer ${credential.token}` },
-      redirect: "error",
-      signal: AbortSignal.timeout(5_000),
+    let response;
+    try {
+      response = await fetchImpl(url, {
+        method: "GET",
+        headers: { Accept: "application/json", Authorization: `Bearer ${credential.token}` },
+        redirect: "error",
+        signal: lease?.signal || AbortSignal.timeout(5_000),
+      });
+    } catch {
+      stop("STOP_QUEUE_METRICS_UNAVAILABLE");
+    }
+    if (!response.ok || !/^application\/json(?:\s*;|$)/i.test(response.headers.get("content-type") || "")) {
+      stop("STOP_QUEUE_METRICS_UNAVAILABLE");
+    }
+    const payload = parseJson(await readBoundedResponse(response), "STOP_QUEUE_METRICS_INVALID");
+    if (!plainRecord(payload) || payload.success !== true || !plainRecord(payload.result) ||
+        (Object.hasOwn(payload, "errors") && (!Array.isArray(payload.errors) || payload.errors.length !== 0))) {
+      stop("STOP_QUEUE_METRICS_INVALID");
+    }
+    const count = boundedInteger(payload.result.backlog_count, 1_000_000_000, "STOP_QUEUE_METRICS_INVALID");
+    const bytes = boundedInteger(payload.result.backlog_bytes, Number.MAX_SAFE_INTEGER, "STOP_QUEUE_METRICS_INVALID");
+    const oldestMs = boundedInteger(payload.result.oldest_message_timestamp_ms, Number.MAX_SAFE_INTEGER,
+      "STOP_QUEUE_METRICS_INVALID");
+    if (oldestMs > now.getTime() + CRON_INTERVAL_MS) stop("STOP_QUEUE_METRICS_INVALID");
+    assertQueueAggregateShape(count, bytes, oldestMs > 0, "STOP_QUEUE_METRICS_INVALID");
+    return Object.freeze({
+      backlog_count: count,
+      backlog_bytes: bytes,
+      oldest_message_at: count > 0 && oldestMs > 0 ? new Date(oldestMs).toISOString() : null,
     });
-  } catch {
-    stop("STOP_QUEUE_METRICS_UNAVAILABLE");
+  } finally {
+    lease?.dispose();
   }
-  if (!response.ok || !/^application\/json(?:\s*;|$)/i.test(response.headers.get("content-type") || "")) {
-    stop("STOP_QUEUE_METRICS_UNAVAILABLE");
-  }
-  const payload = parseJson(await readBoundedResponse(response), "STOP_QUEUE_METRICS_INVALID");
-  if (!plainRecord(payload) || payload.success !== true || !plainRecord(payload.result) ||
-      (Object.hasOwn(payload, "errors") && (!Array.isArray(payload.errors) || payload.errors.length !== 0))) {
-    stop("STOP_QUEUE_METRICS_INVALID");
-  }
-  const count = boundedInteger(payload.result.backlog_count, 1_000_000_000, "STOP_QUEUE_METRICS_INVALID");
-  const bytes = boundedInteger(payload.result.backlog_bytes, Number.MAX_SAFE_INTEGER, "STOP_QUEUE_METRICS_INVALID");
-  const oldestMs = boundedInteger(payload.result.oldest_message_timestamp_ms, Number.MAX_SAFE_INTEGER,
-    "STOP_QUEUE_METRICS_INVALID");
-  if (oldestMs > now.getTime() + CRON_INTERVAL_MS) stop("STOP_QUEUE_METRICS_INVALID");
-  assertQueueAggregateShape(count, bytes, oldestMs > 0, "STOP_QUEUE_METRICS_INVALID");
-  return Object.freeze({
-    backlog_count: count,
-    backlog_bytes: bytes,
-    oldest_message_at: count > 0 && oldestMs > 0 ? new Date(oldestMs).toISOString() : null,
-  });
 }
 
-async function verifyQueueIdentity(queueId, expectedName, credential, fetchImpl) {
+async function verifyQueueIdentity(queueId, expectedName, credential, fetchImpl, processScope) {
   const url = `${API_ORIGIN}/client/v4/accounts/${credential.accountId}/queues/${queueId}`;
-  let response;
+  const lease = scopedHttpLease(processScope);
   try {
-    response = await fetchImpl(url, {
-      method: "GET",
-      headers: { Accept: "application/json", Authorization: `Bearer ${credential.token}` },
-      redirect: "error",
-      signal: AbortSignal.timeout(5_000),
-    });
-  } catch {
-    stop("STOP_QUEUE_IDENTITY_UNAVAILABLE");
-  }
-  if (!response.ok || !/^application\/json(?:\s*;|$)/i.test(response.headers.get("content-type") || "")) {
-    stop("STOP_QUEUE_IDENTITY_UNAVAILABLE");
-  }
-  const payload = parseJson(await readBoundedResponse(response), "STOP_QUEUE_IDENTITY_INVALID");
-  if (!plainRecord(payload) || payload.success !== true || !plainRecord(payload.result) ||
-      (Object.hasOwn(payload, "errors") && (!Array.isArray(payload.errors) || payload.errors.length !== 0)) ||
-      payload.result.queue_id !== queueId || payload.result.queue_name !== expectedName) {
-    stop("STOP_QUEUE_IDENTITY_INVALID");
+    let response;
+    try {
+      response = await fetchImpl(url, {
+        method: "GET",
+        headers: { Accept: "application/json", Authorization: `Bearer ${credential.token}` },
+        redirect: "error",
+        signal: lease?.signal || AbortSignal.timeout(5_000),
+      });
+    } catch {
+      stop("STOP_QUEUE_IDENTITY_UNAVAILABLE");
+    }
+    if (!response.ok || !/^application\/json(?:\s*;|$)/i.test(response.headers.get("content-type") || "")) {
+      stop("STOP_QUEUE_IDENTITY_UNAVAILABLE");
+    }
+    const payload = parseJson(await readBoundedResponse(response), "STOP_QUEUE_IDENTITY_INVALID");
+    if (!plainRecord(payload) || payload.success !== true || !plainRecord(payload.result) ||
+        (Object.hasOwn(payload, "errors") && (!Array.isArray(payload.errors) || payload.errors.length !== 0)) ||
+        payload.result.queue_id !== queueId || payload.result.queue_name !== expectedName) {
+      stop("STOP_QUEUE_IDENTITY_INVALID");
+    }
+  } finally {
+    lease?.dispose();
   }
 }
 
-async function publicConfig(fetchImpl) {
-  let response;
+async function publicConfig(fetchImpl, processScope) {
+  const lease = scopedHttpLease(processScope);
   try {
-    response = await fetchImpl(PUBLIC_CONFIG_URL, {
-      method: "GET", headers: { Accept: "application/json" }, redirect: "error", signal: AbortSignal.timeout(5_000),
-    });
-  } catch {
-    stop("STOP_PUBLIC_CONFIG_UNAVAILABLE");
+    let response;
+    try {
+      response = await fetchImpl(PUBLIC_CONFIG_URL, {
+        method: "GET", headers: { Accept: "application/json" }, redirect: "error",
+        signal: lease?.signal || AbortSignal.timeout(5_000),
+      });
+    } catch {
+      stop("STOP_PUBLIC_CONFIG_UNAVAILABLE");
+    }
+    if (!response.ok || !/^application\/json(?:\s*;|$)/i.test(response.headers.get("content-type") || "")) {
+      stop("STOP_PUBLIC_CONFIG_UNAVAILABLE");
+    }
+    const payload = parseJson(await readBoundedResponse(response), "STOP_PUBLIC_CONFIG_INVALID");
+    if (!plainRecord(payload) || payload.ok !== true || typeof payload.enabled !== "boolean" ||
+        payload.square_offer_contract_version !== "spartan-square-offer-v1-2026-08-17") {
+      stop("STOP_PUBLIC_CONFIG_INVALID");
+    }
+    return Object.freeze({ enabled: payload.enabled });
+  } finally {
+    lease?.dispose();
   }
-  if (!response.ok || !/^application\/json(?:\s*;|$)/i.test(response.headers.get("content-type") || "")) {
-    stop("STOP_PUBLIC_CONFIG_UNAVAILABLE");
-  }
-  const payload = parseJson(await readBoundedResponse(response), "STOP_PUBLIC_CONFIG_INVALID");
-  if (!plainRecord(payload) || payload.ok !== true || typeof payload.enabled !== "boolean" ||
-      payload.square_offer_contract_version !== "spartan-square-offer-v1-2026-08-17") {
-    stop("STOP_PUBLIC_CONFIG_INVALID");
-  }
-  return Object.freeze({ enabled: payload.enabled });
 }
 
 function normalizedFlags(version) {
@@ -3048,13 +3075,50 @@ async function defaultCommandRunner(request) {
     stop("STOP_COMMAND_NOT_ALLOWLISTED");
   }
   assertNoWranglerDotenvFiles();
+  const commandEnvironment = request.commandEnvironment === undefined
+    ? process.env : request.commandEnvironment;
+  const processScope = request.processScope;
+  const scopedExecution = processScope !== undefined || request.processRunner !== undefined;
+  if (!scopedExecution) {
+    try {
+      const result = await execFile("npx", args, {
+        cwd: REPO_ROOT, encoding: "utf8", timeout: 30_000, maxBuffer: MAX_COMMAND_BYTES,
+        env: sanitizedCommandEnvironment(commandEnvironment, request.accountId),
+      });
+      return result.stdout;
+    } catch {
+      stop("STOP_READ_ONLY_COMMAND_FAILED");
+    }
+  }
+  const processRunner = request.processRunner === undefined
+    ? runBoundedProcess : request.processRunner;
+  if (typeof processRunner !== "function" ||
+      (processScope !== undefined &&
+        (processScope === null || typeof processScope !== "object" ||
+          typeof processScope.signal?.aborted !== "boolean"))) {
+    stop("STOP_DEPENDENCY_INVALID");
+  }
+  const sentinels = [...new Set([
+    "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_API_KEY", "CF_API_TOKEN", "CF_API_KEY",
+    "SQUARE_ACCEPTANCE_QUEUES_READ_TOKEN",
+  ].map((name) => commandEnvironment?.[name]).filter((value) =>
+    typeof value === "string" && value.length > 0))];
   try {
-    const result = await execFile("npx", args, {
-      cwd: REPO_ROOT, encoding: "utf8", timeout: 30_000, maxBuffer: MAX_COMMAND_BYTES,
-      env: sanitizedCommandEnvironment(process.env, request.accountId),
+    const result = await processRunner("npx", args, {
+      cwd: REPO_ROOT,
+      timeoutMs: 30_000,
+      maxOutputBytes: MAX_COMMAND_BYTES,
+      env: sanitizedCommandEnvironment(commandEnvironment, request.accountId),
+      ...(processScope === undefined ? {} : { scope: processScope }),
+      sentinels,
     });
+    if (result?.ok !== true || result?.reason !== PROCESS_RESULT_REASONS.COMPLETED ||
+        typeof result.stdout !== "string") {
+      stop("STOP_READ_ONLY_COMMAND_FAILED");
+    }
     return result.stdout;
-  } catch {
+  } catch (error) {
+    if (error instanceof ObserverError) throw error;
     stop("STOP_READ_ONLY_COMMAND_FAILED");
   }
 }
@@ -3120,14 +3184,14 @@ async function readProviderState(commandRunner, expectedBoundary) {
   });
 }
 
-async function readQueueState(credential, now, fetchImpl) {
+async function readQueueState(credential, now, fetchImpl, processScope) {
   await Promise.all([
-    verifyQueueIdentity(credential.mainQueueId, MAIN_QUEUE_NAME, credential, fetchImpl),
-    verifyQueueIdentity(credential.dlqId, DLQ_NAME, credential, fetchImpl),
+    verifyQueueIdentity(credential.mainQueueId, MAIN_QUEUE_NAME, credential, fetchImpl, processScope),
+    verifyQueueIdentity(credential.dlqId, DLQ_NAME, credential, fetchImpl, processScope),
   ]);
   const [main, dlq] = await Promise.all([
-    queueMetric(credential.mainQueueId, credential, now, fetchImpl),
-    queueMetric(credential.dlqId, credential, now, fetchImpl),
+    queueMetric(credential.mainQueueId, credential, now, fetchImpl, processScope),
+    queueMetric(credential.dlqId, credential, now, fetchImpl, processScope),
   ]);
   return Object.freeze({ main, dlq });
 }
@@ -3138,7 +3202,9 @@ async function prepareReadContext(dependencies = {}) {
   }
   const commandRunner = dependencies.commandRunner === undefined
     ? defaultCommandRunner : dependencies.commandRunner;
-  const fetchImpl = dependencies.fetchImpl === undefined ? globalThis.fetch : dependencies.fetchImpl;
+  const rawFetchImpl = dependencies.fetchImpl === undefined ? globalThis.fetch : dependencies.fetchImpl;
+  const processScope = dependencies.processScope;
+  const processRunner = dependencies.processRunner;
   const env = dependencies.env === undefined ? process.env : dependencies.env;
   if (!env || typeof env !== "object" || Array.isArray(env)) stop("STOP_DEPENDENCY_INVALID");
   const configText = assertPinnedConfigText(dependencies.configText ?? readPinnedConfig());
@@ -3146,12 +3212,24 @@ async function prepareReadContext(dependencies = {}) {
   const credential = queueCredential(env);
   sanitizedCommandEnvironment(env, credential.accountId);
   const now = dependencies.now === undefined ? Date.now : dependencies.now;
-  if (typeof now !== "function" || typeof commandRunner !== "function" || typeof fetchImpl !== "function") {
+  if (typeof now !== "function" || typeof commandRunner !== "function" ||
+      typeof rawFetchImpl !== "function" ||
+      (processRunner !== undefined && typeof processRunner !== "function")) {
     stop("STOP_DEPENDENCY_INVALID");
   }
-  const run = (request) => commandRunner({ ...request, accountId: credential.accountId });
+  scopedHttpLease(processScope)?.dispose();
+  const fetchImpl = rawFetchImpl;
+  const run = (request) => commandRunner({
+    ...request,
+    accountId: credential.accountId,
+    ...(commandRunner === defaultCommandRunner ? {
+      commandEnvironment: env,
+      ...(processScope === undefined ? {} : { processScope }),
+      ...(processRunner === undefined ? {} : { processRunner }),
+    } : {}),
+  });
   parseWhoami(await run({ operation: "whoami" }), credential.accountId);
-  return Object.freeze({ credential, expectedBoundary, fetchImpl, now, run });
+  return Object.freeze({ credential, expectedBoundary, fetchImpl, now, processScope, run });
 }
 
 async function readReplayActiveVersion(context, kind, expectedVersionId) {
@@ -3621,7 +3699,8 @@ export async function captureSnapshot(dependencies = {}) {
   if (!Number.isFinite(now.getTime())) stop("STOP_DEPENDENCY_INVALID");
   const [provider, d1, queues, config] = await Promise.all([
     readProviderState(context.run, context.expectedBoundary), readD1(context.run),
-    readQueueState(context.credential, now, context.fetchImpl), publicConfig(context.fetchImpl),
+    readQueueState(context.credential, now, context.fetchImpl, context.processScope),
+    publicConfig(context.fetchImpl, context.processScope),
   ]);
   return Object.freeze({
     contract: CONTRACT,
@@ -3787,7 +3866,7 @@ async function readDynamic(context) {
   if (!Number.isFinite(now.getTime())) stop("STOP_DEPENDENCY_INVALID");
   const [d1, queues] = await Promise.all([
     readD1(context.run),
-    readQueueState(context.credential, now, context.fetchImpl),
+    readQueueState(context.credential, now, context.fetchImpl, context.processScope),
   ]);
   return Object.freeze({
     d1: d1.buckets,
@@ -3813,7 +3892,7 @@ async function readO01Checkpoint(context) {
   if (!Number.isFinite(now.getTime())) stop("STOP_DEPENDENCY_INVALID");
   const [o01, queues] = await Promise.all([
     context.run({ operation: "d1_o01" }).then(parseD1O01),
-    readQueueState(context.credential, now, context.fetchImpl),
+    readQueueState(context.credential, now, context.fetchImpl, context.processScope),
   ]);
   return Object.freeze({ o01, queues, observed_at: now.toISOString() });
 }
@@ -3824,7 +3903,7 @@ async function readO01SeedCheckpoint(context) {
   const [d1, o01, queues] = await Promise.all([
     readD1(context.run),
     context.run({ operation: "d1_o01" }).then(parseD1O01),
-    readQueueState(context.credential, now, context.fetchImpl),
+    readQueueState(context.credential, now, context.fetchImpl, context.processScope),
   ]);
   return Object.freeze({
     d1: d1.buckets,
@@ -3850,7 +3929,7 @@ async function readQ01SeedCheckpoint(context) {
   const [d1, q01, queues] = await Promise.all([
     readD1(context.run),
     context.run({ operation: "d1_q01" }).then(parseD1Q01),
-    readQueueState(context.credential, now, context.fetchImpl),
+    readQueueState(context.credential, now, context.fetchImpl, context.processScope),
   ]);
   return Object.freeze({
     d1: d1.buckets,
@@ -3876,7 +3955,7 @@ async function readP01Checkpoint(context) {
   const [d1, p01, queues] = await Promise.all([
     readD1(context.run),
     context.run({ operation: "d1_p01" }).then(parseD1P01),
-    readQueueState(context.credential, now, context.fetchImpl),
+    readQueueState(context.credential, now, context.fetchImpl, context.processScope),
   ]);
   return Object.freeze({
     d1: d1.buckets,
@@ -3902,7 +3981,7 @@ async function readF04Checkpoint(context) {
   const [d1, f04, queues] = await Promise.all([
     readD1(context.run),
     context.run({ operation: "d1_f04" }).then(parseD1F04),
-    readQueueState(context.credential, now, context.fetchImpl),
+    readQueueState(context.credential, now, context.fetchImpl, context.processScope),
   ]);
   return Object.freeze({
     d1: d1.buckets,
@@ -3929,7 +4008,7 @@ async function readOfferIsolationCheckpoint(context) {
   const [d1, offerIsolation, queues] = await Promise.all([
     readD1(context.run),
     context.run({ operation: "d1_offer_isolation" }).then(parseD1OfferIsolation),
-    readQueueState(context.credential, now, context.fetchImpl),
+    readQueueState(context.credential, now, context.fetchImpl, context.processScope),
   ]);
   return Object.freeze({
     d1: d1.buckets,
@@ -3955,7 +4034,7 @@ async function readP02SeedCheckpoint(context) {
   const [d1, p02, queues] = await Promise.all([
     readD1(context.run),
     context.run({ operation: "d1_p02" }).then(parseD1P02),
-    readQueueState(context.credential, now, context.fetchImpl),
+    readQueueState(context.credential, now, context.fetchImpl, context.processScope),
   ]);
   return Object.freeze({
     d1: d1.buckets,
@@ -3981,7 +4060,7 @@ async function readQ02Checkpoint(context) {
   const [d1, q02, queues] = await Promise.all([
     readD1(context.run),
     context.run({ operation: "d1_q02" }).then(parseD1Q02),
-    readQueueState(context.credential, now, context.fetchImpl),
+    readQueueState(context.credential, now, context.fetchImpl, context.processScope),
   ]);
   return Object.freeze({
     d1: d1.buckets,
@@ -4407,7 +4486,7 @@ export async function watchO01(baseline, dependencies = {}, options = {}) {
       polls += 1;
       if (!o01WaitReady(seed, confirmation.o01)) stop("STOP_O01_WAIT_NOT_STABLE");
       const [queues, guardState] = await Promise.all([
-        readQueueState(context.credential, new Date(context.now()), context.fetchImpl),
+        readQueueState(context.credential, new Date(context.now()), context.fetchImpl, context.processScope),
         context.run({ operation: "d1_guard" }).then(parseD1GuardState),
       ]);
       assertO01GuardState(secondSeed.guard_state, guardState, "wait");
@@ -4444,7 +4523,7 @@ export async function watchO01(baseline, dependencies = {}, options = {}) {
       polls += 1;
       if (!o01TerminalReady(seed, confirmation.o01)) stop("STOP_O01_TERMINAL_NOT_STABLE");
       const [queues, guardState] = await Promise.all([
-        readQueueState(context.credential, new Date(context.now()), context.fetchImpl),
+        readQueueState(context.credential, new Date(context.now()), context.fetchImpl, context.processScope),
         context.run({ operation: "d1_guard" }).then(parseD1GuardState),
       ]);
       assertO01GuardState(secondSeed.guard_state, guardState, "terminal");
@@ -4742,7 +4821,7 @@ export async function watchQ01(baseline, dependencies = {}, options = {}) {
           stop("STOP_Q01_CHECKPOINT_NOT_STABLE");
         }
         const [queues, guardState, traffic] = await Promise.all([
-          readQueueState(context.credential, new Date(context.now()), context.fetchImpl),
+          readQueueState(context.credential, new Date(context.now()), context.fetchImpl, context.processScope),
           context.run({ operation: "d1_guard" }).then(parseD1GuardState),
           readQ01TrafficState(context, baseline.version_id, options.isolationVersionId, true),
         ]);
@@ -5665,10 +5744,13 @@ export async function watchOfferIsolation(baseline, dependencies = {}, options =
   assertWatcherBaseline(baseline);
   const caseId = String(options.caseId || "");
   const candidateVersionId = String(options.candidateVersionId || "");
+  const candidateActiveAfterReady = options.candidateActiveAfterReady ?? false;
   if (!OFFER_ISOLATION_CASES.includes(caseId)) stop("STOP_OFFER_ISOLATION_CASE_REQUIRED");
   if (!VERSION_UUID.test(candidateVersionId) || candidateVersionId === baseline.version_id) {
     stop("STOP_OFFER_ISOLATION_CANDIDATE_VERSION_REQUIRED");
   }
+  if (typeof candidateActiveAfterReady !== "boolean" ||
+      (candidateActiveAfterReady && caseId !== "F02")) stop("STOP_DEPENDENCY_INVALID");
   const executeF02Request = dependencies.executeF02Request;
   if (caseId === "F02" && typeof executeF02Request !== "function") {
     stop("STOP_F02_REQUEST_COORDINATOR_REQUIRED");
@@ -5708,7 +5790,7 @@ export async function watchOfferIsolation(baseline, dependencies = {}, options =
 
   const startedAt = context.now();
   let polls = 0;
-  let candidateSeen = false;
+  let candidateSeen = candidateActiveAfterReady;
   const requireWithinDeadline = () => {
     if (context.now() - startedAt > timeout) stop("STOP_OFFER_ISOLATION_WATCH_TIMEOUT");
   };
@@ -5777,12 +5859,31 @@ export async function watchOfferIsolation(baseline, dependencies = {}, options =
         dependencies, "READY_F02_ONE_REQUEST_CANDIDATE_ACTIVE",
       );
       let requestEvidence;
+      let pretransportVerifyCount = 0;
       try {
         requestEvidence = await executeF02Request(Object.freeze({
           candidateCanary: handoff.canary,
+          verifyBeforeTransport: async () => {
+            pretransportVerifyCount += 1;
+            if (pretransportVerifyCount !== 1) {
+              stop("STOP_OFFER_ISOLATION_F02_PRETRANSPORT_VERIFY_REUSED");
+            }
+            await fullStable(
+              current.dynamic, "STOP_OFFER_ISOLATION_F02_PRETRANSPORT_NOT_STABLE",
+            );
+            return "F02_CANDIDATE_PRETRANSPORT_CONFIRMED";
+          },
         }));
       } catch {
         stop("STOP_F02_REQUEST_COORDINATOR_FAILED");
+      }
+      if (pretransportVerifyCount !== 1) {
+        stop("STOP_OFFER_ISOLATION_F02_PRETRANSPORT_VERIFY_REQUIRED");
+      }
+      if (requestEvidence?.result_code === "PRETRANSPORT_VERIFY_REJECTED" &&
+          requestEvidence?.http_status === 0 && requestEvidence?.request_count === 1 &&
+          requestEvidence?.canary_before_consent === "UNCONFIRMED") {
+        stop("STOP_OFFER_ISOLATION_F02_PRETRANSPORT_NOT_STABLE");
       }
       if (!plainRecord(requestEvidence) ||
           JSON.stringify(Object.keys(requestEvidence).sort()) !== JSON.stringify([
@@ -6450,7 +6551,7 @@ export async function watchP02(baseline, dependencies = {}, options = {}) {
         stop("STOP_P02_SOURCE_CHECKPOINT_NOT_STABLE");
       }
       const [queues, guardState, traffic] = await Promise.all([
-        readQueueState(context.credential, new Date(context.now()), context.fetchImpl),
+        readQueueState(context.credential, new Date(context.now()), context.fetchImpl, context.processScope),
         context.run({ operation: "d1_guard" }).then(parseD1GuardState),
         readP02TrafficState(context, baseline.version_id, options.p02VersionId, true),
       ]);
@@ -6494,7 +6595,7 @@ export async function watchP02(baseline, dependencies = {}, options = {}) {
         stop("STOP_P02_FAULT_CHECKPOINT_NOT_STABLE");
       }
       const [queues, guardState, traffic] = await Promise.all([
-        readQueueState(context.credential, new Date(context.now()), context.fetchImpl),
+        readQueueState(context.credential, new Date(context.now()), context.fetchImpl, context.processScope),
         context.run({ operation: "d1_guard" }).then(parseD1GuardState),
         readP02TrafficState(context, baseline.version_id, options.p02VersionId, true),
       ]);
@@ -6540,7 +6641,7 @@ export async function watchP02(baseline, dependencies = {}, options = {}) {
         stop("STOP_P02_TERMINAL_CHECKPOINT_NOT_STABLE");
       }
       const [queues, guardState, traffic] = await Promise.all([
-        readQueueState(context.credential, new Date(context.now()), context.fetchImpl),
+        readQueueState(context.credential, new Date(context.now()), context.fetchImpl, context.processScope),
         context.run({ operation: "d1_guard" }).then(parseD1GuardState),
         readP02TrafficState(context, baseline.version_id, options.p02VersionId, true),
       ]);
@@ -6948,7 +7049,10 @@ async function readStdinSnapshot() {
   return validateSnapshot(value.snapshot || value);
 }
 
-async function main(args) {
+async function main(args, dependencies = {}) {
+  if (!dependencies || typeof dependencies !== "object" || Array.isArray(dependencies)) {
+    stop("STOP_DEPENDENCY_INVALID");
+  }
   if (args.length === 0) {
     process.stdout.write(`${JSON.stringify({ ok: true, result_code: "OBSERVER_INERT", commands_run: 0 })}\n`);
     return;
@@ -6996,43 +7100,50 @@ async function main(args) {
   }
   let result;
   if (mode === "baseline") {
-    result = { ok: true, result_code: "PASS_BASELINE_CAPTURED", snapshot: await captureSnapshot() };
+    result = { ok: true, result_code: "PASS_BASELINE_CAPTURED", snapshot: await captureSnapshot(dependencies) };
   } else if (mode === "reconcile-exact") {
-    result = reconcileExact(await readStdinSnapshot(), await captureSnapshot());
+    result = reconcileExact(await readStdinSnapshot(), await captureSnapshot(dependencies));
   } else if (mode === "watch-q01") {
     result = await watchQ01(await readStdinSnapshot(), {
+      ...dependencies,
       onCheckpoint: async (checkpoint) => process.stdout.write(`${JSON.stringify(checkpoint)}\n`),
     }, { seedVersionId: args[2], isolationVersionId: args[3] });
   } else if (mode === "watch-p01") {
     result = await watchP01(await readStdinSnapshot(), {
+      ...dependencies,
       onCheckpoint: async (checkpoint) => process.stdout.write(`${JSON.stringify(checkpoint)}\n`),
     }, { faultVersionId: args[2], recoveryVersionId: args[3] });
   } else if (mode === "watch-f04") {
     result = await watchF04(await readStdinSnapshot(), {
+      ...dependencies,
       onCheckpoint: async (checkpoint) => process.stdout.write(`${JSON.stringify(checkpoint)}\n`),
     }, { searchVersionId: args[2], appsVersionId: args[3], recoveryVersionId: args[4] });
   } else if (mode === "watch-offer-isolation") {
     result = await watchOfferIsolation(await readStdinSnapshot(), {
+      ...dependencies,
       onCheckpoint: async (checkpoint) => process.stdout.write(`${JSON.stringify(checkpoint)}\n`),
     }, { caseId: args[2], candidateVersionId: args[3] });
   } else if (mode === "watch-p02") {
     result = await watchP02(await readStdinSnapshot(), {
+      ...dependencies,
       onCheckpoint: async (checkpoint) => process.stdout.write(`${JSON.stringify(checkpoint)}\n`),
     }, { seedVersionId: args[2], p02VersionId: args[3] });
   } else if (mode === "watch-q02") {
     result = await watchQ02(await readStdinSnapshot(), {
+      ...dependencies,
       onCheckpoint: async (checkpoint) => process.stdout.write(`${JSON.stringify(checkpoint)}\n`),
     }, { seedVersionId: args[2], isolationVersionId: args[3] });
   } else if (mode === "watch-replay-seed") {
-    result = await watchReplaySeed(await readStdinSnapshot(), {}, { candidateVersionId: args[2] });
+    result = await watchReplaySeed(await readStdinSnapshot(), dependencies, { candidateVersionId: args[2] });
   } else if (mode === "watch-replay-terminal") {
-    result = await watchReplayTerminal(await readStdinSnapshot(), {}, { candidateVersionId: args[2] });
+    result = await watchReplayTerminal(await readStdinSnapshot(), dependencies, { candidateVersionId: args[2] });
   } else if (mode === "watch-o01") {
     result = await watchO01(await readStdinSnapshot(), {
+      ...dependencies,
       onCheckpoint: async (checkpoint) => process.stdout.write(`${JSON.stringify(checkpoint)}\n`),
     }, { seedVersionId: args[2], isolationVersionId: args[3] });
   } else if (mode === "verify-cleanup") {
-    result = await verifyCleanup();
+    result = await verifyCleanup(dependencies);
   } else {
     stop("STOP_EXPLICIT_READ_ONLY_MODE_REQUIRED");
   }
@@ -7143,6 +7254,10 @@ export const __test = Object.freeze({
   verifyQ02VersionBoundary,
   readPinnedConfig,
   sanitizedCommandEnvironment,
+  publicConfig,
+  queueMetric,
+  scopedHttpLease,
+  main,
   validateSnapshot,
 });
 
