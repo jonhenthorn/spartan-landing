@@ -24,6 +24,7 @@ Technical sources of truth:
 | Exact sandbox worksheet case | `[REVIEW/FILL]` |
 | Window date and UTC start/end | `[REVIEW/FILL]` |
 | Exact reviewed full commit evidence | `[REVIEW/FILL — reference only; no value]` |
+| If F-02: offline PTY-validator PASS bound to that exact reviewed full commit | `[REVIEW/FILL — reference only; no value]` |
 | Technical worksheet section independently checked | `[REVIEW/FILL]` |
 | Separate legacy-to-current all-off migration and monitored closure complete, if required | `[REVIEW/FILL]` |
 | All-off baseline and exact rollback target recorded privately | `[REVIEW/FILL]` |
@@ -65,10 +66,13 @@ Record each decision separately. `NOT APPLICABLE` requires a reason in the priva
 | Send or replay only the selected case request | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
 | If F-02: run the default-off exact-one-request coordinator and sandbox-only canary gate | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
 | If F-02: run the coordinator's aggregate read-only Queue and D1 evidence checks | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
+| If F-02: direct managed pseudo-terminal rehearsal passed; no Expect/Tcl, pipe or heredoc | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
 
 Temporary provider authorization must follow the linked least-scope boundary, remain separate from the standing connector and be fully revoked after any result.
 
 If the selected case is F-02, the coordinator must privately bind the approved candidate, synthetic submission ID and coupon to this one window. It may send only consent `no`, must require the candidate's remotely verified canary before transport and must accept only one exact HTTP `400` / `CONSENT_REQUIRED` response. A missing completion handshake, second callback, unexpected response or sent-but-unconfirmed request is not retry authority: it requires immediate rollback. The F-02 request path performs no Turnstile, provider, Apps or Square call and no Queue or D1 mutation. The coordinator separately performs only the aggregate read-only Queue and D1 evidence checks approved in this record; those checks are evidence collection, not request-path business activity, and they do not authorize message inspection or a write. Shared evidence may retain only fixed result/checkpoint names, bounded time, aggregate zero-delta/Queue evidence and either HTTP `400` / request count `1` with the fixed completion handshake, or HTTP `000` / request count `0` for a fixed pre-request stop. For the zero-request path, every candidate-traffic and request checkpoint that was not reached must be recorded exactly as `NOT REACHED`; it must never be represented as a request attempt, success or retry authority. The record must not retain the canary, coupon, URL, request/response body, header, cookie, credential or version ID. This sandbox-only preflight does not change the common production request order.
+
+Before an F-02 final `GO`, run `node scripts/validate-square-sandbox-f02-pty.mjs` from the exact reviewed full commit and record only its fixed local PASS. The live coordinator must then use the same direct managed pseudo-terminal pattern: wait for each exact prompt and manually supply one private value. Do not use Expect, pexpect, Tcl, AppleScript, browser/UI automation, pipes, heredocs or shell-generated prompt matchers, and do not automate or supply live prompt values through arguments, environment variables or files. The validator runs the production coordinator main and default hidden reader inside an isolated pseudo-terminal while replacing every first side-effect boundary with fail-closed tripwires. The dummy rehearsal is not case readiness and grants no credential, candidate, traffic or request authority.
 
 ## Queue credentials
 
@@ -126,13 +130,15 @@ A `GO` preauthorizes the rollback operator to stop traffic, restore the reviewed
 - Backup person able to initiate rollback: `[REVIEW/FILL]`
 - Owner understands that rollback preserves evidence rather than deleting business/provider records: `[REVIEW/FILL]`
 
+For F-02, a launcher failure, pseudo-terminal loss or exit before one fixed terminal result is `STOP`, grants no retry and requires the approved rollback if the candidate may be active. The earlier offline PTY PASS grants no credential, candidate, traffic or request authority.
+
 ## Live-window sequence
 
 1. Complete and sign this record for one case/window.
 2. Give private inputs to the custodian and issue only approved temporary credentials.
 3. Confirm the all-off baseline, rollback readiness, isolation and linked worksheet prerequisites.
 4. Hold the final `GO`/`NO-GO`; any changed prerequisite returns to `NO-GO`.
-5. Run only the selected case and retain only permitted bounded evidence. For F-02, start the exact-one-request coordinator before candidate deployment; deploy only after its read-only readiness checkpoint, and never send the request manually or retry an ambiguous send.
+5. Run only the selected case and retain only permitted bounded evidence. For F-02, start the exact-one-request coordinator in the approved direct pseudo-terminal before candidate deployment; deploy only after its read-only readiness checkpoint, and never send the request manually or retry an ambiguous send. A launcher failure, pseudo-terminal loss or exit before one fixed terminal result is `STOP`, grants no retry and requires the approved rollback if the candidate may be active. The earlier offline PTY PASS grants no credential, candidate, traffic or request authority.
 6. Roll back after pass or stop, clean up and revoke temporary authorizations.
 7. Reconcile all-off state, transfer evidence and obtain independent review before another case.
 
