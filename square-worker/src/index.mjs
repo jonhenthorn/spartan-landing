@@ -93,7 +93,7 @@ const worker = {
   async scheduled(controller, env, ctx) {
     if (flag(env.SQUARE_CONSUMER_ENABLED)) ctx.waitUntil(maintainDeliveryQueues(env));
     if (flag(env.SQUARE_RECONCILIATION_ENABLED)) ctx.waitUntil(reconcileSquare(env));
-    if (env.DB) ctx.waitUntil(cleanupExpiredPasses(env));
+    if (flag(env.SQUARE_PASS_ENABLED) && env.DB) ctx.waitUntil(cleanupExpiredPasses(env));
   },
 };
 
