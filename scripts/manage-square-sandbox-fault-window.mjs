@@ -65,7 +65,7 @@ const LEGACY_ALL_OFF_VARS = Object.freeze(Object.fromEntries(
   Object.entries(IMMUTABLE_ALL_OFF_VARS)
     .filter(([name]) => name !== "SQUARE_SANDBOX_FAULTS_ENABLED"),
 ));
-const BRANCH = "codex/square-claim-redemption";
+const BRANCH = "main";
 const WORKER = "spartan-square-connector-sandbox";
 const WRANGLER_VERSION = "4.124.0";
 const D1_ID = "9531221e-cabe-4ed4-b7d4-f715798b8945";

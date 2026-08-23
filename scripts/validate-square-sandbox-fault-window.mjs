@@ -220,6 +220,7 @@ function makeRunner({
   ambiguousDeployTrafficId = "",
   ambiguousDeployTrafficVersions = null,
   secretBulkEcho = false,
+  gitBranch = driverTest.BRANCH,
   gitStatus = "",
   account = ACCOUNT,
   uploadConfigMutation = "",
@@ -243,6 +244,7 @@ function makeRunner({
       : null,
     ambiguousDeployAttempts: 0,
     secretBulkEcho,
+    gitBranch,
     gitStatus,
     account,
     uploadConfigMutation,
@@ -256,7 +258,7 @@ function makeRunner({
     state.calls.push(call);
     if (command === "git") {
       if (args.join(" ") === "rev-parse --show-toplevel") return { code: 0, stdout: `${driverTest.ROOT}\n`, stderr: "" };
-      if (args.join(" ") === "branch --show-current") return { code: 0, stdout: `${driverTest.BRANCH}\n`, stderr: "" };
+      if (args.join(" ") === "branch --show-current") return { code: 0, stdout: `${state.gitBranch}\n`, stderr: "" };
       if (args.join(" ") === "rev-parse HEAD") return { code: 0, stdout: `${COMMIT}\n`, stderr: "" };
       if (args.join(" ") === "status --porcelain=v1 --untracked-files=all") {
         return { code: 0, stdout: state.gitStatus, stderr: "" };
@@ -1371,6 +1373,11 @@ check("the exact generated temporary config resolves repository paths and passes
 });
 
 check("account and worktree drift fail closed before mutation", async () => {
+  assert.equal(driverTest.BRANCH, "main", "the merged operator must require the main branch");
+  const procedure = readFileSync(resolve(driverTest.ROOT, "docs/SQUARE-SANDBOX-FAULT-HOOKS.md"), "utf8");
+  assert.match(procedure, /The check requires the exact `main` branch,/);
+  assert.doesNotMatch(procedure, /codex\/square-claim-redemption/);
+
   const wrongAccount = makeRunner({ account: "9".repeat(32) });
   const accountResult = await invokeMain(["--check"], promptFrom(commonPrompt()), wrongAccount);
   assert.equal(accountResult.status, 2);
@@ -1384,6 +1391,15 @@ check("account and worktree drift fail closed before mutation", async () => {
   assert.equal(dirtyResult.status, 2);
   assert.deepEqual(dirtyResult.output, ["STATUS=REJECTED RESULT=GIT_BOUNDARY_REJECTED"]);
   assert.ok(!dirty.state.calls.some((call) => call.args.includes("upload")));
+
+  const staleBranch = makeRunner({ gitBranch: "codex/square-claim-redemption" });
+  const staleBranchResult = await invokeMain(driverTest.PREPARE_OFFER_ISOLATION_ARGS, promptFrom([
+    ...commonPrompt(), CANARY, TARGET_DIGEST, RUN_TOKEN,
+    APPS_DIGEST, FORBIDDEN_DIGEST, HASH_SECRET,
+  ]), staleBranch);
+  assert.equal(staleBranchResult.status, 2);
+  assert.deepEqual(staleBranchResult.output, ["STATUS=REJECTED RESULT=GIT_BOUNDARY_REJECTED"]);
+  assert.ok(!staleBranch.state.calls.some((call) => call.args.includes("upload")));
 });
 
 check("prepare stages one unpublished exact-target candidate and keeps baseline traffic", async () => {
