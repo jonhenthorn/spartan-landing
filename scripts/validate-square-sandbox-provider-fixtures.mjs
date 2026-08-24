@@ -1205,7 +1205,7 @@ function assertPrivateRecordRejected(action) {
   const handle = createPrivateRecordPackage("Q-01");
   const originalBasename = path.basename(handle.directory);
   const suffix = originalBasename.slice(-6);
-  const alternateSuffix = `${suffix[0] === "Z" ? "Y" : "Z"}${suffix.slice(1)}`;
+  const alternateSuffix = `${suffix[0].toUpperCase() === "Z" ? "Y" : "Z"}${suffix.slice(1)}`;
   const renamedDirectory = path.join(os.tmpdir(), `spartan-square-provider-fixture-${alternateSuffix}`);
   assert.equal(fs.existsSync(renamedDirectory), false);
   fs.renameSync(handle.directory, renamedDirectory);

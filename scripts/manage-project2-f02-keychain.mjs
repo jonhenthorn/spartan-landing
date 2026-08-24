@@ -35,6 +35,7 @@ const UTF8 = new TextDecoder("utf-8", { fatal: true });
 const MAX_CLIPBOARD_BYTES = 4096;
 const CLIPBOARD_TIMEOUT_MS = 5_000;
 const INITIALIZE_MAX_SKEW_MS = 5 * 60 * 1_000;
+const HIDDEN_INPUT_TIMEOUT_MS = 5 * 60 * 1_000;
 const ACTIVE_CLIPBOARD_CHILDREN = new Set();
 const CLOSED_CLIPBOARD_CHILDREN = new WeakSet();
 const CLI_SIGNAL_STATE = {
@@ -46,6 +47,14 @@ const ACK = Object.freeze({
   store: "STORE_F02_CLIPBOARD_ITEM_ONCE",
   generate: "GENERATE_F02_PRIVATE_BINDING_ONCE",
   cleanup: "DELETE_F02_KEYCHAIN_NAMESPACE_ONCE",
+});
+const INITIALIZE_STAGE_RESULT = Object.freeze({
+  ACK: "F02_KEYCHAIN_INITIALIZE_ACK_REJECTED",
+  DEPENDENCY: "F02_KEYCHAIN_INITIALIZE_DEPENDENCY_REJECTED",
+  NAMESPACE_CHECK: "F02_KEYCHAIN_INITIALIZE_NAMESPACE_CHECK_REJECTED",
+  FRESHNESS: "F02_KEYCHAIN_INITIALIZE_FRESHNESS_REJECTED",
+  STATE_STORE: "F02_KEYCHAIN_INITIALIZE_STATE_STORE_REJECTED",
+  START_STORE: "F02_KEYCHAIN_INITIALIZE_START_STORE_REJECTED",
 });
 
 const INPUT_VALIDATION = Object.freeze({
@@ -145,56 +154,87 @@ async function assertNamespaceDeletionSafe(keychain, processAlive = isLocalProce
   }
 }
 
-function restoreTerminal() {
+function restoreTerminal(input = process.stdin) {
   try {
-    if (process.stdin.isTTY && process.stdin.isRaw && typeof process.stdin.setRawMode === "function") {
-      process.stdin.setRawMode(false);
+    if (input.isTTY && input.isRaw && typeof input.setRawMode === "function") {
+      input.setRawMode(false);
     }
-    process.stdin.pause();
+    input.pause();
   } catch {}
 }
 
-async function readHiddenLine(promptText, maxLength) {
-  if (!process.stdin.isTTY || !process.stdout.isTTY || typeof process.stdin.setRawMode !== "function") {
+async function readHiddenLine(promptText, maxLength, dependencies = {}) {
+  const input = dependencies.input || process.stdin;
+  const output = dependencies.output || process.stdout;
+  const timeoutMs = dependencies.timeoutMs ?? HIDDEN_INPUT_TIMEOUT_MS;
+  if (!input.isTTY || !output.isTTY || typeof input.setRawMode !== "function") {
     throw new Error("INPUT_REJECTED");
   }
-  process.stdout.write(promptText);
-  process.stdin.setEncoding("utf8");
-  process.stdin.setRawMode(true);
-  process.stdin.resume();
+  if (!Number.isSafeInteger(maxLength) || maxLength < 1 ||
+      !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 ||
+      timeoutMs > HIDDEN_INPUT_TIMEOUT_MS) {
+    throw new Error("INPUT_REJECTED");
+  }
   let value = "";
   try {
+    input.setEncoding("utf8");
+    input.setRawMode(true);
     return await new Promise((resolvePromise, rejectPromise) => {
+      let settled = false;
+      let promptExposed = false;
+      let timeout;
       const cleanup = () => {
-        process.stdin.off("data", onData);
-        restoreTerminal();
-        process.stdout.write("\n");
+        input.off("data", onData);
+        input.off("end", onEnd);
+        input.off("error", onError);
+        clearTimeout(timeout);
+        restoreTerminal(input);
+        if (promptExposed) {
+          try { output.write("\n"); } catch {}
+        }
+      };
+      const finish = (error, result) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (error) rejectPromise(new Error("INPUT_REJECTED"));
+        else resolvePromise(result);
       };
       const onData = (chunk) => {
         for (const character of chunk) {
           if (character === "\u0003" || character === "\u0004") {
-            cleanup();
-            rejectPromise(new Error("INPUT_REJECTED"));
+            finish(new Error("INPUT_REJECTED"));
             return;
           }
           if (character === "\r" || character === "\n") {
-            cleanup();
-            resolvePromise(value);
+            finish(null, value);
             return;
           }
           if (character === "\u007f" || character === "\b") value = value.slice(0, -1);
           else if (value.length >= maxLength) {
-            cleanup();
-            rejectPromise(new Error("INPUT_REJECTED"));
+            finish(new Error("INPUT_REJECTED"));
             return;
           } else value += character;
         }
       };
-      process.stdin.on("data", onData);
+      const onEnd = () => finish(new Error("INPUT_REJECTED"));
+      const onError = () => finish(new Error("INPUT_REJECTED"));
+      input.on("data", onData);
+      input.once("end", onEnd);
+      input.once("error", onError);
+      timeout = setTimeout(() => finish(new Error("INPUT_REJECTED")), timeoutMs);
+      try {
+        promptExposed = true;
+        output.write(promptText);
+        if (settled) return;
+        input.resume();
+      } catch {
+        finish(new Error("INPUT_REJECTED"));
+      }
     });
   } finally {
     value = "";
-    restoreTerminal();
+    restoreTerminal(input);
   }
 }
 
@@ -548,36 +588,58 @@ export async function manageF02KeychainMain(argv = process.argv.slice(2), depend
     print("STATUS=STOPPED RESULT=F02_KEYCHAIN_INPUT_REJECTED");
     return 1;
   }
-  const keychain = dependencies.keychainAccess || createF02KeychainAccess({ namespace });
+  let keychain;
+  try {
+    const createKeychainAccess = dependencies.createKeychainAccess || createF02KeychainAccess;
+    keychain = dependencies.keychainAccess || createKeychainAccess({ namespace });
+  } catch {
+    print(`STATUS=STOPPED RESULT=${exactArgs(argv, ["--initialize", namespace])
+      ? INITIALIZE_STAGE_RESULT.DEPENDENCY
+      : "F02_KEYCHAIN_INPUT_REJECTED"}`);
+    return 1;
+  }
   try {
     if (exactArgs(argv, ["--initialize", namespace])) {
-      await requireAck(prompt, ACK.initialize);
-      if (typeof keychain.assertNamespaceEmpty !== "function" || typeof keychain.storeNew !== "function") {
-        throw new Error("INPUT_REJECTED");
+      let initializeStage = "ACK";
+      try {
+        await requireAck(prompt, ACK.initialize);
+        initializeStage = "DEPENDENCY";
+        if (typeof keychain.assertNamespaceEmpty !== "function" ||
+            typeof keychain.storeNew !== "function") {
+          throw new Error("INPUT_REJECTED");
+        }
+        initializeStage = "NAMESPACE_CHECK";
+        await keychain.assertNamespaceEmpty();
+        initializeStage = "FRESHNESS";
+        const startUtc = f02KeychainNamespaceStartUtc(namespace);
+        const currentEpoch = Number(now());
+        const startEpoch = Date.parse(startUtc);
+        if (!Number.isSafeInteger(currentEpoch) || currentEpoch < startEpoch ||
+            currentEpoch - startEpoch > INITIALIZE_MAX_SKEW_MS) {
+          throw new Error("INPUT_REJECTED");
+        }
+        initializeStage = "STATE_STORE";
+        await keychain.storeNew(
+          F02_KEYCHAIN_ITEMS.bundleState,
+          "STAGING",
+          { maxBytes: 32, pattern: F02_KEYCHAIN_STATE_PATTERN },
+        );
+        initializeStage = "START_STORE";
+        await keychain.storeNew(
+          F02_KEYCHAIN_ITEMS.windowStartUtc,
+          startUtc,
+          {
+            maxBytes: 24,
+            pattern: /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/,
+          },
+        );
+        print("STATUS=COMPLETE RESULT=F02_KEYCHAIN_NAMESPACE_INITIALIZED");
+        return 0;
+      } catch {
+        print(`STATUS=STOPPED RESULT=${INITIALIZE_STAGE_RESULT[initializeStage] ||
+          "F02_KEYCHAIN_INPUT_REJECTED"}`);
+        return 1;
       }
-      await keychain.assertNamespaceEmpty();
-      const startUtc = f02KeychainNamespaceStartUtc(namespace);
-      const currentEpoch = Number(now());
-      const startEpoch = Date.parse(startUtc);
-      if (!Number.isSafeInteger(currentEpoch) || currentEpoch < startEpoch ||
-          currentEpoch - startEpoch > INITIALIZE_MAX_SKEW_MS) {
-        throw new Error("INPUT_REJECTED");
-      }
-      await keychain.storeNew(
-        F02_KEYCHAIN_ITEMS.bundleState,
-        "STAGING",
-        { maxBytes: 32, pattern: F02_KEYCHAIN_STATE_PATTERN },
-      );
-      await keychain.storeNew(
-        F02_KEYCHAIN_ITEMS.windowStartUtc,
-        startUtc,
-        {
-          maxBytes: 24,
-          pattern: /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/,
-        },
-      );
-      print("STATUS=COMPLETE RESULT=F02_KEYCHAIN_NAMESPACE_INITIALIZED");
-      return 0;
     }
 
     if (exactArgs(argv, ["--generate-private", namespace])) {
@@ -764,12 +826,14 @@ async function stopF02KeychainCliForSignal(signalCode, dependencies = {}) {
 
 export const __test = Object.freeze({
   ACK,
+  INITIALIZE_STAGE_RESULT,
   INPUT_VALIDATION,
   PBCOPY,
   PBPASTE,
   assertNamespaceDeletionSafe,
   abortClipboardProcesses,
   isLocalProcessAlive,
+  readHiddenLine,
   stopF02KeychainCliForSignal,
 });
 

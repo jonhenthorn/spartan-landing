@@ -4,8 +4,9 @@ import assert from "node:assert/strict";
 import { AsyncResource } from "node:async_hooks";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { rmSync } from "node:fs";
-import { chmod, lstat, mkdtemp, readFile, rmdir, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readFile, readdir, rmdir, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -166,7 +167,7 @@ const securityRun = async (args, input) => {
     assert.equal(values[1], "");
     if (!args.includes("-U") && securityValues.has(account)) return response(45, "", "duplicate\n");
     securityValues.set(account, values[0]);
-    return response(0, "", "password data for new item: ");
+    return response(0, "", keychainTest.STORE_PROMPT_STDERR.toString("utf8"));
   }
   if (operation === "delete-generic-password") {
     if (!securityValues.delete(account)) return response(44, "", "missing\n");
@@ -198,10 +199,22 @@ assert.ok(returnedBuffers.every((buffer) => buffer.every((byte) => byte === 0)))
 assert.ok(inputBuffers.every((buffer) => buffer.every((byte) => byte === 0)));
 assert.equal(
   keychainTest.STORE_PROMPT_STDERR.toString("utf8"),
-  "password data for new item: ",
+  "password data for new item: \r\nretype password for new item: \r\n",
 );
 assert.match(keychainTest.SECURITY_PTY_HELPER, /TIOCSCTTY/);
 assert.match(keychainTest.SECURITY_PTY_HELPER, /os\.tcsetpgrp\(slave,os\.getpgrp\(\)\)/);
+assert.match(keychainTest.SECURITY_PTY_HELPER, /sys\.stdin\.buffer\.readinto\(target\)/);
+assert.match(keychainTest.SECURITY_PTY_HELPER, /memoryview\(secret\)/);
+assert.match(keychainTest.SECURITY_PTY_HELPER, /separator=b'\\r\\n'/);
+assert.match(keychainTest.SECURITY_PTY_HELPER,
+  /retype_prompt=first_prompt\+separator\+second_prompt/);
+assert.match(keychainTest.SECURITY_PTY_HELPER, /expected=retype_prompt\+separator/);
+assert.match(keychainTest.SECURITY_PTY_HELPER, /finally:\n[\s\S]*wipe\(secret\)/);
+assert.match(keychainTest.SECURITY_PTY_HELPER,
+  /payload\.release\(\)\n   payload=None\n   wipe\(secret\)\n   stage=2/,
+  "the helper wipes its source value immediately after the second exact write");
+assert.doesNotMatch(keychainTest.SECURITY_PTY_HELPER, /sys\.stdin\.buffer\.read\(/);
+assert.doesNotMatch(keychainTest.SECURITY_PTY_HELPER, /secret\[offset:\]/);
 assert.doesNotMatch(keychainTest.SECURITY_PTY_HELPER, /shell=True|pexpect|Expect|Tcl/);
 
 {
@@ -218,7 +231,7 @@ assert.doesNotMatch(keychainTest.SECURITY_PTY_HELPER, /shell=True|pexpect|Expect
         return {
           reason: "completed",
           exitCode: 0,
-          stdout: "password data for new item: ",
+          stdout: keychainTest.STORE_PROMPT_STDERR.toString("utf8"),
           stderr: "",
           sensitiveOutput: false,
           groupTerminated: true,
@@ -258,11 +271,21 @@ assert.doesNotMatch(keychainTest.SECURITY_PTY_HELPER, /shell=True|pexpect|Expect
     " chunk=os.read(fd,1)",
     " if not chunk: raise SystemExit(40)",
     " value.extend(chunk)",
+    "os.write(fd,b'\\n')",
+    "os.write(fd,b'retype password for new item: ')",
+    "retyped=bytearray()",
+    "while not retyped.endswith(b'\\n'):",
+    " chunk=os.read(fd,1)",
+    " if not chunk: raise SystemExit(42)",
+    " retyped.extend(chunk)",
+    "os.write(fd,b'\\n')",
     "termios.tcsetattr(fd,termios.TCSANOW,prior)",
     "os.close(fd)",
     "actual=hashlib.sha256(bytes(value[:-1])).hexdigest()",
+    "retyped_actual=hashlib.sha256(bytes(retyped[:-1])).hexdigest()",
     "for index in range(len(value)): value[index]=0",
-    "raise SystemExit(0 if actual==sys.argv[1] else 41)",
+    "for index in range(len(retyped)): retyped[index]=0",
+    "raise SystemExit(0 if actual==sys.argv[1] and retyped_actual==sys.argv[1] else 41)",
   ].join("\n");
   const dummyInput = Buffer.from(`${dummyValue}\n`, "utf8");
   const result = await keychainTest.runSecurityPtyPrompt(
@@ -279,6 +302,120 @@ assert.doesNotMatch(keychainTest.SECURITY_PTY_HELPER, /shell=True|pexpect|Expect
   result.stdout.fill(0);
   result.stderr.fill(0);
   dummyInput.fill(0);
+}
+
+{
+  const pythonPath = keychainTest.selectSecurityPtyPython();
+  const probeRoot = await mkdtemp(join(tmpdir(), "project2-f02-keychain-pty-drift-"));
+  const driftPromptChild = [
+    "import os,sys,termios,time",
+    "mode=sys.argv[1]",
+    "fd=os.open('/dev/tty',os.O_RDWR)",
+    "with open(sys.argv[2],'x',encoding='ascii') as stream: stream.write(str(os.getpid()))",
+    "prior=termios.tcgetattr(fd)",
+    "if mode!='echo':",
+    " hidden=termios.tcgetattr(fd)",
+    " hidden[3]&=~(termios.ECHO|termios.ECHONL)",
+    " if mode=='lf-separator': hidden[1]&=~termios.ONLCR",
+    " termios.tcsetattr(fd,termios.TCSANOW,hidden)",
+    "if mode=='reordered':",
+    " os.write(fd,b'retype password for new item: ')",
+    " time.sleep(60)",
+    " raise SystemExit(50)",
+    "os.write(fd,b'password data for new item: ')",
+    "value=bytearray()",
+    "while not value.endswith(b'\\n'):",
+    " chunk=os.read(fd,1)",
+    " if not chunk: raise SystemExit(51)",
+    " value.extend(chunk)",
+    "for index in range(len(value)): value[index]=0",
+    "if mode!='echo': os.write(fd,b'\\n')",
+    "if mode=='repeated': os.write(fd,b'password data for new item: ')",
+    "elif mode=='extra': os.write(fd,b'retype password for new item: !')",
+    "elif mode=='echo': os.write(fd,b'retype password for new item: ')",
+    "else: raise SystemExit(52)",
+    "time.sleep(60)",
+  ].join("\n");
+  try {
+    for (const mode of ["reordered", "repeated", "extra", "echo", "lf-separator"]) {
+      const pidPath = join(probeRoot, `${mode}.pid`);
+      const dummyValue = `managed-pty-${mode}-dummy`;
+      const dummyInput = Buffer.from(`${dummyValue}\n`, "utf8");
+      const result = await keychainTest.runSecurityPtyPrompt(
+        pythonPath,
+        ["-I", "-S", "-c", driftPromptChild, mode, pidPath],
+        dummyInput,
+        { pythonPath, timeoutMs: 3_000 },
+      );
+      assert.equal(result.code, 74, `${mode} prompt drift is rejected by the bridge`);
+      assert.equal(result.stdout.length, 0);
+      assert.equal(result.stderr.length, 0);
+      assert.equal(result.stdout.includes(Buffer.from(dummyValue, "utf8")), false);
+      assert.equal(result.stderr.includes(Buffer.from(dummyValue, "utf8")), false);
+      const dummyPid = Number(await readFile(pidPath, "ascii"));
+      assert.ok(Number.isSafeInteger(dummyPid) && dummyPid > 1);
+      assert.throws(() => process.kill(dummyPid, 0), (error) => error?.code === "ESRCH",
+        `${mode} prompt drift reaps the native child`);
+      result.stdout.fill(0);
+      result.stderr.fill(0);
+      dummyInput.fill(0);
+    }
+  } finally {
+    rmSync(probeRoot, { recursive: true, force: true });
+  }
+}
+
+{
+  const pythonPath = keychainTest.selectSecurityPtyPython();
+  const probeRoot = await mkdtemp(join(tmpdir(), "project2-f02-keychain-pty-trailing-"));
+  const pidPath = join(probeRoot, "missing-trailing.pid");
+  const missingTrailingSeparatorChild = [
+    "import os,sys,termios",
+    "fd=os.open('/dev/tty',os.O_RDWR)",
+    "with open(sys.argv[1],'x',encoding='ascii') as stream: stream.write(str(os.getpid()))",
+    "prior=termios.tcgetattr(fd)",
+    "hidden=termios.tcgetattr(fd)",
+    "hidden[3]&=~(termios.ECHO|termios.ECHONL)",
+    "termios.tcsetattr(fd,termios.TCSANOW,hidden)",
+    "os.write(fd,b'password data for new item: ')",
+    "first=bytearray()",
+    "while not first.endswith(b'\\n'):",
+    " chunk=os.read(fd,1)",
+    " if not chunk: raise SystemExit(60)",
+    " first.extend(chunk)",
+    "os.write(fd,b'\\n')",
+    "os.write(fd,b'retype password for new item: ')",
+    "second=bytearray()",
+    "while not second.endswith(b'\\n'):",
+    " chunk=os.read(fd,1)",
+    " if not chunk: raise SystemExit(61)",
+    " second.extend(chunk)",
+    "for value in (first,second):",
+    " for index in range(len(value)): value[index]=0",
+    "termios.tcsetattr(fd,termios.TCSANOW,prior)",
+    "os.close(fd)",
+  ].join("\n");
+  const dummyInput = Buffer.from("managed-pty-missing-trailing-dummy\n", "utf8");
+  try {
+    const result = await keychainTest.runSecurityPtyPrompt(
+      pythonPath,
+      ["-I", "-S", "-c", missingTrailingSeparatorChild, pidPath],
+      dummyInput,
+      { pythonPath, timeoutMs: 3_000 },
+    );
+    assert.equal(result.code, 76,
+      "the bridge rejects a successful child that omits the trailing CRLF separator");
+    assert.equal(result.stdout.length, 0);
+    assert.equal(result.stderr.length, 0);
+    const dummyPid = Number(await readFile(pidPath, "ascii"));
+    assert.ok(Number.isSafeInteger(dummyPid) && dummyPid > 1);
+    assert.throws(() => process.kill(dummyPid, 0), (error) => error?.code === "ESRCH");
+    result.stdout.fill(0);
+    result.stderr.fill(0);
+  } finally {
+    dummyInput.fill(0);
+    rmSync(probeRoot, { recursive: true, force: true });
+  }
 }
 
 {
@@ -300,6 +437,7 @@ assert.doesNotMatch(keychainTest.SECURITY_PTY_HELPER, /shell=True|pexpect|Expect
     " if not chunk: raise SystemExit(42)",
     " value.extend(chunk)",
     "for index in range(len(value)): value[index]=0",
+    "os.write(fd,b'\\n')",
     "time.sleep(60)",
     "termios.tcsetattr(fd,termios.TCSANOW,prior)",
   ].join("\n");
@@ -374,14 +512,14 @@ await assert.rejects(
   (error) => error?.code === "F02_KEYCHAIN_ITEM_UNAVAILABLE",
 );
 
-let legacyTwoPromptStored = false;
-const legacyTwoPrompt = createF02KeychainAccess({
+let rejectedSinglePromptStored = false;
+const rejectedSinglePrompt = createF02KeychainAccess({
   namespace: NAMESPACE,
   platform: "darwin",
   securityRun: async (args) => {
     const operation = args[0];
     if (operation === "find-generic-password") {
-      return legacyTwoPromptStored
+      return rejectedSinglePromptStored
         ? { code: 0, stdout: Buffer.from("STAGING\n"), stderr: Buffer.alloc(0) }
         : {
           code: keychainTest.ITEM_NOT_FOUND_CODE,
@@ -390,18 +528,18 @@ const legacyTwoPrompt = createF02KeychainAccess({
         };
     }
     if (operation === "add-generic-password") {
-      legacyTwoPromptStored = true;
+      rejectedSinglePromptStored = true;
       return {
         code: 0,
         stdout: Buffer.alloc(0),
-        stderr: Buffer.from("password data for new item: retype password for new item: "),
+        stderr: Buffer.from("password data for new item: "),
       };
     }
     throw new Error("unexpected operation");
   },
 });
 await assert.rejects(
-  legacyTwoPrompt.storeNew(F02_KEYCHAIN_ITEMS.bundleState, "STAGING", {
+  rejectedSinglePrompt.storeNew(F02_KEYCHAIN_ITEMS.bundleState, "STAGING", {
     maxBytes: 32, pattern: F02_KEYCHAIN_STATE_PATTERN,
   }),
   (error) => error?.code === "F02_KEYCHAIN_STORE_REJECTED",
@@ -637,9 +775,99 @@ const ackPrompt = async (promptText) => {
   if (!match) throw new Error("unexpected prompt");
   return match[1];
 };
+assert.deepEqual(managerTest.INITIALIZE_STAGE_RESULT, {
+  ACK: "F02_KEYCHAIN_INITIALIZE_ACK_REJECTED",
+  DEPENDENCY: "F02_KEYCHAIN_INITIALIZE_DEPENDENCY_REJECTED",
+  NAMESPACE_CHECK: "F02_KEYCHAIN_INITIALIZE_NAMESPACE_CHECK_REJECTED",
+  FRESHNESS: "F02_KEYCHAIN_INITIALIZE_FRESHNESS_REJECTED",
+  STATE_STORE: "F02_KEYCHAIN_INITIALIZE_STATE_STORE_REJECTED",
+  START_STORE: "F02_KEYCHAIN_INITIALIZE_START_STORE_REJECTED",
+});
 
-async function runNodeProbe(source, args) {
-  const child = spawn(process.execPath, ["--input-type=module", "--eval", source, ...args], {
+function makeHiddenLineTty({ onResume, onPrompt } = {}) {
+  const input = new EventEmitter();
+  input.isTTY = true;
+  input.isRaw = false;
+  input.paused = true;
+  input.setEncoding = (encoding) => assert.equal(encoding, "utf8");
+  input.setRawMode = (enabled) => { input.isRaw = enabled; };
+  input.resume = () => {
+    assert.equal(input.listenerCount("data"), 1,
+      "the input listener is armed before the TTY resumes");
+    assert.equal(outputWrites.length, 1,
+      "the prompt is exposed before the TTY resumes");
+    input.paused = false;
+    onResume?.(input);
+  };
+  input.pause = () => { input.paused = true; };
+  const outputWrites = [];
+  const output = {
+    isTTY: true,
+    write(value) {
+      outputWrites.push(value);
+      if (value !== "\n") {
+        assert.equal(input.listenerCount("data"), 1);
+        assert.equal(input.isRaw, true);
+        assert.equal(input.paused, true);
+        onPrompt?.(input, value);
+      }
+      return true;
+    },
+  };
+  return { input, output, outputWrites };
+}
+
+function assertHiddenLineTtyRestored(input) {
+  assert.equal(input.listenerCount("data"), 0);
+  assert.equal(input.listenerCount("end"), 0);
+  assert.equal(input.listenerCount("error"), 0);
+  assert.equal(input.isRaw, false);
+  assert.equal(input.paused, true);
+}
+
+{
+  const acknowledgement = managerTest.ACK.initialize;
+  const promptText = `Type ${acknowledgement} (not secret): `;
+  const { input, output, outputWrites } = makeHiddenLineTty({
+    onPrompt: (_promptInput, value) => assert.equal(value, promptText),
+    onResume: (resumedInput) => resumedInput.emit("data", `${acknowledgement}\n`),
+  });
+  assert.equal(await managerTest.readHiddenLine(promptText, acknowledgement.length, {
+    input, output,
+  }), acknowledgement);
+  assert.deepEqual(outputWrites, [promptText, "\n"]);
+  assertHiddenLineTtyRestored(input);
+}
+
+for (const terminalEvent of ["end", "error"]) {
+  const acknowledgement = managerTest.ACK.initialize;
+  const promptText = `Type ${acknowledgement} (not secret): `;
+  const { input, output, outputWrites } = makeHiddenLineTty({
+    onResume: (resumedInput) => resumedInput.emit(
+      terminalEvent,
+      ...(terminalEvent === "error" ? [new Error("simulated TTY error")] : []),
+    ),
+  });
+  await assert.rejects(managerTest.readHiddenLine(promptText, acknowledgement.length, {
+    input, output,
+  }), /INPUT_REJECTED/, `${terminalEvent} rejects a pending acknowledgement`);
+  assert.deepEqual(outputWrites, [promptText, "\n"]);
+  assertHiddenLineTtyRestored(input);
+}
+
+{
+  const acknowledgement = managerTest.ACK.initialize;
+  const promptText = `Type ${acknowledgement} (not secret): `;
+  const { input, output, outputWrites } = makeHiddenLineTty();
+  await assert.rejects(managerTest.readHiddenLine(promptText, acknowledgement.length, {
+    input, output, timeoutMs: 10,
+  }), /INPUT_REJECTED/, "a hidden acknowledgement cannot hold the namespace lock indefinitely");
+  assert.deepEqual(outputWrites, [promptText, "\n"]);
+  assertHiddenLineTtyRestored(input);
+}
+
+async function runProcessProbe(command, args) {
+  const child = spawn(command, args, {
     env: { PATH: process.env.PATH || "", LANG: "C", LC_ALL: "C" },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -656,6 +884,118 @@ async function runNodeProbe(source, args) {
     stdout: Buffer.concat(stdout),
     stderr: Buffer.concat(stderr),
   });
+}
+
+async function runNodeProbe(source, args) {
+  return runProcessProbe(process.execPath, ["--input-type=module", "--eval", source, ...args]);
+}
+
+{
+  const pythonPath = keychainTest.selectSecurityPtyPython();
+  const managerModuleUrl = new URL("./manage-project2-f02-keychain.mjs", import.meta.url).href;
+  const keychainModuleUrl = new URL("./project2-f02-keychain.mjs", import.meta.url).href;
+  const managerLockRoot = await mkdtemp(join(tmpdir(), "project2-f02-manager-pty-lock-"));
+  const managerPtyChild = [
+    "const [managerUrl,keychainUrl,namespace,lockRoot,nowText]=process.argv.slice(1)",
+    "const {manageF02KeychainMain}=await import(managerUrl)",
+    "const {F02_KEYCHAIN_ITEMS,f02KeychainNamespaceStartUtc}=await import(keychainUrl)",
+    "const values=new Map()",
+    "const keychainAccess={",
+    " async assertNamespaceEmpty(){if(values.size!==0)throw new Error('not empty')},",
+    " async storeNew(account,value){if(values.has(account))throw new Error('duplicate');values.set(account,value)},",
+    "}",
+    "const code=await manageF02KeychainMain(['--initialize',namespace],{",
+    " keychainAccess,operationLockRoot:lockRoot,now:()=>Number(nowText),",
+    "})",
+    "const exact=code===0&&values.size===2&&",
+    " values.get(F02_KEYCHAIN_ITEMS.bundleState)==='STAGING'&&",
+    " values.get(F02_KEYCHAIN_ITEMS.windowStartUtc)===f02KeychainNamespaceStartUtc(namespace)",
+    "if(!exact)process.exitCode=3",
+  ].join("\n");
+  const managerPtyDriver = [
+    "import errno,os,select,signal,sys,time",
+    "node,source,manager_url,keychain_url,namespace,lock_root,now_text=sys.argv[1:]",
+    "prompt=b'Type INITIALIZE_F02_KEYCHAIN_NAMESPACE_ONCE (not secret): '",
+    "ack=b'INITIALIZE_F02_KEYCHAIN_NAMESPACE_ONCE\\n'",
+    "pid,fd=os.forkpty()",
+    "if pid==0:",
+    " env={'PATH':os.environ.get('PATH',''),'LANG':'C','LC_ALL':'C'}",
+    " os.execve(node,[node,'--input-type=module','--eval',source,manager_url,keychain_url,namespace,lock_root,now_text],env)",
+    "output=bytearray()",
+    "sent=False",
+    "status=None",
+    "child_reaped=False",
+    "fd_closed=False",
+    "try:",
+    " deadline=time.monotonic()+5.0",
+    " while True:",
+    "  if time.monotonic()>=deadline: raise SystemExit(80)",
+    "  if status is None:",
+    "   waited,current=os.waitpid(pid,os.WNOHANG)",
+    "   if waited==pid:",
+    "    status=current",
+    "    child_reaped=True",
+    "  try: ready,_,_=select.select([fd],[],[],0.05)",
+    "  except InterruptedError: continue",
+    "  if fd not in ready:",
+    "   if status is not None: break",
+    "   continue",
+    "  try: chunk=os.read(fd,512)",
+    "  except OSError as exc:",
+    "   if exc.errno==errno.EIO: break",
+    "   raise",
+    "  if not chunk: break",
+    "  output.extend(chunk)",
+    "  if len(output)>512: raise SystemExit(81)",
+    "  if not sent:",
+    "   if not prompt.startswith(output): raise SystemExit(82)",
+    "   if output==prompt:",
+    "    os.write(fd,ack)",
+    "    sent=True",
+    " if status is None:",
+    "  _,status=os.waitpid(pid,0)",
+    "  child_reaped=True",
+    " os.close(fd)",
+    " fd_closed=True",
+    " if not sent: raise SystemExit(83)",
+    " offset=0",
+    " while offset<len(output):",
+    "  count=os.write(1,output[offset:])",
+    "  if count<=0: raise SystemExit(84)",
+    "  offset+=count",
+    " code=os.WEXITSTATUS(status) if os.WIFEXITED(status) else 128+os.WTERMSIG(status)",
+    " raise SystemExit(code)",
+    "finally:",
+    " if not child_reaped:",
+    "  try: os.killpg(pid,signal.SIGKILL)",
+    "  except (ProcessLookupError,PermissionError): pass",
+    "  try: os.waitpid(pid,0)",
+    "  except (ChildProcessError,InterruptedError): pass",
+    " if not fd_closed:",
+    "  try: os.close(fd)",
+    "  except OSError: pass",
+    " for index in range(len(output)): output[index]=0",
+  ].join("\n");
+  try {
+    const probe = await runProcessProbe(pythonPath, [
+      "-I", "-S", "-c", managerPtyDriver,
+      process.execPath, managerPtyChild, managerModuleUrl, keychainModuleUrl,
+      NAMESPACE, managerLockRoot, String(NOW),
+    ]);
+    assert.deepEqual(probe.result, { code: 0, signal: null },
+      "the full initializer succeeds through its default hidden reader in a real PTY");
+    assert.equal(probe.stderr.length, 0);
+    const transcript = probe.stdout.toString("utf8").replaceAll("\r\n", "\n");
+    assert.equal(transcript,
+      "Type INITIALIZE_F02_KEYCHAIN_NAMESPACE_ONCE (not secret): \n" +
+      "STATUS=COMPLETE RESULT=F02_KEYCHAIN_NAMESPACE_INITIALIZED\n");
+    assert.equal(transcript.split(managerTest.ACK.initialize).length - 1, 1,
+      "the nonsecret acknowledgement is not echoed by the raw terminal");
+    assert.deepEqual(await readdir(managerLockRoot), [],
+      "the integrated initializer releases its advisory lock cleanly");
+  } finally {
+    rmSync(managerLockRoot, { recursive: true, force: true });
+  }
 }
 
 const operationLockRoot = await mkdtemp(join(tmpdir(), "project2-f02-lock-validator-"));
@@ -1118,16 +1458,61 @@ assert.equal(await manageF02KeychainMain(["--initialize", NAMESPACE], {
   now: () => NOW + (10 * 60 * 1_000),
 }), 1);
 assert.equal(staleMemory.values.size, 0);
-assert.deepEqual(staleOutput, ["STATUS=STOPPED RESULT=F02_KEYCHAIN_INPUT_REJECTED"]);
+assert.deepEqual(staleOutput,
+  ["STATUS=STOPPED RESULT=F02_KEYCHAIN_INITIALIZE_FRESHNESS_REJECTED"]);
 
 const futureMemory = makeMemoryKeychain();
+const futureOutput = [];
 assert.equal(await manageF02KeychainMain(["--initialize", NAMESPACE], {
   keychainAccess: futureMemory,
   readHiddenLine: ackPrompt,
-  print: () => {},
+  print: (line) => futureOutput.push(line),
   now: () => Date.parse(WINDOW_START) - 1,
 }), 1);
 assert.equal(futureMemory.values.size, 0);
+assert.deepEqual(futureOutput,
+  ["STATUS=STOPPED RESULT=F02_KEYCHAIN_INITIALIZE_FRESHNESS_REJECTED"]);
+
+for (const [name, keychainAccess, expected] of [
+  ["dependency", {}, "F02_KEYCHAIN_INITIALIZE_DEPENDENCY_REJECTED"],
+  ["namespace", {
+    async assertNamespaceEmpty() { throw new Error("simulated namespace check failure"); },
+    async storeNew() { throw new Error("must not store"); },
+  }, "F02_KEYCHAIN_INITIALIZE_NAMESPACE_CHECK_REJECTED"],
+  ["state-store", {
+    async assertNamespaceEmpty() {},
+    async storeNew() { throw new Error("simulated state store failure"); },
+  }, "F02_KEYCHAIN_INITIALIZE_STATE_STORE_REJECTED"],
+]) {
+  const phaseOutput = [];
+  assert.equal(await manageF02KeychainMain(["--initialize", NAMESPACE], {
+    keychainAccess,
+    readHiddenLine: ackPrompt,
+    print: (line) => phaseOutput.push(line),
+    now: () => NOW,
+  }), 1, `${name} phase stops`);
+  assert.deepEqual(phaseOutput, [`STATUS=STOPPED RESULT=${expected}`]);
+}
+
+const initializeConstructorOutput = [];
+assert.equal(await manageF02KeychainMain(["--initialize", NAMESPACE], {
+  createKeychainAccess: () => { throw new Error("simulated Keychain constructor failure"); },
+  readHiddenLine: ackPrompt,
+  print: (line) => initializeConstructorOutput.push(line),
+  now: () => NOW,
+}), 1);
+assert.deepEqual(initializeConstructorOutput,
+  ["STATUS=STOPPED RESULT=F02_KEYCHAIN_INITIALIZE_DEPENDENCY_REJECTED"]);
+
+const initializeAckOutput = [];
+assert.equal(await manageF02KeychainMain(["--initialize", NAMESPACE], {
+  keychainAccess: makeMemoryKeychain(),
+  readHiddenLine: async () => "WRONG_ACK",
+  print: (line) => initializeAckOutput.push(line),
+  now: () => NOW,
+}), 1);
+assert.deepEqual(initializeAckOutput,
+  ["STATUS=STOPPED RESULT=F02_KEYCHAIN_INITIALIZE_ACK_REJECTED"]);
 
 const partialInitializeMemory = makeMemoryKeychain();
 const partialInitializeStore = partialInitializeMemory.storeNew.bind(partialInitializeMemory);
@@ -1146,6 +1531,8 @@ assert.equal(await manageF02KeychainMain(["--initialize", NAMESPACE], {
 }), 1);
 assert.equal(partialInitializeMemory.values.get(F02_KEYCHAIN_ITEMS.bundleState), "STAGING");
 assert.equal(partialInitializeMemory.values.has(F02_KEYCHAIN_ITEMS.windowStartUtc), false);
+assert.deepEqual(partialInitializeOutput,
+  ["STATUS=STOPPED RESULT=F02_KEYCHAIN_INITIALIZE_START_STORE_REJECTED"]);
 let partialInitializeClipboardReads = 0;
 let partialInitializeClipboardClears = 0;
 assert.equal(await manageF02KeychainMain([
@@ -1858,5 +2245,5 @@ try {
 }
 
 process.stdout.write(
-  "Project 2 F-02 Keychain validation passed: namespace freshness, managed native-prompt PTY with non-echoing input and descendant reaping, durable helper-death fencing, advisory-lock serialization and last-child reap, fixed labels, stdin-only writes, exact absence handling, buffer clearing, clipboard custody, one-use claims, redacted helper output, READY-time final GO, lifecycle-guarded namespace deletion, and verified cleanup.\n",
+  "Project 2 F-02 Keychain validation passed: namespace freshness, managed native-prompt PTY with an exact CRLF-delimited two-prompt/retype same-value handshake, copy-minimized input and failure-path wiping, prompt/separator drift rejection and descendant reaping, a full default-reader PTY initialization, bounded hidden input with its listener armed before prompt exposure and resume, stage-specific initialization diagnostics, durable helper-death fencing, advisory-lock serialization and last-child reap, fixed labels, stdin-only writes, exact absence handling, buffer clearing, clipboard custody, one-use claims, redacted helper output, READY-time final GO, lifecycle-guarded namespace deletion, and verified cleanup.\n",
 );
