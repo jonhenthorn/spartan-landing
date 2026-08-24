@@ -87,7 +87,7 @@ const ITEM_NOT_FOUND_STDERR = Buffer.from(
   "utf8",
 );
 const STORE_PROMPT_STDERR = Buffer.from(
-  "password data for new item: retype password for new item: ",
+  "password data for new item: \r\nretype password for new item: \r\n",
   "utf8",
 );
 const DELETE_SUCCESS_STDERR = Buffer.from("password has been deleted.\n", "utf8");
@@ -95,7 +95,9 @@ const SECURITY_PTY_HELPER = [
   "import errno,fcntl,os,select,signal,sys,termios,time",
   "first_prompt=b'password data for new item: '",
   "second_prompt=b'retype password for new item: '",
-  "expected=first_prompt+second_prompt",
+  "separator=b'\\r\\n'",
+  "retype_prompt=first_prompt+separator+second_prompt",
+  "expected=retype_prompt+separator",
   "def wipe(value):",
   " for index in range(len(value)): value[index]=0",
   "if os.getsid(0)!=os.getpid() or os.getpgrp()!=os.getpid():",
@@ -168,7 +170,7 @@ const SECURITY_PTY_HELPER = [
   "    if count<=0: raise SystemExit(75)",
   "    offset+=count",
   "   stage=1",
-  "  elif stage==1 and output==expected:",
+  "  elif stage==1 and output==retype_prompt:",
   "   offset=0",
   "   while offset<len(payload):",
   "    target=payload[offset:]",

@@ -199,12 +199,16 @@ assert.ok(returnedBuffers.every((buffer) => buffer.every((byte) => byte === 0)))
 assert.ok(inputBuffers.every((buffer) => buffer.every((byte) => byte === 0)));
 assert.equal(
   keychainTest.STORE_PROMPT_STDERR.toString("utf8"),
-  "password data for new item: retype password for new item: ",
+  "password data for new item: \r\nretype password for new item: \r\n",
 );
 assert.match(keychainTest.SECURITY_PTY_HELPER, /TIOCSCTTY/);
 assert.match(keychainTest.SECURITY_PTY_HELPER, /os\.tcsetpgrp\(slave,os\.getpgrp\(\)\)/);
 assert.match(keychainTest.SECURITY_PTY_HELPER, /sys\.stdin\.buffer\.readinto\(target\)/);
 assert.match(keychainTest.SECURITY_PTY_HELPER, /memoryview\(secret\)/);
+assert.match(keychainTest.SECURITY_PTY_HELPER, /separator=b'\\r\\n'/);
+assert.match(keychainTest.SECURITY_PTY_HELPER,
+  /retype_prompt=first_prompt\+separator\+second_prompt/);
+assert.match(keychainTest.SECURITY_PTY_HELPER, /expected=retype_prompt\+separator/);
 assert.match(keychainTest.SECURITY_PTY_HELPER, /finally:\n[\s\S]*wipe\(secret\)/);
 assert.match(keychainTest.SECURITY_PTY_HELPER,
   /payload\.release\(\)\n   payload=None\n   wipe\(secret\)\n   stage=2/,
@@ -267,12 +271,14 @@ assert.doesNotMatch(keychainTest.SECURITY_PTY_HELPER, /shell=True|pexpect|Expect
     " chunk=os.read(fd,1)",
     " if not chunk: raise SystemExit(40)",
     " value.extend(chunk)",
+    "os.write(fd,b'\\n')",
     "os.write(fd,b'retype password for new item: ')",
     "retyped=bytearray()",
     "while not retyped.endswith(b'\\n'):",
     " chunk=os.read(fd,1)",
     " if not chunk: raise SystemExit(42)",
     " retyped.extend(chunk)",
+    "os.write(fd,b'\\n')",
     "termios.tcsetattr(fd,termios.TCSANOW,prior)",
     "os.close(fd)",
     "actual=hashlib.sha256(bytes(value[:-1])).hexdigest()",
@@ -310,6 +316,7 @@ assert.doesNotMatch(keychainTest.SECURITY_PTY_HELPER, /shell=True|pexpect|Expect
     "if mode!='echo':",
     " hidden=termios.tcgetattr(fd)",
     " hidden[3]&=~(termios.ECHO|termios.ECHONL)",
+    " if mode=='lf-separator': hidden[1]&=~termios.ONLCR",
     " termios.tcsetattr(fd,termios.TCSANOW,hidden)",
     "if mode=='reordered':",
     " os.write(fd,b'retype password for new item: ')",
@@ -322,6 +329,7 @@ assert.doesNotMatch(keychainTest.SECURITY_PTY_HELPER, /shell=True|pexpect|Expect
     " if not chunk: raise SystemExit(51)",
     " value.extend(chunk)",
     "for index in range(len(value)): value[index]=0",
+    "if mode!='echo': os.write(fd,b'\\n')",
     "if mode=='repeated': os.write(fd,b'password data for new item: ')",
     "elif mode=='extra': os.write(fd,b'retype password for new item: !')",
     "elif mode=='echo': os.write(fd,b'retype password for new item: ')",
@@ -329,7 +337,7 @@ assert.doesNotMatch(keychainTest.SECURITY_PTY_HELPER, /shell=True|pexpect|Expect
     "time.sleep(60)",
   ].join("\n");
   try {
-    for (const mode of ["reordered", "repeated", "extra", "echo"]) {
+    for (const mode of ["reordered", "repeated", "extra", "echo", "lf-separator"]) {
       const pidPath = join(probeRoot, `${mode}.pid`);
       const dummyValue = `managed-pty-${mode}-dummy`;
       const dummyInput = Buffer.from(`${dummyValue}\n`, "utf8");
@@ -359,6 +367,59 @@ assert.doesNotMatch(keychainTest.SECURITY_PTY_HELPER, /shell=True|pexpect|Expect
 
 {
   const pythonPath = keychainTest.selectSecurityPtyPython();
+  const probeRoot = await mkdtemp(join(tmpdir(), "project2-f02-keychain-pty-trailing-"));
+  const pidPath = join(probeRoot, "missing-trailing.pid");
+  const missingTrailingSeparatorChild = [
+    "import os,sys,termios",
+    "fd=os.open('/dev/tty',os.O_RDWR)",
+    "with open(sys.argv[1],'x',encoding='ascii') as stream: stream.write(str(os.getpid()))",
+    "prior=termios.tcgetattr(fd)",
+    "hidden=termios.tcgetattr(fd)",
+    "hidden[3]&=~(termios.ECHO|termios.ECHONL)",
+    "termios.tcsetattr(fd,termios.TCSANOW,hidden)",
+    "os.write(fd,b'password data for new item: ')",
+    "first=bytearray()",
+    "while not first.endswith(b'\\n'):",
+    " chunk=os.read(fd,1)",
+    " if not chunk: raise SystemExit(60)",
+    " first.extend(chunk)",
+    "os.write(fd,b'\\n')",
+    "os.write(fd,b'retype password for new item: ')",
+    "second=bytearray()",
+    "while not second.endswith(b'\\n'):",
+    " chunk=os.read(fd,1)",
+    " if not chunk: raise SystemExit(61)",
+    " second.extend(chunk)",
+    "for value in (first,second):",
+    " for index in range(len(value)): value[index]=0",
+    "termios.tcsetattr(fd,termios.TCSANOW,prior)",
+    "os.close(fd)",
+  ].join("\n");
+  const dummyInput = Buffer.from("managed-pty-missing-trailing-dummy\n", "utf8");
+  try {
+    const result = await keychainTest.runSecurityPtyPrompt(
+      pythonPath,
+      ["-I", "-S", "-c", missingTrailingSeparatorChild, pidPath],
+      dummyInput,
+      { pythonPath, timeoutMs: 3_000 },
+    );
+    assert.equal(result.code, 76,
+      "the bridge rejects a successful child that omits the trailing CRLF separator");
+    assert.equal(result.stdout.length, 0);
+    assert.equal(result.stderr.length, 0);
+    const dummyPid = Number(await readFile(pidPath, "ascii"));
+    assert.ok(Number.isSafeInteger(dummyPid) && dummyPid > 1);
+    assert.throws(() => process.kill(dummyPid, 0), (error) => error?.code === "ESRCH");
+    result.stdout.fill(0);
+    result.stderr.fill(0);
+  } finally {
+    dummyInput.fill(0);
+    rmSync(probeRoot, { recursive: true, force: true });
+  }
+}
+
+{
+  const pythonPath = keychainTest.selectSecurityPtyPython();
   const probeRoot = await mkdtemp(join(tmpdir(), "project2-f02-keychain-pty-stop-"));
   const pidPath = join(probeRoot, "dummy-child.pid");
   const hangingPromptChild = [
@@ -376,6 +437,7 @@ assert.doesNotMatch(keychainTest.SECURITY_PTY_HELPER, /shell=True|pexpect|Expect
     " if not chunk: raise SystemExit(42)",
     " value.extend(chunk)",
     "for index in range(len(value)): value[index]=0",
+    "os.write(fd,b'\\n')",
     "time.sleep(60)",
     "termios.tcsetattr(fd,termios.TCSANOW,prior)",
   ].join("\n");
@@ -2183,5 +2245,5 @@ try {
 }
 
 process.stdout.write(
-  "Project 2 F-02 Keychain validation passed: namespace freshness, managed native-prompt PTY with an exact two-prompt/retype same-value handshake, copy-minimized input and failure-path wiping, prompt-drift rejection and descendant reaping, a full default-reader PTY initialization, bounded hidden input with its listener armed before prompt exposure and resume, stage-specific initialization diagnostics, durable helper-death fencing, advisory-lock serialization and last-child reap, fixed labels, stdin-only writes, exact absence handling, buffer clearing, clipboard custody, one-use claims, redacted helper output, READY-time final GO, lifecycle-guarded namespace deletion, and verified cleanup.\n",
+  "Project 2 F-02 Keychain validation passed: namespace freshness, managed native-prompt PTY with an exact CRLF-delimited two-prompt/retype same-value handshake, copy-minimized input and failure-path wiping, prompt/separator drift rejection and descendant reaping, a full default-reader PTY initialization, bounded hidden input with its listener armed before prompt exposure and resume, stage-specific initialization diagnostics, durable helper-death fencing, advisory-lock serialization and last-child reap, fixed labels, stdin-only writes, exact absence handling, buffer clearing, clipboard custody, one-use claims, redacted helper output, READY-time final GO, lifecycle-guarded namespace deletion, and verified cleanup.\n",
 );
