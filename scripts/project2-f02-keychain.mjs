@@ -1,10 +1,17 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, unlink } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { dirname, isAbsolute, join, normalize } from "node:path";
 import { TextDecoder } from "node:util";
+
+import {
+  createProcessScope,
+  PROCESS_RESULT_REASONS,
+  runBoundedProcess,
+} from "./project2-f02-process-scope.mjs";
 
 export const F02_KEYCHAIN_SERVICE_PREFIX = "com.spartan.project2.f02.v1";
 export const F02_KEYCHAIN_FLAG = "--keychain-input";
@@ -66,6 +73,12 @@ export const F02_KEYCHAIN_ITEMS = Object.freeze({
 const SECURITY_PATH = "/usr/bin/security";
 const MAX_SECURITY_OUTPUT_BYTES = 16 * 1024;
 const SECURITY_TIMEOUT_MS = 10_000;
+const SECURITY_PTY_MAX_INPUT_BYTES = 4_097;
+const SECURITY_PTY_PYTHON_CANDIDATES = Object.freeze(
+  process.platform === "darwin"
+    ? ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3"]
+    : ["/usr/local/bin/python3", "/usr/bin/python3"],
+);
 const UTF8 = new TextDecoder("utf-8", { fatal: true });
 const ITEM_NAMES = new Set(Object.values(F02_KEYCHAIN_ITEMS));
 const ITEM_NOT_FOUND_CODE = 44;
@@ -78,11 +91,91 @@ const STORE_PROMPT_STDERR = Buffer.from(
   "utf8",
 );
 const DELETE_SUCCESS_STDERR = Buffer.from("password has been deleted.\n", "utf8");
+const SECURITY_PTY_HELPER = [
+  "import errno,fcntl,os,select,signal,sys,termios,time",
+  "prompt=b'password data for new item: '",
+  `secret=bytearray(sys.stdin.buffer.read(${SECURITY_PTY_MAX_INPUT_BYTES + 1}))`,
+  `if len(secret)<2 or len(secret)>${SECURITY_PTY_MAX_INPUT_BYTES} or secret[-1]!=10 or 0 in secret or 10 in secret[:-1] or 13 in secret:`,
+  " for index in range(len(secret)): secret[index]=0",
+  " raise SystemExit(70)",
+  "if os.getsid(0)!=os.getpid() or os.getpgrp()!=os.getpid():",
+  " for index in range(len(secret)): secret[index]=0",
+  " raise SystemExit(71)",
+  "signal.signal(signal.SIGHUP,signal.SIG_IGN)",
+  "master,slave=os.openpty()",
+  "fcntl.ioctl(slave,termios.TIOCSCTTY,0)",
+  "os.tcsetpgrp(slave,os.getpgrp())",
+  "pid=os.fork()",
+  "if pid==0:",
+  " signal.signal(signal.SIGHUP,signal.SIG_DFL)",
+  " os.close(master)",
+  " os.dup2(slave,0);os.dup2(slave,1);os.dup2(slave,2)",
+  " if slave>2: os.close(slave)",
+  " os.execv(sys.argv[1],sys.argv[1:])",
+  "os.close(slave)",
+  "output=bytearray()",
+  "sent=False",
+  "status=None",
+  "deadline=time.monotonic()+8.0",
+  "while True:",
+  " if time.monotonic()>=deadline:",
+  "  try: os.kill(pid,signal.SIGKILL)",
+  "  except ProcessLookupError: pass",
+  "  os.waitpid(pid,0)",
+  "  raise SystemExit(72)",
+  " if status is None:",
+  "  waited,current=os.waitpid(pid,os.WNOHANG)",
+  "  if waited==pid: status=current",
+  " try: ready,_,_=select.select([master],[],[],0.1)",
+  " except InterruptedError: continue",
+  " if master not in ready:",
+  "  if status is not None: break",
+  "  continue",
+  " try: chunk=os.read(master,4096)",
+  " except OSError as exc:",
+  "  if exc.errno==errno.EIO: break",
+  "  raise",
+  " if not chunk: break",
+  " output.extend(chunk)",
+  ` if len(output)>${MAX_SECURITY_OUTPUT_BYTES}:`,
+  "  try: os.kill(pid,signal.SIGKILL)",
+  "  except ProcessLookupError: pass",
+  "  os.waitpid(pid,0)",
+  "  raise SystemExit(73)",
+  " if not sent:",
+  "  if not prompt.startswith(output):",
+  "   try: os.kill(pid,signal.SIGKILL)",
+  "   except ProcessLookupError: pass",
+  "   os.waitpid(pid,0)",
+  "   raise SystemExit(74)",
+  "  if output==prompt:",
+  "   offset=0",
+  "   while offset<len(secret):",
+  "    count=os.write(master,secret[offset:])",
+  "    if count<=0: raise SystemExit(75)",
+  "    offset+=count",
+  "   for index in range(len(secret)): secret[index]=0",
+  "   sent=True",
+  "if status is None: _,status=os.waitpid(pid,0)",
+  "os.close(master)",
+  "for index in range(len(secret)): secret[index]=0",
+  "if not sent or bytes(output)!=prompt:",
+  " for index in range(len(output)): output[index]=0",
+  " raise SystemExit(76)",
+  "offset=0",
+  "while offset<len(output):",
+  " count=os.write(1,output[offset:])",
+  " if count<=0: raise SystemExit(77)",
+  " offset+=count",
+  "for index in range(len(output)): output[index]=0",
+  "code=os.WEXITSTATUS(status) if os.WIFEXITED(status) else 128+os.WTERMSIG(status)",
+  "raise SystemExit(code)",
+].join("\n");
 const MIN_F02_WINDOW_MS = 60 * 60 * 1_000;
 const MAX_F02_WINDOW_MS = 4 * 60 * 60 * 1_000;
-const ACTIVE_SECURITY_CHILDREN = new Set();
-const CLOSED_SECURITY_CHILDREN = new WeakSet();
+const ACTIVE_SECURITY_SCOPES = new Set();
 let SECURITY_SHUTDOWN_RETAINED = false;
+let SELECTED_SECURITY_PTY_PYTHON = null;
 const NAMESPACE_OPERATION_LOCK_CONTEXT = new AsyncLocalStorage();
 const NAMESPACE_OPERATION_LOCK_APPLICATION_DIRECTORY = "com.spartan.project2.f02";
 const NAMESPACE_OPERATION_LOCK_DIRECTORY = "namespace-operation-locks-v2";
@@ -776,110 +869,160 @@ function securityEnvironment(source = process.env) {
   return environment;
 }
 
-function defaultSecurityRun(args, input = Buffer.alloc(0)) {
+function selectSecurityPtyPython(candidates = SECURITY_PTY_PYTHON_CANDIDATES) {
+  if (candidates === SECURITY_PTY_PYTHON_CANDIDATES && SELECTED_SECURITY_PTY_PYTHON) {
+    return SELECTED_SECURITY_PTY_PYTHON;
+  }
+  if (!Array.isArray(candidates) || candidates.length === 0) {
+    fail("F02_KEYCHAIN_PTY_UNAVAILABLE");
+  }
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string" || !candidate.startsWith("/") || !existsSync(candidate)) {
+      continue;
+    }
+    const probe = spawnSync(candidate, [
+      "-I", "-S", "-c",
+      "import os,sys,termios;raise SystemExit(0 if sys.version_info>=(3,9) and hasattr(os,'openpty') and hasattr(termios,'TIOCSCTTY') else 1)",
+    ], {
+      encoding: "utf8",
+      env: { PATH: "", LANG: "C", LC_ALL: "C" },
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 2_000,
+    });
+    if (!probe.error && probe.status === 0 && probe.stdout === "" && probe.stderr === "") {
+      if (candidates === SECURITY_PTY_PYTHON_CANDIDATES) {
+        SELECTED_SECURITY_PTY_PYTHON = candidate;
+      }
+      return candidate;
+    }
+  }
+  fail("F02_KEYCHAIN_PTY_UNAVAILABLE");
+}
+
+function processResultBuffers(result, { ptyPrompt = false } = {}) {
+  if (!result || ![PROCESS_RESULT_REASONS.COMPLETED,
+    PROCESS_RESULT_REASONS.NONZERO].includes(result.reason) ||
+      !Number.isInteger(result.exitCode) || typeof result.stdout !== "string" ||
+      typeof result.stderr !== "string" || result.sensitiveOutput === true ||
+      result.groupTerminated !== true) {
+    return { code: -1, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+  }
+  return ptyPrompt
+    ? {
+      code: result.exitCode,
+      stdout: Buffer.from(result.stderr, "utf8"),
+      stderr: Buffer.from(result.stdout, "utf8"),
+    }
+    : {
+      code: result.exitCode,
+      stdout: Buffer.from(result.stdout, "utf8"),
+      stderr: Buffer.from(result.stderr, "utf8"),
+    };
+}
+
+async function runSecurityPtyPrompt(command, args, input, dependencies = {}) {
+  const processRunner = dependencies.processRunner || runBoundedProcess;
+  const pythonPath = dependencies.pythonPath || selectSecurityPtyPython();
+  const scope = dependencies.scope;
+  const timeoutMs = dependencies.timeoutMs || SECURITY_TIMEOUT_MS;
+  if (typeof processRunner !== "function" || typeof pythonPath !== "string" ||
+      !pythonPath.startsWith("/") || typeof command !== "string" || !command.startsWith("/") ||
+      !Array.isArray(args) || !args.every((value) => typeof value === "string" && !value.includes("\0")) ||
+      !Buffer.isBuffer(input) || input.length < 2 || input.length > SECURITY_PTY_MAX_INPUT_BYTES) {
+    return { code: -1, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+  }
+  try {
+    const result = await processRunner(pythonPath, [
+      "-I", "-S", "-c", SECURITY_PTY_HELPER, command, ...args,
+    ], {
+      env: securityEnvironment(),
+      input,
+      sentinels: [input],
+      timeoutMs,
+      maxInputBytes: SECURITY_PTY_MAX_INPUT_BYTES,
+      maxOutputBytes: MAX_SECURITY_OUTPUT_BYTES,
+      termGraceMs: 750,
+      killGraceMs: 1_500,
+      ...(scope ? { scope } : {}),
+    });
+    return processResultBuffers(result, { ptyPrompt: true });
+  } catch {
+    return { code: -1, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+  }
+}
+
+async function runDirectSecurity(args, input, scope) {
+  try {
+    const result = await runBoundedProcess(SECURITY_PATH, args, {
+      env: securityEnvironment(),
+      input,
+      timeoutMs: SECURITY_TIMEOUT_MS,
+      maxInputBytes: SECURITY_PTY_MAX_INPUT_BYTES,
+      maxOutputBytes: MAX_SECURITY_OUTPUT_BYTES,
+      termGraceMs: 750,
+      killGraceMs: 1_500,
+      scope,
+    });
+    return processResultBuffers(result);
+  } catch {
+    return { code: -1, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+  }
+}
+
+async function defaultSecurityRun(args, input = Buffer.alloc(0)) {
   if (SECURITY_SHUTDOWN_RETAINED) {
-    return Promise.resolve({
+    return {
       code: -1,
       stdout: Buffer.alloc(0),
       stderr: Buffer.alloc(0),
-    });
+    };
   }
-  return new Promise((resolvePromise) => {
-    const child = spawn(SECURITY_PATH, args, {
-      env: securityEnvironment(),
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    ACTIVE_SECURITY_CHILDREN.add(child);
-    child.once("close", () => {
-      CLOSED_SECURITY_CHILDREN.add(child);
-      ACTIVE_SECURITY_CHILDREN.delete(child);
-    });
-    const stdout = [];
-    const stderr = [];
-    let bytes = 0;
-    let killed = false;
-    let settled = false;
-    let timer;
-    const finish = (code, signal = null) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      const joinedStdout = Buffer.concat(stdout);
-      const joinedStderr = Buffer.concat(stderr);
-      for (const chunk of [...stdout, ...stderr]) chunk.fill(0);
-      resolvePromise({
-        code: killed || signal ? -1 : Number(code),
-        stdout: joinedStdout,
-        stderr: joinedStderr,
-      });
-    };
-    const rejectIo = () => {
-      killed = true;
-      try { child.kill("SIGKILL"); } catch {}
-    };
-    const collect = (target) => (chunk) => {
-      bytes += chunk.length;
-      if (bytes > MAX_SECURITY_OUTPUT_BYTES) {
-        killed = true;
-        child.kill("SIGKILL");
-        return;
-      }
-      target.push(chunk);
-    };
-    child.stdout.on("data", collect(stdout));
-    child.stderr.on("data", collect(stderr));
-    child.stdout.once("error", rejectIo);
-    child.stderr.once("error", rejectIo);
-    child.stdin.once("error", rejectIo);
-    timer = setTimeout(() => {
-      killed = true;
-      child.kill("SIGKILL");
-    }, SECURITY_TIMEOUT_MS);
-    // A spawn/process error is not reap proof. Wait for `close`, which is the
-    // only event after stdio is closed and the child has actually terminated.
-    child.on("error", () => {
-      killed = true;
-      try { child.kill("SIGKILL"); } catch {}
-    });
-    child.on("close", finish);
-    try { child.stdin.end(input); } catch { rejectIo(); }
-  });
+  if (!Array.isArray(args) || !Buffer.isBuffer(input)) {
+    return { code: -1, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+  }
+  const scope = createProcessScope({ termGraceMs: 750, killGraceMs: 1_500 });
+  ACTIVE_SECURITY_SCOPES.add(scope);
+  let result = { code: -1, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+  let cleanup = { ok: false, activeCount: 1 };
+  try {
+    result = input.length > 0
+      ? (args[0] === "add-generic-password" && args.at(-1) === "-w"
+        ? await runSecurityPtyPrompt(SECURITY_PATH, args, input, { scope })
+        : result)
+      : await runDirectSecurity(args, input, scope);
+  } finally {
+    try { cleanup = await scope.abortAll(); } catch {}
+    ACTIVE_SECURITY_SCOPES.delete(scope);
+  }
+  if (cleanup?.ok !== true || cleanup?.activeCount !== 0) {
+    result.stdout.fill(0);
+    result.stderr.fill(0);
+    return { code: -1, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+  }
+  return result;
 }
 
 export function abortF02KeychainSecurityProcessesSync() {
-  for (const child of [...ACTIVE_SECURITY_CHILDREN]) {
-    try { child.kill("SIGKILL"); } catch {}
+  for (const scope of [...ACTIVE_SECURITY_SCOPES]) {
+    try { scope.abortAllSync(); } catch {}
   }
-}
-
-function waitForF02KeychainSecurityProcessClose(child, timeoutMs) {
-  if (!child || CLOSED_SECURITY_CHILDREN.has(child)) return Promise.resolve(true);
-  return new Promise((resolvePromise) => {
-    let settled = false;
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolvePromise(value);
-    };
-    const timer = setTimeout(() => finish(false), timeoutMs);
-    timer.unref?.();
-    child.once("close", () => finish(true));
-  });
 }
 
 export async function abortF02KeychainSecurityProcesses() {
-  const children = [...ACTIVE_SECURITY_CHILDREN];
+  const scopes = [...ACTIVE_SECURITY_SCOPES];
   abortF02KeychainSecurityProcessesSync();
-  let ok = true;
-  for (const child of children) {
-    if (await waitForF02KeychainSecurityProcessClose(child, 1_000)) continue;
-    try { child.kill("SIGKILL"); } catch { ok = false; }
-    if (!await waitForF02KeychainSecurityProcessClose(child, 1_000)) ok = false;
+  const results = [];
+  for (const scope of scopes) {
+    try { results.push(await scope.abortAll()); } catch {
+      results.push({ ok: false, activeCount: scope?.activeCount ?? 1 });
+    }
   }
+  const activeCount = [...ACTIVE_SECURITY_SCOPES]
+    .reduce((count, scope) => count + Number(scope?.activeCount || 0), 0);
   return Object.freeze({
-    ok: ok && children.every((child) => CLOSED_SECURITY_CHILDREN.has(child)),
-    activeCount: ACTIVE_SECURITY_CHILDREN.size,
+    ok: results.every((result) => result?.ok === true && result?.activeCount === 0) &&
+      activeCount === 0,
+    activeCount,
   });
 }
 
@@ -1105,6 +1248,8 @@ export function createF02KeychainAccess(dependencies = {}) {
 
 export const __test = Object.freeze({
   SECURITY_PATH,
+  SECURITY_PTY_HELPER,
+  SECURITY_PTY_MAX_INPUT_BYTES,
   ITEM_NOT_FOUND_CODE,
   ITEM_NOT_FOUND_STDERR,
   STORE_PROMPT_STDERR,
@@ -1117,5 +1262,7 @@ export const __test = Object.freeze({
   acquireF02NamespaceOperationLock,
   decodeExactValue,
   defaultNamespaceOperationLockRoot,
+  runSecurityPtyPrompt,
+  selectSecurityPtyPython,
   validateValue,
 });

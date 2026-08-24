@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { AsyncResource } from "node:async_hooks";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { rmSync } from "node:fs";
 import { chmod, lstat, mkdtemp, readFile, rmdir, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -199,6 +200,131 @@ assert.equal(
   keychainTest.STORE_PROMPT_STDERR.toString("utf8"),
   "password data for new item: ",
 );
+assert.match(keychainTest.SECURITY_PTY_HELPER, /TIOCSCTTY/);
+assert.match(keychainTest.SECURITY_PTY_HELPER, /os\.tcsetpgrp\(slave,os\.getpgrp\(\)\)/);
+assert.doesNotMatch(keychainTest.SECURITY_PTY_HELPER, /shell=True|pexpect|Expect|Tcl/);
+
+{
+  const dummyInput = Buffer.from("managed-pty-dummy-value\n", "utf8");
+  let invocation;
+  const result = await keychainTest.runSecurityPtyPrompt(
+    "/absolute/dummy-security",
+    ["add-generic-password", "-s", "dummy-service", "-a", "dummy-account", "-w"],
+    dummyInput,
+    {
+      pythonPath: "/absolute/python3",
+      processRunner: async (command, args, options) => {
+        invocation = { command, args, options };
+        return {
+          reason: "completed",
+          exitCode: 0,
+          stdout: "password data for new item: ",
+          stderr: "",
+          sensitiveOutput: false,
+          groupTerminated: true,
+        };
+      },
+    },
+  );
+  assert.equal(invocation.command, "/absolute/python3");
+  assert.ok(invocation.args.includes("/absolute/dummy-security"));
+  assert.ok(invocation.args.every((value) => !value.includes("managed-pty-dummy-value")));
+  assert.ok(Object.values(invocation.options.env)
+    .every((value) => !String(value).includes("managed-pty-dummy-value")));
+  assert.equal(invocation.options.input, dummyInput);
+  assert.equal(invocation.options.sentinels[0], dummyInput);
+  assert.equal(result.code, 0);
+  assert.equal(result.stdout.length, 0);
+  assert.ok(result.stderr.equals(keychainTest.STORE_PROMPT_STDERR));
+  result.stdout.fill(0);
+  result.stderr.fill(0);
+  dummyInput.fill(0);
+}
+
+{
+  const pythonPath = keychainTest.selectSecurityPtyPython();
+  const dummyValue = "managed-pty-live-dummy-value";
+  const expectedDigest = createHash("sha256").update(dummyValue).digest("hex");
+  const dummyPromptChild = [
+    "import hashlib,os,sys,termios",
+    "fd=os.open('/dev/tty',os.O_RDWR)",
+    "prior=termios.tcgetattr(fd)",
+    "hidden=termios.tcgetattr(fd)",
+    "hidden[3]&=~(termios.ECHO|termios.ECHONL)",
+    "termios.tcsetattr(fd,termios.TCSANOW,hidden)",
+    "os.write(fd,b'password data for new item: ')",
+    "value=bytearray()",
+    "while not value.endswith(b'\\n'):",
+    " chunk=os.read(fd,1)",
+    " if not chunk: raise SystemExit(40)",
+    " value.extend(chunk)",
+    "termios.tcsetattr(fd,termios.TCSANOW,prior)",
+    "os.close(fd)",
+    "actual=hashlib.sha256(bytes(value[:-1])).hexdigest()",
+    "for index in range(len(value)): value[index]=0",
+    "raise SystemExit(0 if actual==sys.argv[1] else 41)",
+  ].join("\n");
+  const dummyInput = Buffer.from(`${dummyValue}\n`, "utf8");
+  const result = await keychainTest.runSecurityPtyPrompt(
+    pythonPath,
+    ["-I", "-S", "-c", dummyPromptChild, expectedDigest],
+    dummyInput,
+    { pythonPath, timeoutMs: 3_000 },
+  );
+  assert.equal(result.code, 0);
+  assert.equal(result.stdout.length, 0);
+  assert.ok(result.stderr.equals(keychainTest.STORE_PROMPT_STDERR));
+  assert.equal(result.stderr.includes(Buffer.from(dummyValue, "utf8")), false,
+    "the managed terminal never echoes the supplied value");
+  result.stdout.fill(0);
+  result.stderr.fill(0);
+  dummyInput.fill(0);
+}
+
+{
+  const pythonPath = keychainTest.selectSecurityPtyPython();
+  const probeRoot = await mkdtemp(join(tmpdir(), "project2-f02-keychain-pty-stop-"));
+  const pidPath = join(probeRoot, "dummy-child.pid");
+  const hangingPromptChild = [
+    "import os,sys,termios,time",
+    "fd=os.open('/dev/tty',os.O_RDWR)",
+    "prior=termios.tcgetattr(fd)",
+    "hidden=termios.tcgetattr(fd)",
+    "hidden[3]&=~(termios.ECHO|termios.ECHONL)",
+    "termios.tcsetattr(fd,termios.TCSANOW,hidden)",
+    "with open(sys.argv[1],'x',encoding='ascii') as stream: stream.write(str(os.getpid()))",
+    "os.write(fd,b'password data for new item: ')",
+    "value=bytearray()",
+    "while not value.endswith(b'\\n'):",
+    " chunk=os.read(fd,1)",
+    " if not chunk: raise SystemExit(42)",
+    " value.extend(chunk)",
+    "for index in range(len(value)): value[index]=0",
+    "time.sleep(60)",
+    "termios.tcsetattr(fd,termios.TCSANOW,prior)",
+  ].join("\n");
+  const dummyInput = Buffer.from("managed-pty-timeout-dummy\n", "utf8");
+  try {
+    const result = await keychainTest.runSecurityPtyPrompt(
+      pythonPath,
+      ["-I", "-S", "-c", hangingPromptChild, pidPath],
+      dummyInput,
+      { pythonPath, timeoutMs: 500 },
+    );
+    assert.equal(result.code, -1);
+    assert.equal(result.stdout.length, 0);
+    assert.equal(result.stderr.length, 0);
+    const dummyPid = Number(await readFile(pidPath, "ascii"));
+    assert.ok(Number.isSafeInteger(dummyPid) && dummyPid > 1);
+    assert.throws(() => process.kill(dummyPid, 0), (error) => error?.code === "ESRCH",
+      "a timed-out prompt child is reaped with the managed terminal group");
+    result.stdout.fill(0);
+    result.stderr.fill(0);
+  } finally {
+    dummyInput.fill(0);
+    rmSync(probeRoot, { recursive: true, force: true });
+  }
+}
 
 await assert.rejects(
   createF02KeychainAccess({
@@ -1732,5 +1858,5 @@ try {
 }
 
 process.stdout.write(
-  "Project 2 F-02 Keychain validation passed: namespace freshness, durable helper-death fencing, advisory-lock serialization and last-child reap, fixed labels, stdin-only writes, exact absence handling, buffer clearing, clipboard custody, one-use claims, redacted helper output, READY-time final GO, lifecycle-guarded namespace deletion, and verified cleanup.\n",
+  "Project 2 F-02 Keychain validation passed: namespace freshness, managed native-prompt PTY with non-echoing input and descendant reaping, durable helper-death fencing, advisory-lock serialization and last-child reap, fixed labels, stdin-only writes, exact absence handling, buffer clearing, clipboard custody, one-use claims, redacted helper output, READY-time final GO, lifecycle-guarded namespace deletion, and verified cleanup.\n",
 );
