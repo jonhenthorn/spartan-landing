@@ -161,12 +161,11 @@ const securityRun = async (args, input) => {
     assert.equal(args.at(-1), "-w");
     const raw = Buffer.from(input).toString("utf8");
     const values = raw.split("\n");
-    assert.equal(values.length, 3);
-    assert.equal(values[0], values[1]);
-    assert.equal(values[2], "");
+    assert.equal(values.length, 2);
+    assert.equal(values[1], "");
     if (!args.includes("-U") && securityValues.has(account)) return response(45, "", "duplicate\n");
     securityValues.set(account, values[0]);
-    return response(0, "", "password data for new item: retype password for new item: ");
+    return response(0, "", "password data for new item: ");
   }
   if (operation === "delete-generic-password") {
     if (!securityValues.delete(account)) return response(44, "", "missing\n");
@@ -196,6 +195,10 @@ assert.equal(securityValues.size, 0);
 assert.ok(securityArguments.every((args) => !args.some((value) => value === "READY_FOR_HELPER")));
 assert.ok(returnedBuffers.every((buffer) => buffer.every((byte) => byte === 0)));
 assert.ok(inputBuffers.every((buffer) => buffer.every((byte) => byte === 0)));
+assert.equal(
+  keychainTest.STORE_PROMPT_STDERR.toString("utf8"),
+  "password data for new item: ",
+);
 
 await assert.rejects(
   createF02KeychainAccess({
@@ -243,6 +246,39 @@ const wrongAbsence = createF02KeychainAccess({
 await assert.rejects(
   wrongAbsence.assertNamespaceEmpty(),
   (error) => error?.code === "F02_KEYCHAIN_ITEM_UNAVAILABLE",
+);
+
+let legacyTwoPromptStored = false;
+const legacyTwoPrompt = createF02KeychainAccess({
+  namespace: NAMESPACE,
+  platform: "darwin",
+  securityRun: async (args) => {
+    const operation = args[0];
+    if (operation === "find-generic-password") {
+      return legacyTwoPromptStored
+        ? { code: 0, stdout: Buffer.from("STAGING\n"), stderr: Buffer.alloc(0) }
+        : {
+          code: keychainTest.ITEM_NOT_FOUND_CODE,
+          stdout: Buffer.alloc(0),
+          stderr: Buffer.from(keychainTest.ITEM_NOT_FOUND_STDERR),
+        };
+    }
+    if (operation === "add-generic-password") {
+      legacyTwoPromptStored = true;
+      return {
+        code: 0,
+        stdout: Buffer.alloc(0),
+        stderr: Buffer.from("password data for new item: retype password for new item: "),
+      };
+    }
+    throw new Error("unexpected operation");
+  },
+});
+await assert.rejects(
+  legacyTwoPrompt.storeNew(F02_KEYCHAIN_ITEMS.bundleState, "STAGING", {
+    maxBytes: 32, pattern: F02_KEYCHAIN_STATE_PATTERN,
+  }),
+  (error) => error?.code === "F02_KEYCHAIN_STORE_REJECTED",
 );
 
 let partialWriteStored = false;

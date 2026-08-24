@@ -74,7 +74,7 @@ const ITEM_NOT_FOUND_STDERR = Buffer.from(
   "utf8",
 );
 const STORE_PROMPT_STDERR = Buffer.from(
-  "password data for new item: retype password for new item: ",
+  "password data for new item: ",
   "utf8",
 );
 const DELETE_SUCCESS_STDERR = Buffer.from("password has been deleted.\n", "utf8");
@@ -994,11 +994,9 @@ export function createF02KeychainAccess(dependencies = {}) {
 
   const write = async (account, value, update) => {
     const valueBytes = Buffer.from(value, "utf8");
-    const input = Buffer.alloc((valueBytes.length * 2) + 2);
+    const input = Buffer.alloc(valueBytes.length + 1);
     valueBytes.copy(input, 0);
     input[valueBytes.length] = 0x0a;
-    valueBytes.copy(input, valueBytes.length + 1);
-    input[input.length - 1] = 0x0a;
     let result;
     try {
       result = await run([
