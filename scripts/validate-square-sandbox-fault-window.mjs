@@ -41,6 +41,7 @@ import { createProcessScope, runBoundedProcess } from "./project2-f02-process-sc
 
 const ACCOUNT = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const COMMIT = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const TREE = "cccccccccccccccccccccccccccccccccccccccc";
 const BASELINE = "11111111-1111-4111-8111-111111111111";
 const UPLOAD = "22222222-2222-4222-8222-222222222222";
 const CANDIDATE = "33333333-3333-4333-8333-333333333333";
@@ -272,6 +273,10 @@ function makeRunner({
   ambiguousDeployTrafficVersions = null,
   secretBulkEcho = false,
   gitBranch = driverTest.BRANCH,
+  gitCommit = COMMIT,
+  gitTree = TREE,
+  gitRoot = driverTest.ROOT,
+  gitIndex = "H README.md\0",
   gitStatus = "",
   account = ACCOUNT,
   uploadConfigMutation = "",
@@ -296,6 +301,10 @@ function makeRunner({
     ambiguousDeployAttempts: 0,
     secretBulkEcho,
     gitBranch,
+    gitCommit,
+    gitTree,
+    gitRoot,
+    gitIndex,
     gitStatus,
     account,
     uploadConfigMutation,
@@ -313,13 +322,23 @@ function makeRunner({
       inputBuffer,
       sentinels: [...(options.sentinels || [])],
       env: { ...(options.env || {}) },
+      sourceEnvProvided: Object.hasOwn(options, "sourceEnv"),
+      sourceEnv: { ...(options.sourceEnv || {}) },
     };
     state.calls.push(call);
-    if (command === "git") {
-      if (args.join(" ") === "rev-parse --show-toplevel") return { code: 0, stdout: `${driverTest.ROOT}\n`, stderr: "" };
-      if (args.join(" ") === "branch --show-current") return { code: 0, stdout: `${state.gitBranch}\n`, stderr: "" };
-      if (args.join(" ") === "rev-parse HEAD") return { code: 0, stdout: `${COMMIT}\n`, stderr: "" };
-      if (args.join(" ") === "status --porcelain=v1 --untracked-files=all") {
+    if (command === driverTest.GIT_BIN) {
+      assert.deepEqual(args.slice(0, driverTest.SOURCE_GIT_PREFIX_ARGS.length),
+        driverTest.SOURCE_GIT_PREFIX_ARGS);
+      const gitArgs = args.slice(driverTest.SOURCE_GIT_PREFIX_ARGS.length);
+      assert.deepEqual(options.env, driverTest.SOURCE_GIT_ENV);
+      if (gitArgs.join(" ") === "rev-parse --show-toplevel") return { code: 0, stdout: `${state.gitRoot}\n`, stderr: "" };
+      if (gitArgs.join(" ") === "branch --show-current") return { code: 0, stdout: `${state.gitBranch}\n`, stderr: "" };
+      if (gitArgs.join(" ") === "rev-parse HEAD") return { code: 0, stdout: `${state.gitCommit}\n`, stderr: "" };
+      if (gitArgs.join(" ") === "rev-parse HEAD^{tree}") return { code: 0, stdout: `${state.gitTree}\n`, stderr: "" };
+      if (gitArgs.join(" ") === "ls-files -v -z --cached") {
+        return { code: 0, stdout: state.gitIndex, stderr: "" };
+      }
+      if (gitArgs.join(" ") === "status --porcelain=v1 --untracked-files=all --ignore-submodules=none") {
         return { code: 0, stdout: state.gitStatus, stderr: "" };
       }
       return { code: 9, stdout: "", stderr: "" };
@@ -767,6 +786,126 @@ check("child processes receive only bounded OS and Cloudflare authentication env
     dirname(driverTest.SANDBOX_ENTRYPOINT),
     "/tmp/project2-owned-config",
   ]);
+});
+
+check("F-02 local source preflight is credential-free, tree-bound, and fails closed before staging", async () => {
+  const exactArgs = [
+    driverTest.F02_LOCAL_SOURCE_ACTION,
+    driverTest.F02_REVIEWED_COMMIT_ARG, COMMIT,
+    driverTest.F02_REVIEWED_TREE_ARG, TREE,
+  ];
+  const runner = makeRunner();
+  const prompt = promptFrom([]);
+  const saved = {
+    CLOUDFLARE_API_TOKEN: process.env.CLOUDFLARE_API_TOKEN,
+    CF_API_TOKEN: process.env.CF_API_TOKEN,
+    SQUARE_ACCEPTANCE_QUEUES_READ_TOKEN: process.env.SQUARE_ACCEPTANCE_QUEUES_READ_TOKEN,
+    XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+  };
+  process.env.CLOUDFLARE_API_TOKEN = "preflight-no-token";
+  process.env.CF_API_TOKEN = "preflight-no-cf";
+  process.env.SQUARE_ACCEPTANCE_QUEUES_READ_TOKEN = "preflight-no-read";
+  process.env.XDG_CONFIG_HOME = "/tmp/preflight-no-xdg";
+  let result;
+  try {
+    result = await invokeMain(exactArgs, prompt, runner, {
+      keychainAccess: new Proxy({}, {
+        get() { throw new Error("local source preflight must not access Keychain"); },
+      }),
+      createPrivateOperatorXdgHomeImpl: () => {
+        throw new Error("local source preflight must not create a private XDG home");
+      },
+    });
+  } finally {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+  assert.equal(result.status, 0);
+  assert.deepEqual(result.output, [
+    "STATUS=COMPLETE RESULT=F02_LOCAL_SOURCE_BOUNDARY_VERIFIED",
+  ]);
+  prompt.assertDone();
+  const expectedGitCommands = [
+    ["rev-parse", "--show-toplevel"],
+    ["branch", "--show-current"],
+    ["rev-parse", "HEAD"],
+    ["rev-parse", "HEAD^{tree}"],
+    ["ls-files", "-v", "-z", "--cached"],
+    ["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"],
+  ];
+  assert.equal(runner.state.calls.length, expectedGitCommands.length);
+  for (const [index, call] of runner.state.calls.entries()) {
+    assert.equal(call.command, driverTest.GIT_BIN);
+    assert.deepEqual(call.args, [
+      ...driverTest.SOURCE_GIT_PREFIX_ARGS, ...expectedGitCommands[index],
+    ]);
+    assert.deepEqual(call.env, driverTest.SOURCE_GIT_ENV);
+    assert.equal(call.sourceEnvProvided, true);
+    assert.deepEqual(call.sourceEnv, {});
+    assert.deepEqual(driverTest.childEnvironment(call.env, call.sourceEnv), {
+      ...driverTest.SOURCE_GIT_ENV,
+      CI: "1",
+      NO_COLOR: "1",
+      FORCE_COLOR: "0",
+    });
+    assert.equal(Object.values(call.sourceEnv).some((value) => String(value).includes("preflight-no")), false);
+  }
+
+  for (const candidate of [
+    makeRunner({ gitBranch: "" }),
+    makeRunner({ gitBranch: "codex/f02-source-preflight" }),
+    makeRunner({ gitCommit: "d".repeat(40) }),
+    makeRunner({ gitTree: "e".repeat(40) }),
+    makeRunner({ gitRoot: "/private/tmp" }),
+    makeRunner({ gitIndex: "h README.md\0" }),
+    makeRunner({ gitIndex: "S README.md\0" }),
+    makeRunner({ gitIndex: "s README.md\0" }),
+    makeRunner({ gitIndex: "H README.md" }),
+    makeRunner({ gitIndex: "" }),
+    makeRunner({ gitStatus: " M scripts/manage-square-sandbox-fault-window.mjs\n" }),
+    makeRunner({ gitStatus: "M  scripts/manage-square-sandbox-fault-window.mjs\n" }),
+    makeRunner({ gitStatus: "UU scripts/manage-square-sandbox-fault-window.mjs\n" }),
+    makeRunner({ gitStatus: "?? private-artifact\n" }),
+  ]) {
+    const rejected = await invokeMain(exactArgs, promptFrom([]), candidate);
+    assert.equal(rejected.status, 2);
+    assert.deepEqual(rejected.output, ["STATUS=REJECTED RESULT=GIT_BOUNDARY_REJECTED"]);
+    assert.ok(candidate.state.calls.every((call) => call.command === driverTest.GIT_BIN));
+  }
+
+  const failedGit = interceptRunner(makeRunner(), ({ command, args }) =>
+    command === driverTest.GIT_BIN &&
+      args.slice(driverTest.SOURCE_GIT_PREFIX_ARGS.length).join(" ") ===
+        "rev-parse --show-toplevel"
+      ? { code: 9, stdout: "", stderr: "" }
+      : null);
+  const failed = await invokeMain(exactArgs, promptFrom([]), failedGit);
+  assert.equal(failed.status, 2);
+  assert.deepEqual(failed.output, ["STATUS=REJECTED RESULT=GIT_BOUNDARY_REJECTED"]);
+
+  for (const malformed of [
+    [driverTest.F02_LOCAL_SOURCE_ACTION],
+    [...exactArgs, "extra"],
+    [driverTest.F02_LOCAL_SOURCE_ACTION,
+      driverTest.F02_REVIEWED_TREE_ARG, TREE,
+      driverTest.F02_REVIEWED_COMMIT_ARG, COMMIT],
+    [driverTest.F02_LOCAL_SOURCE_ACTION,
+      driverTest.F02_REVIEWED_COMMIT_ARG, COMMIT.toUpperCase(),
+      driverTest.F02_REVIEWED_TREE_ARG, TREE],
+    [driverTest.F02_LOCAL_SOURCE_ACTION,
+      driverTest.F02_REVIEWED_COMMIT_ARG, { toString: () => COMMIT },
+      driverTest.F02_REVIEWED_TREE_ARG, TREE],
+  ]) {
+    const malformedRunner = makeRunner();
+    const rejected = await invokeMain(malformed, promptFrom([]), malformedRunner);
+    assert.equal(rejected.status, 2);
+    assert.deepEqual(rejected.output, [
+      "STATUS=REJECTED RESULT=F02_LOCAL_SOURCE_INPUT_REJECTED",
+    ]);
+    assert.equal(malformedRunner.state.calls.length, 0);
+  }
 });
 
 check("read-only check verifies exact Git, account, config, Wrangler and all-off traffic", async () => {
@@ -1448,7 +1587,7 @@ check("standalone legacy recovery restores exact target traffic once and is idem
   const recoveryConfig = targetDeployments[0].args[targetDeployments[0].args.indexOf("--config") + 1];
   assert.ok(recoveryConfig.startsWith(`${tmpdir()}/spartan-square-rollback-control-`));
   assert.equal(existsSync(recoveryConfig), false);
-  assert.equal(targetRunner.state.calls.some((call) => call.command === "git"), false);
+  assert.equal(targetRunner.state.calls.some((call) => call.command === driverTest.GIT_BIN), false);
   assert.equal(targetRunner.state.calls.some((call) => call.args.includes("upload") || call.args.includes("secret")), false);
 
   const sourceRunner = makeRunner({
@@ -1466,7 +1605,7 @@ check("standalone legacy recovery restores exact target traffic once and is idem
   ]);
   sourcePrompt.assertDone();
   assert.equal(sourceRunner.state.calls.some((call) => call.args.includes("deploy")), false);
-  assert.equal(sourceRunner.state.calls.some((call) => call.command === "git"), false);
+  assert.equal(sourceRunner.state.calls.some((call) => call.command === driverTest.GIT_BIN), false);
 
   const genericRunner = makeRunner({
     versions: legacyMigrationVersions(),
@@ -1586,7 +1725,15 @@ check("account and worktree drift fail closed before mutation", async () => {
   assert.equal(driverTest.BRANCH, "main", "the merged operator must require the main branch");
   const procedure = readFileSync(resolve(driverTest.ROOT, "docs/SQUARE-SANDBOX-FAULT-HOOKS.md"), "utf8");
   assert.match(procedure, /The check requires the exact `main` branch,/);
+  assert.match(procedure, /Before initializing an F-02 Keychain namespace,[\s\S]*--check-f02-local-source/);
+  assert.match(procedure, /detached checkout[\s\S]*is rejected/i);
+  assert.match(procedure, /before reading the Workers Scripts Edit credential/);
   assert.doesNotMatch(procedure, /codex\/square-claim-redemption/);
+  const decisionRecord = readFileSync(resolve(
+    driverTest.ROOT, "docs/PROJECT-2-ACTIVATION-DECISION-RECORD.md",
+  ), "utf8");
+  assert.match(decisionRecord, /before the owner opens the live readiness window[\s\S]*--check-f02-local-source/i);
+  assert.match(decisionRecord, /do not create a token to diagnose a source-boundary failure/i);
 
   const wrongAccount = makeRunner({ account: "9".repeat(32) });
   const accountResult = await invokeMain(["--check"], promptFrom(commonPrompt()), wrongAccount);
@@ -2010,6 +2157,96 @@ check("F-02 Keychain candidate mode recomputes controls, confines W to exact Wra
     [F02_KEYCHAIN_ITEMS.workersEditToken]: workersToken,
     [F02_KEYCHAIN_ITEMS.readBundleToken]: readBundleToken,
   };
+  const detachedEvents = [];
+  const detachedKeychain = memoryF02Keychain(initial, detachedEvents);
+  const detachedRunner = makeRunner({
+    gitBranch: "", uploadIds: [UPLOAD], secretIds: [CANDIDATE],
+  });
+  let detachedXdgCreations = 0;
+  const detached = await invokeMain([
+    ...driverTest.PREPARE_OFFER_ISOLATION_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["LOAD_F02_OPERATOR_KEYCHAIN_ONCE"]), detachedRunner, {
+    keychainAccess: detachedKeychain,
+    now: () => now,
+    createPrivateOperatorXdgHomeImpl: () => {
+      detachedXdgCreations += 1;
+      throw new Error("detached preparation must stop before private XDG creation");
+    },
+  });
+  assert.equal(detached.status, 2);
+  assert.deepEqual(detached.output, ["STATUS=REJECTED RESULT=GIT_BOUNDARY_REJECTED"]);
+  assert.equal(detachedXdgCreations, 0);
+  assert.equal(detachedEvents.some((event) =>
+    event.type === "keychain-read" &&
+      event.account === F02_KEYCHAIN_ITEMS.workersEditToken), false,
+  "detached preparation rejects before reading the Workers Edit credential");
+  assert.equal(detachedKeychain.values.get(F02_KEYCHAIN_ITEMS.bundleState), "HELPER_COMPLETE");
+  assert.equal(detachedKeychain.values.has(F02_KEYCHAIN_ITEMS.operatorLease), false);
+  assert.equal(detachedKeychain.values.has(F02_KEYCHAIN_ITEMS.candidateVersion), false);
+  assert.ok(detachedRunner.state.calls.length > 0);
+  assert.ok(detachedRunner.state.calls.every((call) => call.command === driverTest.GIT_BIN &&
+    !Object.hasOwn(call.env, "CLOUDFLARE_API_TOKEN")));
+
+  const earlyWranglerEvents = [];
+  const earlyWranglerKeychain = memoryF02Keychain(initial, earlyWranglerEvents);
+  const earlyWranglerRunner = interceptRunner(makeRunner(), ({ command, args }) =>
+    command === "npx" && args.join(" ") === "--no-install wrangler --version"
+      ? { code: 8, stdout: "", stderr: "" }
+      : null);
+  const earlyWranglerRejected = await invokeMain([
+    ...driverTest.PREPARE_OFFER_ISOLATION_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["LOAD_F02_OPERATOR_KEYCHAIN_ONCE"]), earlyWranglerRunner, {
+    keychainAccess: earlyWranglerKeychain,
+    now: () => now,
+  });
+  assert.equal(earlyWranglerRejected.status, 2);
+  assert.deepEqual(earlyWranglerRejected.output,
+    ["STATUS=REJECTED RESULT=WRANGLER_VERSION_REJECTED"]);
+  assert.equal(earlyWranglerEvents.some((event) =>
+    event.type === "keychain-read" && event.account === F02_KEYCHAIN_ITEMS.workersEditToken), false);
+  const earlyWranglerCall = earlyWranglerRunner.state.calls.find((call) =>
+    call.command === "npx" && call.args.join(" ") === "--no-install wrangler --version");
+  assert.equal(earlyWranglerCall.env.HOME, earlyWranglerCall.env.XDG_CONFIG_HOME);
+  assert.equal(existsSync(earlyWranglerCall.env.HOME), false,
+    "early Wrangler rejection removes the private HOME/XDG before return");
+  assert.equal(earlyWranglerRunner.state.calls.some((call) =>
+    Object.hasOwn(call.env, "CLOUDFLARE_API_TOKEN")), false);
+
+  const tokenReadEvents = [];
+  const tokenReadBase = memoryF02Keychain(initial, tokenReadEvents);
+  const tokenReadKeychain = {
+    ...tokenReadBase,
+    async read(account, validation) {
+      if (account === F02_KEYCHAIN_ITEMS.workersEditToken) {
+        tokenReadEvents.push({ type: "keychain-read-attempt", account });
+        const error = new Error("fixture W-token read rejection");
+        error.code = "F02_KEYCHAIN_ITEM_UNAVAILABLE";
+        throw error;
+      }
+      return tokenReadBase.read(account, validation);
+    },
+  };
+  const tokenReadRunner = makeRunner();
+  const tokenReadRejected = await invokeMain([
+    ...driverTest.PREPARE_OFFER_ISOLATION_ARGS, F02_KEYCHAIN_FLAG, namespace,
+  ], promptFrom(["LOAD_F02_OPERATOR_KEYCHAIN_ONCE"]), tokenReadRunner, {
+    keychainAccess: tokenReadKeychain,
+    now: () => now,
+  });
+  assert.equal(tokenReadRejected.status, 3);
+  assert.deepEqual(tokenReadRejected.output,
+    ["STATUS=REJECTED RESULT=F02_KEYCHAIN_INPUT_REJECTED"]);
+  assert.equal(tokenReadEvents.filter((event) =>
+    event.type === "keychain-read-attempt" &&
+      event.account === F02_KEYCHAIN_ITEMS.workersEditToken).length, 1);
+  const tokenReadWranglerCall = tokenReadRunner.state.calls.find((call) =>
+    call.command === "npx" && call.args.join(" ") === "--no-install wrangler --version");
+  assert.equal(tokenReadWranglerCall.env.HOME, tokenReadWranglerCall.env.XDG_CONFIG_HOME);
+  assert.equal(existsSync(tokenReadWranglerCall.env.HOME), false,
+    "W-token read rejection removes the private HOME/XDG before return");
+  assert.equal(tokenReadRunner.state.calls.some((call) =>
+    Object.hasOwn(call.env, "CLOUDFLARE_API_TOKEN")), false);
+
   const deletionFenceKeychain = memoryF02Keychain(initial);
   const deletionFenceRunner = makeRunner({ uploadIds: [UPLOAD], secretIds: [CANDIDATE] });
   const deletionFenceLock = await keychainTest.acquireF02NamespaceOperationLock(namespace, {
@@ -2087,8 +2324,41 @@ check("F-02 Keychain candidate mode recomputes controls, confines W to exact Wra
   assert.equal(runner.state.trafficId, BASELINE);
   const reservation = events.findIndex((event) =>
     event.type === "keychain-store" && event.account === F02_KEYCHAIN_ITEMS.candidateVersion);
+  const workersTokenRead = events.findIndex((event) =>
+    event.type === "keychain-read" && event.account === F02_KEYCHAIN_ITEMS.workersEditToken);
   const firstCredentialRun = events.findIndex((event) =>
     event.type === "run" && event.env.CLOUDFLARE_API_TOKEN === workersToken);
+  const earlyPreflightRuns = events.filter((event, index) =>
+    index < workersTokenRead && event.type === "run");
+  const expectedLocalPreflight = [
+    { command: driverTest.GIT_BIN, args: ["rev-parse", "--show-toplevel"] },
+    { command: driverTest.GIT_BIN, args: ["branch", "--show-current"] },
+    { command: driverTest.GIT_BIN, args: ["rev-parse", "HEAD"] },
+    { command: driverTest.GIT_BIN, args: ["ls-files", "-v", "-z", "--cached"] },
+    { command: driverTest.GIT_BIN,
+      args: ["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"] },
+    { command: "npx", args: ["--no-install", "wrangler", "--version"] },
+  ];
+  assert.equal(earlyPreflightRuns.length, expectedLocalPreflight.length,
+    "exact Git/config and pinned Wrangler preflight completes before the Workers Edit credential read");
+  let earlyPrivateXdg = "";
+  for (const [index, event] of earlyPreflightRuns.entries()) {
+    const expected = expectedLocalPreflight[index];
+    assert.equal(event.command, expected.command);
+    assert.deepEqual(event.args, expected.command === driverTest.GIT_BIN
+      ? [...driverTest.SOURCE_GIT_PREFIX_ARGS, ...expected.args]
+      : expected.args);
+    assert.equal(Object.hasOwn(event.env, "CLOUDFLARE_API_TOKEN"), false);
+    if (event.command === driverTest.GIT_BIN) {
+      assert.deepEqual(event.env, driverTest.SOURCE_GIT_ENV);
+    } else {
+      assert.equal(event.env.HOME, event.env.XDG_CONFIG_HOME);
+      assert.notEqual(event.env.HOME, "/tmp/standing-xdg-must-not-flow");
+      earlyPrivateXdg = event.env.HOME;
+    }
+  }
+  assert.notEqual(earlyPrivateXdg, "",
+    "credential-free Wrangler version check uses the private HOME/XDG before W is read");
   const lastCredentialFreePreflight = events.reduce((last, event, index) =>
     event.type === "run" && !Object.hasOwn(event.env, "CLOUDFLARE_API_TOKEN")
       ? index : last, -1);
@@ -2101,17 +2371,19 @@ check("F-02 Keychain candidate mode recomputes controls, confines W to exact Wra
     assert.equal(Object.values(event.sourceEnv).includes("standing-token-must-not-flow"), false);
     assert.equal(Object.values(event.sourceEnv).includes("standing-read-must-not-flow"), false);
     assert.equal(Object.values(event.sourceEnv).includes("/tmp/standing-xdg-must-not-flow"), false);
-    if (event.command === "git") {
+    if (event.command === driverTest.GIT_BIN) {
       assert.equal(Object.hasOwn(event.env, "CLOUDFLARE_API_TOKEN"), false);
-      assert.equal(Object.hasOwn(event.env, "XDG_CONFIG_HOME"), false);
+      assert.deepEqual(event.env, driverTest.SOURCE_GIT_ENV);
       continue;
     }
     assert.deepEqual(event.args.slice(0, 2), ["--no-install", "wrangler"]);
-    xdgHomes.add(event.env.XDG_CONFIG_HOME);
-    assert.equal(event.env.HOME, event.env.XDG_CONFIG_HOME);
     if (event.args.length === 3 && event.args[2] === "--version") {
       assert.equal(Object.hasOwn(event.env, "CLOUDFLARE_API_TOKEN"), false);
+      xdgHomes.add(event.env.XDG_CONFIG_HOME);
+      assert.equal(event.env.HOME, event.env.XDG_CONFIG_HOME);
     } else {
+      xdgHomes.add(event.env.XDG_CONFIG_HOME);
+      assert.equal(event.env.HOME, event.env.XDG_CONFIG_HOME);
       assert.equal(event.env.CLOUDFLARE_API_TOKEN, workersToken);
     }
   }
@@ -2199,10 +2471,16 @@ check("F-02 Keychain candidate mode recomputes controls, confines W to exact Wra
     now: () => now,
   });
   assert.notEqual(rejected.status, 0);
-  assert.equal(rejectedRunner.state.calls.length, 5);
-  assert.ok(rejectedRunner.state.calls.every((call) =>
-    !Object.hasOwn(call.env, "CLOUDFLARE_API_TOKEN")),
-  "derived-control mismatch stops after credential-free local preflight and before W-authenticated work");
+  const expectedRejectedPreflight = [...expectedLocalPreflight, ...expectedLocalPreflight];
+  assert.equal(rejectedRunner.state.calls.length, expectedRejectedPreflight.length);
+  for (const [index, call] of rejectedRunner.state.calls.entries()) {
+    const expected = expectedRejectedPreflight[index];
+    assert.equal(call.command, expected.command);
+    assert.deepEqual(call.args, expected.command === driverTest.GIT_BIN
+      ? [...driverTest.SOURCE_GIT_PREFIX_ARGS, ...expected.args]
+      : expected.args);
+    assert.equal(Object.hasOwn(call.env, "CLOUDFLARE_API_TOKEN"), false);
+  }
   assert.equal(rejectedKeychain.values.has(F02_KEYCHAIN_ITEMS.operatorLease), false);
   assert.equal(rejectedKeychain.values.has(F02_KEYCHAIN_ITEMS.candidateVersion), false);
 
@@ -5289,7 +5567,7 @@ check("rollback is exact, idempotent and deliberately independent of Git drift",
   assert.equal(result.status, 0);
   assert.deepEqual(result.output, ["STATUS=COMPLETE RESULT=EXACT_ALL_OFF_ROLLBACK_CONFIRMED"]);
   assert.equal(runner.state.trafficId, BASELINE);
-  assert.ok(!runner.state.calls.some((call) => call.command === "git"));
+  assert.ok(!runner.state.calls.some((call) => call.command === driverTest.GIT_BIN));
 
   const second = await invokeMain(driverTest.ROLLBACK_ARGS,
     promptFrom(commonPrompt({ candidate: true, commit: false })), runner);

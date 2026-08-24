@@ -98,6 +98,30 @@ const LEGACY_ALL_OFF_VARS = Object.freeze(Object.fromEntries(
     .filter(([name]) => name !== "SQUARE_SANDBOX_FAULTS_ENABLED"),
 ));
 const BRANCH = "main";
+const GIT_BIN = "/usr/bin/git";
+const SOURCE_GIT_PREFIX_ARGS = Object.freeze([
+  "--no-optional-locks",
+  "-c", "core.attributesFile=/dev/null",
+  "-c", "core.excludesFile=/dev/null",
+  "-c", "core.fsmonitor=false",
+  "-c", "core.hooksPath=/dev/null",
+  "-c", "core.ignoreStat=false",
+  "-c", "core.untrackedCache=false",
+]);
+const SOURCE_GIT_ENV = Object.freeze({
+  GIT_ATTR_NOSYSTEM: "1",
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_OPTIONAL_LOCKS: "0",
+  GIT_TERMINAL_PROMPT: "0",
+  HOME: "/dev/null",
+  LC_ALL: "C",
+  PATH: "/usr/bin:/bin",
+  XDG_CONFIG_HOME: "/dev/null",
+});
+const F02_LOCAL_SOURCE_ACTION = "--check-f02-local-source";
+const F02_REVIEWED_COMMIT_ARG = "--reviewed-commit";
+const F02_REVIEWED_TREE_ARG = "--reviewed-tree";
 const WORKER = "spartan-square-connector-sandbox";
 const WRANGLER_VERSION = "4.124.0";
 const D1_ID = "9531221e-cabe-4ed4-b7d4-f715798b8945";
@@ -129,6 +153,11 @@ const CHILD_ENV_ALLOWLIST = new Set([
   "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
   "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_API_KEY", "CLOUDFLARE_EMAIL",
   "CLOUDFLARE_ACCOUNT_ID", "CF_API_TOKEN", "CF_API_KEY", "CF_EMAIL", "CF_ACCOUNT_ID",
+]);
+const CHILD_ENV_FIXED_OVERRIDE_ALLOWLIST = new Set([
+  ...CHILD_ENV_ALLOWLIST,
+  "GIT_ATTR_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM",
+  "GIT_OPTIONAL_LOCKS", "GIT_TERMINAL_PROMPT",
 ]);
 
 const FAULT_SECRET_NAMES = Object.freeze([
@@ -720,7 +749,7 @@ function childEnvironment(overrides = {}, source = process.env) {
     if (Object.hasOwn(source, name)) result[name] = String(source[name]);
   }
   for (const [name, value] of Object.entries(overrides)) {
-    if (!CHILD_ENV_ALLOWLIST.has(name)) fail("CHILD_ENV_REJECTED");
+    if (!CHILD_ENV_FIXED_OVERRIDE_ALLOWLIST.has(name)) fail("CHILD_ENV_REJECTED");
     result[name] = String(value);
   }
   return { ...result, CI: "1", NO_COLOR: "1", FORCE_COLOR: "0" };
@@ -1337,15 +1366,44 @@ function cloudflareEnv(accountId) {
   return { CLOUDFLARE_ACCOUNT_ID: accountId };
 }
 
-async function verifyLocalGit(run, reviewedCommit) {
-  const root = await invoke(run, "git", ["rev-parse", "--show-toplevel"], {}, "GIT_BOUNDARY_REJECTED");
-  const branch = await invoke(run, "git", ["branch", "--show-current"], {}, "GIT_BOUNDARY_REJECTED");
-  const commit = await invoke(run, "git", ["rev-parse", "HEAD"], {}, "GIT_BOUNDARY_REJECTED");
-  const status = await invoke(run, "git", ["status", "--porcelain=v1", "--untracked-files=all"], {}, "GIT_BOUNDARY_REJECTED");
+async function verifyLocalGit(run, reviewedCommit, reviewedTree = "") {
+  const sourceEnv = Object.freeze({});
+  const git = (args) => invoke(
+    run, GIT_BIN, [...SOURCE_GIT_PREFIX_ARGS, ...args],
+    { env: SOURCE_GIT_ENV, sourceEnv }, "GIT_BOUNDARY_REJECTED",
+  );
+  const root = await git(["rev-parse", "--show-toplevel"]);
+  const branch = await git(["branch", "--show-current"]);
+  const commit = await git(["rev-parse", "HEAD"]);
+  const tree = reviewedTree === ""
+    ? null
+    : await git(["rev-parse", "HEAD^{tree}"]);
+  const index = await git(["ls-files", "-v", "-z", "--cached"]);
+  const status = await git([
+    "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none",
+  ]);
   let actualRoot;
   try { actualRoot = realpathSync(root.stdout.trim()); } catch { fail("GIT_BOUNDARY_REJECTED"); }
+  const indexRecords = index.stdout === ""
+    ? []
+    : index.stdout.endsWith("\0")
+      ? index.stdout.slice(0, -1).split("\0")
+      : null;
   if (actualRoot !== ROOT || branch.stdout.trim() !== BRANCH || commit.stdout.trim().toLowerCase() !== reviewedCommit.toLowerCase() ||
+      (tree !== null && tree.stdout.trim().toLowerCase() !== reviewedTree.toLowerCase()) ||
+      indexRecords === null || indexRecords.length === 0 ||
+      indexRecords.some((record) => record.length < 3 || !record.startsWith("H ")) ||
       status.stdout.trim() !== "") fail("GIT_BOUNDARY_REJECTED");
+}
+
+function parseF02LocalSourceArgs(argv) {
+  if (!Array.isArray(argv) || argv[0] !== F02_LOCAL_SOURCE_ACTION) return null;
+  if (argv.length !== 5 || argv[1] !== F02_REVIEWED_COMMIT_ARG ||
+      argv[3] !== F02_REVIEWED_TREE_ARG || typeof argv[2] !== "string" ||
+      typeof argv[4] !== "string" || !COMMIT.test(argv[2]) || !COMMIT.test(argv[4])) {
+    fail("F02_LOCAL_SOURCE_INPUT_REJECTED");
+  }
+  return Object.freeze({ reviewedCommit: argv[2], reviewedTree: argv[4] });
 }
 
 async function remoteJson(run, accountId, args, code) {
@@ -1378,14 +1436,16 @@ async function verifyWrangler(run) {
   if (result.stdout.trim() !== WRANGLER_VERSION) fail("WRANGLER_VERSION_REJECTED");
 }
 
-async function verifyBaselineLocalPreflight(run, inputs, { localGit = true } = {}) {
+async function verifyBaselineLocalPreflight(run, inputs, {
+  localGit = true, localWrangler = true,
+} = {}) {
   validateLocalBoundary();
   for (const name of FAULT_SECRET_NAMES) {
     if (Object.hasOwn(process.env, name)) fail("FAULT_SECRET_ENV_REJECTED");
   }
   if (Object.hasOwn(process.env, "SQUARE_SANDBOX_CONTROL_PROFILE")) fail("CHILD_ENV_REJECTED");
   if (localGit) await verifyLocalGit(run, inputs.reviewedCommit);
-  await verifyWrangler(run);
+  if (localWrangler) await verifyWrangler(run);
 }
 
 async function verifyBaseline(run, inputs, baseVars, {
@@ -2811,13 +2871,42 @@ export async function sandboxFaultWindowMain(argv = process.argv.slice(2), depen
             !["CANDIDATE_COMPLETE", "COORDINATOR_STARTED", "REQUEST_ATTEMPTED"].includes(keychainState))) {
         fail("F02_KEYCHAIN_STATE_REJECTED");
       }
+      if (keychainAction === "prepare") {
+        const reviewedCommit = await keychain.read(F02_KEYCHAIN_ITEMS.reviewedCommit, {
+          maxBytes: 40, pattern: COMMIT,
+        });
+        const sourceEnv = credentialFreeChildSourceEnvironment();
+        const localRun = (command, args, options = {}) => baseRun(command, args, {
+          sourceEnv,
+          ...options,
+        });
+        await verifyBaselineLocalPreflight(
+          localRun, { reviewedCommit }, { localWrangler: false },
+        );
+        privateXdgHome = (dependencies.createPrivateOperatorXdgHomeImpl ||
+          createPrivateOperatorXdgHome)();
+        assertPrivateOperatorXdgHome(privateXdgHome);
+        ACTIVE_PRIVATE_XDG_HOMES.add(privateXdgHome);
+        const localWranglerRun = (command, args, options = {}) => baseRun(command, args, {
+          ...options,
+          sourceEnv,
+          env: {
+            ...(options.env || {}),
+            HOME: privateXdgHome,
+            XDG_CONFIG_HOME: privateXdgHome,
+          },
+        });
+        await verifyWrangler(localWranglerRun);
+      }
       editToken = await keychain.read(F02_KEYCHAIN_ITEMS.workersEditToken, {
         maxBytes: 512, pattern: /^[^\s\0]{32,512}$/,
       });
-      privateXdgHome = (dependencies.createPrivateOperatorXdgHomeImpl ||
-        createPrivateOperatorXdgHome)();
-      assertPrivateOperatorXdgHome(privateXdgHome);
-      ACTIVE_PRIVATE_XDG_HOMES.add(privateXdgHome);
+      if (!privateXdgHome) {
+        privateXdgHome = (dependencies.createPrivateOperatorXdgHomeImpl ||
+          createPrivateOperatorXdgHome)();
+        assertPrivateOperatorXdgHome(privateXdgHome);
+        ACTIVE_PRIVATE_XDG_HOMES.add(privateXdgHome);
+      }
       const sourceEnv = credentialFreeChildSourceEnvironment();
       run = (command, args, options = {}) => {
         const wranglerClass = f02KeychainWranglerClass(command, args);
@@ -2826,7 +2915,7 @@ export async function sandboxFaultWindowMain(argv = process.argv.slice(2), depen
         const credentialChild = wranglerClass === "edit-credential";
         return baseRun(command, args, {
           ...options,
-          sourceEnv,
+          sourceEnv: options.sourceEnv === undefined ? sourceEnv : options.sourceEnv,
           sentinels: [...(Array.isArray(options.sentinels) ? options.sentinels : []), editToken],
           env: {
             ...(options.env || {}),
@@ -2850,6 +2939,20 @@ export async function sandboxFaultWindowMain(argv = process.argv.slice(2), depen
     }
     if (sameArgs(argv, ["--plan"])) {
       for (const line of FIXED_PLAN) print(line);
+      return 0;
+    }
+    const localSource = parseF02LocalSourceArgs(argv);
+    if (localSource) {
+      validateLocalBoundary();
+      const sourceEnv = credentialFreeChildSourceEnvironment();
+      const localRun = (command, args, options = {}) => baseRun(command, args, {
+        sourceEnv,
+        ...options,
+      });
+      await verifyLocalGit(
+        localRun, localSource.reviewedCommit, localSource.reviewedTree,
+      );
+      print("STATUS=COMPLETE RESULT=F02_LOCAL_SOURCE_BOUNDARY_VERIFIED");
       return 0;
     }
     if (sameArgs(argv, ["--check"])) {
@@ -3687,7 +3790,9 @@ export const __test = Object.freeze({
   DEPLOY_O01_ISOLATION_ARGS, DEPLOY_O01_SEED_ARGS, DEPLOY_P01_ISOLATION_ARGS, DEPLOY_P01_RECOVERY_ARGS,
   DEPLOY_P02_ISOLATION_ARGS, DEPLOY_REPLAY_ISOLATION_ARGS,
   DEPLOY_Q01_ISOLATION_ARGS, DEPLOY_Q02_ISOLATION_ARGS, DEPLOY_REPLAY_SEED_ARGS, DEPLOY_SEED_ARGS,
-  D1_ID, FAULT_SECRET_NAMES, FIXED_PLAN, IMMUTABLE_ALL_OFF_VARS, LEGACY_ALL_OFF_VARS,
+  D1_ID, FAULT_SECRET_NAMES, FIXED_PLAN, F02_LOCAL_SOURCE_ACTION, GIT_BIN,
+  F02_REVIEWED_COMMIT_ARG, F02_REVIEWED_TREE_ARG,
+  IMMUTABLE_ALL_OFF_VARS, LEGACY_ALL_OFF_VARS,
   MIGRATE_LEGACY_BASELINE_ARGS, MODES, NON_INJECTING_MODES, OFFER_MODES,
   F04_APPS_FINALIZE_MODE, F04_CHAIN_MODES, F04_FAULT_MODES, F04_RECOVERY_ISOLATION_MODE, F04_SEARCH_MODE,
   OFFER_ROUTE_ISOLATION_MODE, OFFER_ROUTE_MODES, PREPARE_ARGS,
@@ -3704,7 +3809,8 @@ export const __test = Object.freeze({
   RECOVER_LEGACY_BASELINE_ARGS, REPLAY_ISOLATION_MODE, REPLAY_SEED_KIND,
   ROLLBACK_ARGS, ROLLBACK_RECOVERY_ARGS, SEED_KIND,
   ROLLBACK_F04_APPS_FINALIZE_ARGS, ROLLBACK_F04_RECOVERY_ARGS, ROLLBACK_F04_SEARCH_ARGS,
-  ROOT, SANDBOX_ENTRYPOINT, SANDBOX_MIGRATIONS_DIR, STANDING_SECRET_NAMES, WORKER, WRANGLER_VERSION,
+  ROOT, SANDBOX_ENTRYPOINT, SANDBOX_MIGRATIONS_DIR, SOURCE_GIT_ENV,
+  SOURCE_GIT_PREFIX_ARGS, STANDING_SECRET_NAMES, WORKER, WRANGLER_VERSION,
   assertAnyCaseCandidate, assertNoWranglerDotenvFiles, assertTraffic, assertVersionMetadata,
   childEnvironment, expectedCandidateVars,
   cleanupPrivateOperatorXdgHome, createPrivateOperatorXdgHome,

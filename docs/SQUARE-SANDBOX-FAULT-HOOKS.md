@@ -244,6 +244,17 @@ It fixes `SQUARE_GROUP_REMOVE_FAILURE`, accepts the canonical lowercase UUIDv4 p
 
 `scripts/manage-square-sandbox-fault-window.mjs` is the only reviewed command composer for the temporary sandbox Worker versions in this procedure. It does not send a webhook, call Square or Apps, inspect a Queue body, change D1, or run an acceptance case. Empty invocation is inert. `--plan` prints a fixed no-mutation sequence, and `--check` performs only local/read-only checks after collecting the expected account ID, full reviewed commit and exact all-off rollback version through non-echoing prompts:
 
+Before initializing an F-02 Keychain namespace, opening a live readiness window or creating either temporary Cloudflare credential, run this credential-free source gate from the fresh private non-iCloud checkout:
+
+```sh
+node scripts/manage-square-sandbox-fault-window.mjs \
+  --check-f02-local-source \
+  --reviewed-commit <exact-lowercase-40-hex-commit> \
+  --reviewed-tree <exact-lowercase-40-hex-tree>
+```
+
+The commit and tree are nonsecret reviewed source identifiers. This command accepts no Keychain selector or private input, creates no namespace, lock marker or private Wrangler directory, and performs no Wrangler, network or provider action. It invokes only `/usr/bin/git` with system/global configuration, hooks, filesystem monitoring and optional locks disabled; its fixed child environment contains no ambient credential, proxy, home or XDG values. It requires the script's exact repository root, the case-sensitive local branch name `main`, the exact reviewed `HEAD`, the exact reviewed `HEAD^{tree}`, no assume-unchanged or skip-worktree entries, and an empty tracked, staged, conflicted and non-ignored untracked porcelain status. A detached checkout, either hidden-entry flag, or a checkout that merely has the right `origin/main` snapshot is rejected. Its only success is `STATUS=COMPLETE RESULT=F02_LOCAL_SOURCE_BOUNDARY_VERIFIED`; every mismatch is a stop before credential creation. The result is point-in-time source evidence, not readiness or traffic authority. The Keychain candidate operator repeats its own local Git/config/Wrangler boundary immediately before any provider access: on preparation, it completes the Git/config check, creates the attempt-private Wrangler home and verifies the pinned credential-free Wrangler binary inside that home before reading the Workers Scripts Edit credential.
+
 ```sh
 node scripts/manage-square-sandbox-fault-window.mjs
 node scripts/manage-square-sandbox-fault-window.mjs --plan
