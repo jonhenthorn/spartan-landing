@@ -382,7 +382,7 @@ input.window-end-utc
 
 The staging command validates the selected value, creates the Keychain item without replacement, reads it back exactly, clears the clipboard and verifies that the clipboard is empty before returning its fixed success. The shared lock prevents cleanup, initialization or another store from entering during that interval. Never place a raw value in `<item-label>`, the namespace, shell history or a shared transcript. After all required inputs are staged, run:
 
-The native Keychain writer supplies the value once, followed by one newline, to macOS `security add-generic-password ... -w` and requires the exact documented single `password data for new item:` prompt. A missing, repeated or otherwise drifted prompt is a fail-closed store rejection; never respond by repeating the namespace action.
+The native Keychain writer starts macOS `security add-generic-password ... -w` inside one dedicated managed pseudo-terminal and supplies the value once, followed by one newline, only after the exact documented single `password data for new item:` prompt appears. The value remains absent from command arguments and the child environment, terminal echo stays disabled, and the bridge plus `security` child share one bounded process group for verified timeout or interruption cleanup. A missing, repeated or otherwise drifted prompt is a fail-closed store rejection; never respond by repeating the namespace action.
 
 ```sh
 node scripts/manage-project2-f02-keychain.mjs --generate-private <namespace>
