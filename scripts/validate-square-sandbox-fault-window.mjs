@@ -522,6 +522,23 @@ check("empty and plan modes are inert and process-free", async () => {
   const inert = await invokeMain([], emptyPrompt, runner);
   assert.equal(inert.status, 0);
   assert.deepEqual(inert.output, ["STATUS=INERT RESULT=NO_ACTION"]);
+  const directInert = spawnSync(process.execPath, [
+    resolve(driverTest.ROOT, "scripts/manage-square-sandbox-fault-window.mjs"),
+  ], {
+    cwd: driverTest.ROOT,
+    encoding: "utf8",
+    timeout: 5_000,
+    env: {
+      LANG: "C",
+      LC_ALL: "C",
+      PATH: process.env.PATH || "",
+      TMPDIR: tmpdir(),
+    },
+  });
+  assert.equal(directInert.status, 0, directInert.stderr);
+  assert.equal(directInert.signal, null);
+  assert.equal(directInert.stderr, "");
+  assert.equal(directInert.stdout, "STATUS=INERT RESULT=NO_ACTION\n");
   const plan = await invokeMain(["--plan"], emptyPrompt, runner);
   assert.equal(plan.status, 0);
   assert.deepEqual(plan.output, driverTest.FIXED_PLAN);
