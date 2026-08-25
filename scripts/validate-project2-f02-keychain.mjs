@@ -46,6 +46,8 @@ const DRIFT_NAMESPACE = "f02-20260823t190004z-1234abd1";
 const SIGKILL_NAMESPACE = "f02-20260823t190005z-1234abd2";
 const CLIPBOARD_FAILURE_NAMESPACE = "f02-20260823t190006z-1234abd3";
 const ROOT_DRIFT_NAMESPACE = "f02-20260823t190007z-1234abd4";
+const CLIPBOARD_READ_RELEASE_NAMESPACE = "f02-20260823t190008z-1234abd5";
+const CLIPBOARD_READ_CLEAR_FAILURE_NAMESPACE = "f02-20260823t190009z-1234abd6";
 const WINDOW_START = "2026-08-23T19:00:00.000Z";
 const WINDOW_END = "2026-08-23T21:00:00.000Z";
 const NOW = Date.parse("2026-08-23T19:01:00.000Z");
@@ -783,6 +785,11 @@ assert.deepEqual(managerTest.INITIALIZE_STAGE_RESULT, {
   STATE_STORE: "F02_KEYCHAIN_INITIALIZE_STATE_STORE_REJECTED",
   START_STORE: "F02_KEYCHAIN_INITIALIZE_START_STORE_REJECTED",
 });
+assert.equal(managerTest.ACK.store, "STORE_F02_MACOS_PASTEBOARD_ITEM_ONCE");
+assert.equal(
+  managerTest.STORE_MACOS_PASTEBOARD_READ_REJECTED,
+  "F02_KEYCHAIN_STORE_MACOS_PASTEBOARD_READ_REJECTED",
+);
 
 function makeHiddenLineTty({ onResume, onPrompt } = {}) {
   const input = new EventEmitter();
@@ -1575,6 +1582,49 @@ assert.equal(badAckReads, 0);
 assert.equal(badAckClears, 1);
 assert.deepEqual(badAckOutput, ["STATUS=STOPPED RESULT=F02_KEYCHAIN_INPUT_REJECTED"]);
 
+const clipboardReadRejectedMemory = makeMemoryKeychain({
+  [F02_KEYCHAIN_ITEMS.bundleState]: "STAGING",
+  [F02_KEYCHAIN_ITEMS.windowStartUtc]: WINDOW_START,
+});
+const clipboardReadRejectedOutput = [];
+let clipboardReadRejectedClears = 0;
+let clipboardReadRejectedStores = 0;
+const browserSessionClipboard = "BROWSER_SESSION_DUMMY_NEVER_PRINT";
+const macosPasteboard = "";
+const clipboardReadRejectedStore = clipboardReadRejectedMemory.storeNew.bind(
+  clipboardReadRejectedMemory,
+);
+clipboardReadRejectedMemory.storeNew = async (...args) => {
+  clipboardReadRejectedStores += 1;
+  return clipboardReadRejectedStore(...args);
+};
+assert.equal(await manageF02KeychainMain([
+  "--store-clipboard", NAMESPACE, F02_KEYCHAIN_ITEMS.accountId,
+], {
+  keychainAccess: clipboardReadRejectedMemory,
+  readHiddenLine: ackPrompt,
+  clipboardRead: async () => {
+    assert.equal(browserSessionClipboard.length > 0, true);
+    assert.equal(macosPasteboard, "");
+    throw new Error("simulated empty macOS pasteboard");
+  },
+  clipboardClear: async () => { clipboardReadRejectedClears += 1; },
+  print: (line) => clipboardReadRejectedOutput.push(line),
+}), 1);
+assert.equal(clipboardReadRejectedClears, 1);
+assert.equal(clipboardReadRejectedStores, 0);
+assert.equal(
+  clipboardReadRejectedMemory.values.has(F02_KEYCHAIN_ITEMS.accountId),
+  false,
+);
+assert.deepEqual(clipboardReadRejectedOutput, [
+  "STATUS=STOPPED RESULT=F02_KEYCHAIN_STORE_MACOS_PASTEBOARD_READ_REJECTED",
+]);
+assert.equal(
+  clipboardReadRejectedOutput.join("\n").includes(browserSessionClipboard),
+  false,
+);
+
 for (const invalidStoreArgs of [
   ["--store-clipboard", "not-a-namespace", F02_KEYCHAIN_ITEMS.accountId],
   ["--store-clipboard", NAMESPACE, "not-an-allowlisted-label"],
@@ -1766,6 +1816,7 @@ assert.equal(await manageF02KeychainMain([
 }), 1);
 assert.equal(failedWriteClears, 1);
 assert.equal(failedWriteOutput.join("\n").includes(failedWriteValue), false);
+assert.deepEqual(failedWriteOutput, ["STATUS=STOPPED RESULT=F02_KEYCHAIN_INPUT_REJECTED"]);
 
 const incompleteMemory = makeMemoryKeychain({
   [F02_KEYCHAIN_ITEMS.bundleState]: "STAGING",
@@ -2151,6 +2202,112 @@ assert.equal(await manageF02KeychainMain(["--cleanup", NAMESPACE], {
 }), 0);
 assert.equal(deletionResumeMemory.values.size, 0);
 
+// The macOS-pasteboard read result is narrower than the custody cleanup
+// result. Prove with fresh real lock roots that a successful clear releases
+// the marker, while a failed clear overrides the read result and stays fenced.
+const managerModuleUrlForClipboardRead =
+  new URL("./manage-project2-f02-keychain.mjs", import.meta.url).href;
+const lockModuleUrlForClipboardRead =
+  new URL("./project2-f02-keychain.mjs", import.meta.url).href;
+const clipboardReadFailureSource = [
+  "const [managerUrl, keychainUrl, namespace, operationLockRoot, clearFails] = process.argv.slice(1)",
+  "const {manageF02KeychainMain} = await import(managerUrl)",
+  "const {F02_KEYCHAIN_ITEMS, f02KeychainNamespaceStartUtc} = await import(keychainUrl)",
+  "const values = new Map([[F02_KEYCHAIN_ITEMS.bundleState, 'STAGING'], [F02_KEYCHAIN_ITEMS.windowStartUtc, f02KeychainNamespaceStartUtc(namespace)]])",
+  "let clearCalls = 0",
+  "let storeCalls = 0",
+  "const check = (value, validation = {}) => { if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > (validation.maxBytes || 4096) || (validation.pattern && !validation.pattern.test(value))) throw new Error('memory-validation') }",
+  "const keychainAccess = { read: async (account, validation) => { if (!values.has(account)) throw new Error('missing'); const value = values.get(account); check(value, validation); return value }, storeNew: async () => { storeCalls += 1 } }",
+  "const lines = []",
+  "const status = await manageF02KeychainMain(['--store-clipboard', namespace, F02_KEYCHAIN_ITEMS.accountId], {operationLockRoot, keychainAccess, readHiddenLine: async () => 'STORE_F02_MACOS_PASTEBOARD_ITEM_ONCE', clipboardRead: async () => { throw new Error('simulated-empty-macos-pasteboard') }, clipboardClear: async () => { clearCalls += 1; if (clearFails === 'yes') throw new Error('simulated-clear-failure') }, print: (line) => lines.push(line)})",
+  "process.stdout.write(JSON.stringify({status, lines, clearCalls, storeCalls}))",
+].join("\n");
+
+const clipboardReadReleaseRoot = await mkdtemp(join(
+  tmpdir(), "project2-f02-clipboard-read-release-validator-",
+));
+const clipboardReadReleasePath = join(
+  clipboardReadReleaseRoot, `${CLIPBOARD_READ_RELEASE_NAMESPACE}.lock`,
+);
+try {
+  const readFailureChild = await runNodeProbe(clipboardReadFailureSource, [
+    managerModuleUrlForClipboardRead,
+    lockModuleUrlForClipboardRead,
+    CLIPBOARD_READ_RELEASE_NAMESPACE,
+    clipboardReadReleaseRoot,
+    "no",
+  ]);
+  assert.deepEqual(readFailureChild.result, { code: 0, signal: null });
+  assert.equal(readFailureChild.stderr.length, 0);
+  assert.deepEqual(JSON.parse(readFailureChild.stdout.toString("utf8")), {
+    status: 1,
+    lines: ["STATUS=STOPPED RESULT=F02_KEYCHAIN_STORE_MACOS_PASTEBOARD_READ_REJECTED"],
+    clearCalls: 1,
+    storeCalls: 0,
+  });
+  await assert.rejects(
+    readFile(clipboardReadReleasePath, "ascii"),
+    (error) => error?.code === "ENOENT",
+    "a proved pasteboard clear releases the exact namespace marker",
+  );
+  const freshLock = await keychainTest.acquireF02NamespaceOperationLock(
+    CLIPBOARD_READ_RELEASE_NAMESPACE,
+    { operationLockRoot: clipboardReadReleaseRoot },
+  );
+  await freshLock.release();
+} finally {
+  try { await unlink(clipboardReadReleasePath); } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  await rmdir(clipboardReadReleaseRoot);
+}
+
+const clipboardReadClearFailureRoot = await mkdtemp(join(
+  tmpdir(), "project2-f02-clipboard-read-clear-failure-validator-",
+));
+const clipboardReadClearFailurePath = join(
+  clipboardReadClearFailureRoot, `${CLIPBOARD_READ_CLEAR_FAILURE_NAMESPACE}.lock`,
+);
+try {
+  const readAndClearFailureChild = await runNodeProbe(clipboardReadFailureSource, [
+    managerModuleUrlForClipboardRead,
+    lockModuleUrlForClipboardRead,
+    CLIPBOARD_READ_CLEAR_FAILURE_NAMESPACE,
+    clipboardReadClearFailureRoot,
+    "yes",
+  ]);
+  assert.deepEqual(readAndClearFailureChild.result, { code: 0, signal: null });
+  assert.equal(readAndClearFailureChild.stderr.length, 0);
+  assert.deepEqual(JSON.parse(readAndClearFailureChild.stdout.toString("utf8")), {
+    status: 1,
+    lines: ["STATUS=STOPPED RESULT=F02_KEYCHAIN_CLIPBOARD_CLEAR_REJECTED"],
+    clearCalls: 1,
+    storeCalls: 0,
+  });
+  const retainedMarker = await readFile(clipboardReadClearFailurePath, "ascii");
+  assert.match(retainedMarker, /^MAIN:[1-9][0-9]{0,9}:ACTION:[a-f0-9]{32}$/,
+    "read-plus-clear failure leaves a nonempty durable marker");
+  const acquireProbeSource = [
+    "const [moduleUrl, namespace, operationLockRoot] = process.argv.slice(1)",
+    "const {__test} = await import(moduleUrl)",
+    "try { await __test.acquireF02NamespaceOperationLock(namespace, {operationLockRoot}); process.exitCode=2 }",
+    "catch { process.exitCode=0 }",
+  ].join("\n");
+  const blockedReadClearProbe = await runNodeProbe(acquireProbeSource, [
+    lockModuleUrlForClipboardRead,
+    CLIPBOARD_READ_CLEAR_FAILURE_NAMESPACE,
+    clipboardReadClearFailureRoot,
+  ]);
+  assert.deepEqual(blockedReadClearProbe.result, { code: 0, signal: null },
+    "read-plus-clear failure blocks a fresh process");
+  assert.equal(await readFile(clipboardReadClearFailurePath, "ascii"), retainedMarker);
+} finally {
+  try { await unlink(clipboardReadClearFailurePath); } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  await rmdir(clipboardReadClearFailureRoot);
+}
+
 // A failed clipboard clear is an unproved custody cleanup, not an ordinary
 // input rejection. Prove in a fresh process that it poisons the durable marker
 // and prevents a second process from acquiring the same namespace.
@@ -2171,7 +2328,7 @@ try {
     "const check = (value, validation = {}) => { if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > (validation.maxBytes || 4096) || (validation.pattern && !validation.pattern.test(value))) throw new Error('memory-validation') }",
     "const keychainAccess = { read: async (account, validation) => { if (!values.has(account)) throw new Error('missing'); const value = values.get(account); check(value, validation); return value }, storeNew: async (account, value, validation) => { check(value, validation); if (values.has(account)) throw new Error('exists'); values.set(account, value) } }",
     "const lines = []",
-    "const status = await manageF02KeychainMain(['--store-clipboard', namespace, F02_KEYCHAIN_ITEMS.accountId], {operationLockRoot, keychainAccess, readHiddenLine: async () => 'STORE_F02_CLIPBOARD_ITEM_ONCE', clipboardRead: async () => 'a'.repeat(32), clipboardClear: async () => { throw new Error('simulated-clear-failure') }, print: (line) => lines.push(line)})",
+    "const status = await manageF02KeychainMain(['--store-clipboard', namespace, F02_KEYCHAIN_ITEMS.accountId], {operationLockRoot, keychainAccess, readHiddenLine: async () => 'STORE_F02_MACOS_PASTEBOARD_ITEM_ONCE', clipboardRead: async () => 'a'.repeat(32), clipboardClear: async () => { throw new Error('simulated-clear-failure') }, print: (line) => lines.push(line)})",
     "process.stdout.write(JSON.stringify({status, lines, stored: values.has(F02_KEYCHAIN_ITEMS.accountId)}))",
   ].join("\n");
   const failedClearChild = await runNodeProbe(clipboardFailureSource, [

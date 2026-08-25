@@ -44,7 +44,7 @@ const CLI_SIGNAL_STATE = {
 };
 const ACK = Object.freeze({
   initialize: "INITIALIZE_F02_KEYCHAIN_NAMESPACE_ONCE",
-  store: "STORE_F02_CLIPBOARD_ITEM_ONCE",
+  store: "STORE_F02_MACOS_PASTEBOARD_ITEM_ONCE",
   generate: "GENERATE_F02_PRIVATE_BINDING_ONCE",
   cleanup: "DELETE_F02_KEYCHAIN_NAMESPACE_ONCE",
 });
@@ -56,6 +56,8 @@ const INITIALIZE_STAGE_RESULT = Object.freeze({
   STATE_STORE: "F02_KEYCHAIN_INITIALIZE_STATE_STORE_REJECTED",
   START_STORE: "F02_KEYCHAIN_INITIALIZE_START_STORE_REJECTED",
 });
+const STORE_MACOS_PASTEBOARD_READ_REJECTED =
+  "F02_KEYCHAIN_STORE_MACOS_PASTEBOARD_READ_REJECTED";
 
 const INPUT_VALIDATION = Object.freeze({
   [F02_KEYCHAIN_ITEMS.accountId]: Object.freeze({ maxBytes: 32, pattern: /^[a-f0-9]{32}$/ }),
@@ -549,6 +551,7 @@ export async function manageF02KeychainMain(argv = process.argv.slice(2), depend
     CLI_SIGNAL_STATE.storeClipboardIntent = true;
     let line = "STATUS=STOPPED RESULT=F02_KEYCHAIN_INPUT_REJECTED";
     let status = 1;
+    let failureResult = "F02_KEYCHAIN_INPUT_REJECTED";
     let value = "";
     const storeNamespace = String(argv[1] || "");
     try {
@@ -561,12 +564,17 @@ export async function manageF02KeychainMain(argv = process.argv.slice(2), depend
       await requireAck(prompt, ACK.store);
       await requireState(storeKeychain, "STAGING");
       await requireNamespaceStart(storeKeychain, storeNamespace);
-      value = await clipboardRead();
+      try {
+        value = await clipboardRead();
+      } catch {
+        failureResult = STORE_MACOS_PASTEBOARD_READ_REJECTED;
+        throw new Error("INPUT_REJECTED");
+      }
       await storeKeychain.storeNew(account, value, INPUT_VALIDATION[account]);
       line = "STATUS=COMPLETE RESULT=F02_KEYCHAIN_CLIPBOARD_ITEM_STORED_AND_CLEARED";
       status = 0;
     } catch {
-      line = "STATUS=STOPPED RESULT=F02_KEYCHAIN_INPUT_REJECTED";
+      line = `STATUS=STOPPED RESULT=${failureResult}`;
       status = 1;
     } finally {
       value = "";
@@ -830,6 +838,7 @@ export const __test = Object.freeze({
   INPUT_VALIDATION,
   PBCOPY,
   PBPASTE,
+  STORE_MACOS_PASTEBOARD_READ_REJECTED,
   assertNamespaceDeletionSafe,
   abortClipboardProcesses,
   isLocalProcessAlive,
