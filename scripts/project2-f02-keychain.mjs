@@ -17,6 +17,10 @@ export const F02_KEYCHAIN_SERVICE_PREFIX = "com.spartan.project2.f02.v1";
 export const F02_KEYCHAIN_FLAG = "--keychain-input";
 export const F02_KEYCHAIN_NAMESPACE = /^f02-[0-9]{8}t[0-9]{6}z-[a-f0-9]{8}$/;
 const F02_KEYCHAIN_NAMESPACE_PARTS = /^f02-([0-9]{4})([0-9]{2})([0-9]{2})t([0-9]{2})([0-9]{2})([0-9]{2})z-[a-f0-9]{8}$/;
+export const F02_WINDOW_UTC_PATTERN =
+  /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.000Z$/;
+const F02_WINDOW_UTC_INPUT_PATTERN =
+  /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.000)?Z$/;
 export const F02_CANDIDATE_RESERVATION = "00000000-0000-4000-8000-000000000000";
 export const F02_KEYCHAIN_STATE_PATTERN = /^(?:STAGING|READY_FOR_HELPER|HELPER_STARTED|HELPER_COMPLETE|OPERATOR_STARTED|CANDIDATE_COMPLETE|COORDINATOR_STARTED|REQUEST_ATTEMPTED|DELETION_STARTED)$/;
 export const F02_KEYCHAIN_PID_OWNER_PATTERN = /^PID:([1-9][0-9]{0,9})$/;
@@ -28,7 +32,16 @@ export const F02_KEYCHAIN_PROCESS_ACK = Object.freeze({
   deploy: "DEPLOY_F02_KEYCHAIN_CANDIDATE_ONCE",
   rollback: "ROLLBACK_F02_KEYCHAIN_TO_BASELINE_ONCE",
   cleanup: "CLEANUP_F02_KEYCHAIN_ALL_OFF_ONCE",
+  retirement: "LOAD_F02_TOKEN_RETIREMENT_KEYCHAIN_ONCE",
+  retirementVerify: "VERIFY_RETIRED_F02_TOKENS_ONCE",
 });
+export const F02_RETIREMENT_COMPLETION = Object.freeze({
+  W: "W_TOKEN_VERIFY_HTTP_401",
+  R: "R_TOKEN_VERIFY_HTTP_401_MAIN_QUEUE_HTTP_401_DLQ_HTTP_401",
+  WR: "W_TOKEN_VERIFY_HTTP_401_R_TOKEN_VERIFY_HTTP_401_MAIN_QUEUE_HTTP_401_DLQ_HTTP_401",
+});
+export const F02_RETIREMENT_COMPLETION_PATTERN =
+  /^(?:W_TOKEN_VERIFY_HTTP_401|R_TOKEN_VERIFY_HTTP_401_MAIN_QUEUE_HTTP_401_DLQ_HTTP_401|W_TOKEN_VERIFY_HTTP_401_R_TOKEN_VERIFY_HTTP_401_MAIN_QUEUE_HTTP_401_DLQ_HTTP_401)$/;
 
 export const F02_KEYCHAIN_ITEMS = Object.freeze({
   accountId: "input.cloudflare-account-id",
@@ -68,6 +81,8 @@ export const F02_KEYCHAIN_ITEMS = Object.freeze({
   cleanupLease: "claim.cleanup",
   cleanupRecoveryLease: "claim.cleanup-recovery",
   cleanupComplete: "checkpoint.cleanup-complete",
+  retirementVerifierLease: "claim.retirement-verifier",
+  retirementComplete: "checkpoint.retirement-complete",
 });
 
 const SECURITY_PATH = "/usr/bin/security";
@@ -856,6 +871,85 @@ export function f02KeychainLifecycleOwner(kind, pid = process.pid) {
   return `${kind}:PID:${assertOwnerPid(pid)}`;
 }
 
+export function isF02LocalProcessAlive(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 1 || pid > 9_999_999_999) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== "ESRCH";
+  }
+}
+
+export async function assertF02ProviderWorkClosed(
+  keychain,
+  processAlive = isF02LocalProcessAlive,
+) {
+  if (!keychain || typeof keychain.has !== "function" || typeof keychain.read !== "function" ||
+      typeof processAlive !== "function") {
+    fail("F02_KEYCHAIN_PROVIDER_CLOSURE_REJECTED");
+  }
+  const reject = () => fail("F02_KEYCHAIN_PROVIDER_CLOSURE_REJECTED");
+  const uuidValidation = Object.freeze({
+    maxBytes: 36,
+    pattern: /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i,
+  });
+  let lifecycleExists = false;
+  if (await keychain.has(F02_KEYCHAIN_ITEMS.lifecycleLease)) {
+    lifecycleExists = true;
+    const owner = await keychain.read(F02_KEYCHAIN_ITEMS.lifecycleLease, {
+      maxBytes: 26,
+      pattern: F02_KEYCHAIN_LIFECYCLE_OWNER_PATTERN,
+    });
+    const ownerPid = Number(F02_KEYCHAIN_LIFECYCLE_OWNER_PATTERN.exec(owner)?.[2]);
+    if (!Number.isSafeInteger(ownerPid) || processAlive(ownerPid) !== false) reject();
+  }
+  for (const item of [
+    F02_KEYCHAIN_ITEMS.generateLease,
+    F02_KEYCHAIN_ITEMS.helperLease,
+    F02_KEYCHAIN_ITEMS.operatorLease,
+    F02_KEYCHAIN_ITEMS.coordinatorLease,
+    F02_KEYCHAIN_ITEMS.rollbackLease,
+    F02_KEYCHAIN_ITEMS.rollbackRecoveryLease,
+    F02_KEYCHAIN_ITEMS.cleanupLease,
+    F02_KEYCHAIN_ITEMS.cleanupRecoveryLease,
+  ]) {
+    if (!await keychain.has(item)) continue;
+    const owner = await keychain.read(item, {
+      maxBytes: 14,
+      pattern: F02_KEYCHAIN_PID_OWNER_PATTERN,
+    });
+    const ownerPid = Number(F02_KEYCHAIN_PID_OWNER_PATTERN.exec(owner)?.[1]);
+    if (!Number.isSafeInteger(ownerPid) || processAlive(ownerPid) !== false) reject();
+  }
+  const deployClaimed = await keychain.has(F02_KEYCHAIN_ITEMS.deployLease);
+  const candidateDeployed = await keychain.has(F02_KEYCHAIN_ITEMS.candidateDeployed);
+  const cleanupCandidateRecorded = await keychain.has(F02_KEYCHAIN_ITEMS.cleanupCandidateVersion);
+  const rollbackClaimed = await keychain.has(F02_KEYCHAIN_ITEMS.rollbackLease) ||
+    await keychain.has(F02_KEYCHAIN_ITEMS.rollbackRecoveryLease);
+  if (lifecycleExists || deployClaimed || candidateDeployed || cleanupCandidateRecorded ||
+      rollbackClaimed) {
+    const baseline = await keychain.read(F02_KEYCHAIN_ITEMS.baselineVersion, uuidValidation);
+    const rollbackComplete = await keychain.read(
+      F02_KEYCHAIN_ITEMS.rollbackComplete,
+      uuidValidation,
+    );
+    if (baseline.toLowerCase() !== rollbackComplete.toLowerCase()) reject();
+  }
+  const cleanupClaimed = await keychain.has(F02_KEYCHAIN_ITEMS.cleanupLease);
+  if (deployClaimed || candidateDeployed || cleanupCandidateRecorded || cleanupClaimed) {
+    await keychain.read(F02_KEYCHAIN_ITEMS.cleanupComplete, uuidValidation);
+  }
+  return Object.freeze({
+    lifecycleExists,
+    deployClaimed,
+    candidateDeployed,
+    cleanupCandidateRecorded,
+    rollbackClaimed,
+    cleanupClaimed,
+  });
+}
+
 export function f02KeychainNamespaceStartUtc(namespace) {
   const match = F02_KEYCHAIN_NAMESPACE_PARTS.exec(String(namespace || ""));
   if (!match) fail("F02_KEYCHAIN_NAMESPACE_REJECTED");
@@ -865,6 +959,56 @@ export function f02KeychainNamespaceStartUtc(namespace) {
     fail("F02_KEYCHAIN_NAMESPACE_REJECTED");
   }
   return iso;
+}
+
+export function canonicalizeF02WindowEndUtc(value) {
+  if (typeof value !== "string" || value !== value.trim() || /[\0\r\n]/.test(value) ||
+      !F02_WINDOW_UTC_INPUT_PATTERN.test(value)) {
+    fail("F02_KEYCHAIN_WINDOW_REJECTED");
+  }
+  const canonical = value.endsWith(".000Z") ? value : `${value.slice(0, -1)}.000Z`;
+  const epoch = Date.parse(canonical);
+  if (!Number.isSafeInteger(epoch) || new Date(epoch).toISOString() !== canonical) {
+    fail("F02_KEYCHAIN_WINDOW_REJECTED");
+  }
+  return canonical;
+}
+
+export function assertF02PublicWindowBoundary(
+  namespace,
+  endUtcInput,
+  now = Date.now,
+  { allowPostWindowClosure = false } = {},
+) {
+  if ((typeof now !== "function" && !Number.isSafeInteger(now)) ||
+      typeof allowPostWindowClosure !== "boolean") {
+    fail("F02_KEYCHAIN_WINDOW_REJECTED");
+  }
+  let startUtc;
+  let endUtc;
+  try {
+    startUtc = f02KeychainNamespaceStartUtc(namespace);
+    endUtc = canonicalizeF02WindowEndUtc(endUtcInput);
+  } catch {
+    fail("F02_KEYCHAIN_WINDOW_REJECTED");
+  }
+  const startEpoch = Date.parse(startUtc);
+  const endEpoch = Date.parse(endUtc);
+  const currentEpoch = typeof now === "function" ? Number(now()) : now;
+  const windowDuration = endEpoch - startEpoch;
+  const closureEndEpoch = endEpoch + windowDuration;
+  if (!Number.isSafeInteger(startEpoch) || !Number.isSafeInteger(endEpoch) ||
+      !Number.isSafeInteger(currentEpoch) || !Number.isSafeInteger(windowDuration) ||
+      !Number.isSafeInteger(closureEndEpoch) ||
+      new Date(startEpoch).toISOString() !== startUtc ||
+      new Date(endEpoch).toISOString() !== endUtc ||
+      endEpoch <= startEpoch || windowDuration < MIN_F02_WINDOW_MS ||
+      windowDuration > MAX_F02_WINDOW_MS || currentEpoch < startEpoch ||
+      (!allowPostWindowClosure && currentEpoch >= endEpoch) ||
+      (allowPostWindowClosure && currentEpoch >= closureEndEpoch)) {
+    fail("F02_KEYCHAIN_WINDOW_REJECTED");
+  }
+  return Object.freeze({ startUtc, endUtc, startEpoch, endEpoch, closureEndEpoch });
 }
 
 export async function assertF02KeychainWindow(
@@ -881,28 +1025,17 @@ export async function assertF02KeychainWindow(
   const expectedStartUtc = f02KeychainNamespaceStartUtc(namespace);
   const validation = {
     maxBytes: 24,
-    pattern: /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/,
+    pattern: F02_WINDOW_UTC_PATTERN,
   };
   const startUtc = await keychain.read(F02_KEYCHAIN_ITEMS.windowStartUtc, validation);
   const endUtc = await keychain.read(F02_KEYCHAIN_ITEMS.windowEndUtc, validation);
-  const startEpoch = Date.parse(startUtc);
-  const endEpoch = Date.parse(endUtc);
-  const currentEpoch = typeof now === "function" ? Number(now()) : now;
-  const windowDuration = endEpoch - startEpoch;
-  const closureEndEpoch = endEpoch + windowDuration;
-  if (startUtc !== expectedStartUtc || !Number.isSafeInteger(startEpoch) ||
-      !Number.isSafeInteger(endEpoch) || !Number.isSafeInteger(currentEpoch) ||
-      !Number.isSafeInteger(windowDuration) || !Number.isSafeInteger(closureEndEpoch) ||
-      new Date(startEpoch).toISOString() !== startUtc ||
-      new Date(endEpoch).toISOString() !== endUtc ||
-      endEpoch <= startEpoch || windowDuration < MIN_F02_WINDOW_MS ||
-      windowDuration > MAX_F02_WINDOW_MS ||
-      currentEpoch < startEpoch ||
-      (!allowPostWindowClosure && currentEpoch >= endEpoch) ||
-      (allowPostWindowClosure && currentEpoch >= closureEndEpoch)) {
+  if (startUtc !== expectedStartUtc) {
     fail("F02_KEYCHAIN_WINDOW_REJECTED");
   }
-  return Object.freeze({ startEpoch, endEpoch });
+  const boundary = assertF02PublicWindowBoundary(namespace, endUtc, now, {
+    allowPostWindowClosure,
+  });
+  return Object.freeze({ startEpoch: boundary.startEpoch, endEpoch: boundary.endEpoch });
 }
 
 function securityEnvironment(source = process.env) {

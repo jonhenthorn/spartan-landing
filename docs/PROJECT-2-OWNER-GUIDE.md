@@ -1,6 +1,6 @@
 # Project 2 — plain-English owner guide
 
-Last reviewed: August 23, 2026
+Last reviewed: August 25, 2026
 
 ## What Project 2 is
 
@@ -32,6 +32,7 @@ That sandbox is evidence that the software works under the tested conditions. It
 - On August 22, offline review replaced all thirteen oversized UUID checks with an equivalent compact form, rewrote the remaining over-limit timestamp check, added a strict 50-character query-pattern ceiling and proved the full F-02 aggregate query against the pinned local D1 runtime. The repair is reviewed code only: it is not deployed, it does not change the historical stop result and it does not authorize a retry.
 - The same offline review found and repaired a separate pre-existing P-02 observer expression-depth limit. Its aggregate result—47 integer checks and three privacy-bounded JSON buckets—now compiles and executes against the pinned local D1 runtime. That P-02 repair is also reviewed code only: it is not deployed, it is not live P-02 evidence and it grants no case, credential, traffic, request, provider, Apps, Queue, D1 or production authority.
 - Three later August 23 preparation/readiness attempts also closed safely before an F-02 case: one local package-read interruption, one Apps endpoint-isolation mismatch and one interrupted volatile synthetic-binding handoff. Across those closed attempts, no candidate or Cloudflare version was created, no traffic changed, no consent request or provider action occurred, the all-off baseline stayed at 100%, and every temporary credential was revoked and proved unusable. None is an F-02 pass or retry authority.
+- On August 25, another preparation/readiness attempt stopped when a seconds-only UTC window end failed the then-stricter millisecond staging format. It reached no helper, operator, candidate, coordinator, traffic or request boundary. The all-off baseline remained the sole 100% deployment, both Queues remained reported empty, and `W` plus `R` were revoked and proved unusable with the required one-plus-three HTTP `401` checks. That closed attempt is not an F-02 pass or retry authority. The reviewed custody path now binds and canonicalizes the approved window during precredential namespace initialization and uses one one-shot retirement verifier. It validates all retained inputs and required all-off closure before any Cloudflare check, proves each retained credential active with bounded fixed read-only evidence, pauses for the owner-authorized console deletion, then proves the exact role-matched credential set unusable before Keychain deletion. A terminal interruption or ambiguity leaves the attempt fenced for independent review. This reviewed tooling remains default `NO-GO` and grants no live authority.
 - The official sandbox happy path, qualifying redemption, full-refund review, reconciliation, rollback and signed Apps-health monitoring have passed their completed worksheets.
 - A read-only production preflight reconfirmed the intended fixed 50% discount and found Square's separate checkout text-signup collection prompt off at review time.
 

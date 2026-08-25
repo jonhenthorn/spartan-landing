@@ -726,6 +726,18 @@ await assert.rejects(
   assertF02KeychainWindow(shortWindowKeychain, NAMESPACE, NOW),
   (error) => error?.code === "F02_KEYCHAIN_WINDOW_REJECTED",
 );
+const tamperedWindowKeychain = {
+  async read(account) {
+    if (account === F02_KEYCHAIN_ITEMS.windowStartUtc) return WINDOW_START;
+    if (account === F02_KEYCHAIN_ITEMS.windowEndUtc) return "2026-08-23T21:00:00.123Z";
+    throw new Error("unexpected account");
+  },
+};
+await assert.rejects(
+  assertF02KeychainWindow(tamperedWindowKeychain, NAMESPACE, NOW),
+  (error) => error?.code === "F02_KEYCHAIN_WINDOW_REJECTED",
+  "a stored noncanonical fractional window is rejected",
+);
 
 function makeMemoryKeychain(initial = {}) {
   const values = new Map(Object.entries(initial));
@@ -778,11 +790,12 @@ const ackPrompt = async (promptText) => {
   return match[1];
 };
 assert.deepEqual(managerTest.INITIALIZE_STAGE_RESULT, {
+  WINDOW: "F02_KEYCHAIN_INITIALIZE_WINDOW_REJECTED",
   ACK: "F02_KEYCHAIN_INITIALIZE_ACK_REJECTED",
   DEPENDENCY: "F02_KEYCHAIN_INITIALIZE_DEPENDENCY_REJECTED",
   NAMESPACE_CHECK: "F02_KEYCHAIN_INITIALIZE_NAMESPACE_CHECK_REJECTED",
-  FRESHNESS: "F02_KEYCHAIN_INITIALIZE_FRESHNESS_REJECTED",
   STATE_STORE: "F02_KEYCHAIN_INITIALIZE_STATE_STORE_REJECTED",
+  END_STORE: "F02_KEYCHAIN_INITIALIZE_END_STORE_REJECTED",
   START_STORE: "F02_KEYCHAIN_INITIALIZE_START_STORE_REJECTED",
 });
 assert.equal(managerTest.ACK.store, "STORE_F02_MACOS_PASTEBOARD_ITEM_ONCE");
@@ -1123,7 +1136,7 @@ async function runNodeProbe(source, args) {
   const keychainModuleUrl = new URL("./project2-f02-keychain.mjs", import.meta.url).href;
   const managerLockRoot = await mkdtemp(join(tmpdir(), "project2-f02-manager-pty-lock-"));
   const managerPtyChild = [
-    "const [managerUrl,keychainUrl,namespace,lockRoot,nowText]=process.argv.slice(1)",
+    "const [managerUrl,keychainUrl,namespace,windowEnd,lockRoot,nowText]=process.argv.slice(1)",
     "const {manageF02KeychainMain}=await import(managerUrl)",
     "const {F02_KEYCHAIN_ITEMS,f02KeychainNamespaceStartUtc}=await import(keychainUrl)",
     "const values=new Map()",
@@ -1131,23 +1144,24 @@ async function runNodeProbe(source, args) {
     " async assertNamespaceEmpty(){if(values.size!==0)throw new Error('not empty')},",
     " async storeNew(account,value){if(values.has(account))throw new Error('duplicate');values.set(account,value)},",
     "}",
-    "const code=await manageF02KeychainMain(['--initialize',namespace],{",
+    "const code=await manageF02KeychainMain(['--initialize',namespace,windowEnd],{",
     " keychainAccess,operationLockRoot:lockRoot,now:()=>Number(nowText),",
     "})",
-    "const exact=code===0&&values.size===2&&",
+    "const exact=code===0&&values.size===3&&",
     " values.get(F02_KEYCHAIN_ITEMS.bundleState)==='STAGING'&&",
+    " values.get(F02_KEYCHAIN_ITEMS.windowEndUtc)===windowEnd&&",
     " values.get(F02_KEYCHAIN_ITEMS.windowStartUtc)===f02KeychainNamespaceStartUtc(namespace)",
     "if(!exact)process.exitCode=3",
   ].join("\n");
   const managerPtyDriver = [
     "import errno,os,select,signal,sys,time",
-    "node,source,manager_url,keychain_url,namespace,lock_root,now_text=sys.argv[1:]",
+    "node,source,manager_url,keychain_url,namespace,window_end,lock_root,now_text=sys.argv[1:]",
     "prompt=b'Type INITIALIZE_F02_KEYCHAIN_NAMESPACE_ONCE (not secret): '",
     "ack=b'INITIALIZE_F02_KEYCHAIN_NAMESPACE_ONCE\\n'",
     "pid,fd=os.forkpty()",
     "if pid==0:",
     " env={'PATH':os.environ.get('PATH',''),'LANG':'C','LC_ALL':'C'}",
-    " os.execve(node,[node,'--input-type=module','--eval',source,manager_url,keychain_url,namespace,lock_root,now_text],env)",
+    " os.execve(node,[node,'--input-type=module','--eval',source,manager_url,keychain_url,namespace,window_end,lock_root,now_text],env)",
     "output=bytearray()",
     "sent=False",
     "status=None",
@@ -1207,7 +1221,7 @@ async function runNodeProbe(source, args) {
     const probe = await runProcessProbe(pythonPath, [
       "-I", "-S", "-c", managerPtyDriver,
       process.execPath, managerPtyChild, managerModuleUrl, keychainModuleUrl,
-      NAMESPACE, managerLockRoot, String(NOW),
+      NAMESPACE, WINDOW_END, managerLockRoot, String(NOW),
     ]);
     assert.deepEqual(probe.result, { code: 0, signal: null },
       "the full initializer succeeds through its default hidden reader in a real PTY");
@@ -1434,7 +1448,7 @@ try {
   const heldDuringInitialize = await keychainTest.acquireF02NamespaceOperationLock(NAMESPACE, {
     operationLockRoot,
   });
-  assert.equal(await manageF02KeychainMain(["--initialize", NAMESPACE], {
+  assert.equal(await manageF02KeychainMain(["--initialize", NAMESPACE, WINDOW_END], {
     keychainAccess: lockRaceMemory,
     readHiddenLine: ackPrompt,
     operationLockRoot,
@@ -1445,7 +1459,7 @@ try {
   assert.equal(lockRaceMemory.values.size, 0,
     "a caller-settable dependency cannot bypass the held namespace lock");
   await heldDuringInitialize.release();
-  assert.equal(await manageF02KeychainMain(["--initialize", NAMESPACE], {
+  assert.equal(await manageF02KeychainMain(["--initialize", NAMESPACE, WINDOW_END], {
     keychainAccess: lockRaceMemory,
     readHiddenLine: ackPrompt,
     operationLockRoot,
@@ -1600,7 +1614,7 @@ const helperDeathPath = join(helperDeathRoot, `${HELPER_DEATH_NAMESPACE}.lock`);
 const helperDeathMemory = makeMemoryKeychain();
 const outsideLockContext = new AsyncResource("project2-f02-outside-lock-context");
 try {
-  assert.equal(await manageF02KeychainMain(["--initialize", HELPER_DEATH_NAMESPACE], {
+  assert.equal(await manageF02KeychainMain(["--initialize", HELPER_DEATH_NAMESPACE, WINDOW_END], {
     keychainAccess: helperDeathMemory,
     readHiddenLine: ackPrompt,
     operationLockRoot: helperDeathRoot,
@@ -1669,16 +1683,77 @@ try {
   await rmdir(helperDeathRoot);
 }
 
-assert.equal(await manageF02KeychainMain(["--initialize", NAMESPACE], {
+assert.equal(await manageF02KeychainMain(["--initialize", NAMESPACE, WINDOW_END], {
   keychainAccess: memory,
   readHiddenLine: ackPrompt,
   print: (line) => output.push(line),
   now: () => NOW,
 }), 0);
+assert.equal(memory.values.get(F02_KEYCHAIN_ITEMS.windowEndUtc), WINDOW_END);
+
+const secondsOnlyWindowEnd = WINDOW_END.replace(".000Z", "Z");
+const secondsOnlyMemory = makeMemoryKeychain();
+const secondsOnlyOutput = [];
+assert.equal(await manageF02KeychainMain([
+  "--initialize", NAMESPACE, secondsOnlyWindowEnd,
+], {
+  keychainAccess: secondsOnlyMemory,
+  readHiddenLine: ackPrompt,
+  print: (line) => secondsOnlyOutput.push(line),
+  now: () => NOW,
+}), 0);
+assert.equal(secondsOnlyMemory.values.get(F02_KEYCHAIN_ITEMS.windowEndUtc), WINDOW_END,
+  "a seconds-only approved UTC boundary is stored in canonical millisecond form");
+assert.deepEqual(secondsOnlyOutput,
+  ["STATUS=COMPLETE RESULT=F02_KEYCHAIN_NAMESPACE_INITIALIZED"]);
+
+for (const rejectedWindowEnd of [
+  "2026-08-23T21:00:00.001Z",
+  "2026-08-23T21:00:00.00Z",
+  "2026-08-23T21:00:00+00:00",
+  "2026-08-23T21:00:00z",
+  "2026-08-23T21:00:00.000Z\n",
+  "2026-02-30T21:00:00.000Z",
+  "2026-08-23T19:59:59.000Z",
+  "2026-08-23T23:00:01.000Z",
+]) {
+  let constructorCalls = 0;
+  let keychainCalls = 0;
+  let promptCalls = 0;
+  let clipboardReadCalls = 0;
+  let clipboardClearCalls = 0;
+  let randomCalls = 0;
+  const rejectedOutput = [];
+  assert.equal(await manageF02KeychainMain([
+    "--initialize", NAMESPACE, rejectedWindowEnd,
+  ], {
+    keychainAccess: {
+      async assertNamespaceEmpty() { keychainCalls += 1; },
+      async storeNew() { keychainCalls += 1; },
+    },
+    createKeychainAccess: () => { constructorCalls += 1; throw new Error("must not run"); },
+    readHiddenLine: async () => { promptCalls += 1; return managerTest.ACK.initialize; },
+    clipboardRead: async () => { clipboardReadCalls += 1; return "must-not-run"; },
+    clipboardClear: async () => { clipboardClearCalls += 1; },
+    randomBytesImpl: () => { randomCalls += 1; return Buffer.alloc(16); },
+    print: (line) => rejectedOutput.push(line),
+    now: () => NOW,
+  }), 1);
+  assert.equal(constructorCalls, 0, "window rejection precedes Keychain construction");
+  assert.equal(keychainCalls, 0, "window rejection precedes every Keychain operation");
+  assert.equal(promptCalls, 0, "window rejection precedes the acknowledgement prompt");
+  assert.equal(clipboardReadCalls, 0, "window rejection performs no clipboard read");
+  assert.equal(clipboardClearCalls, 0, "window rejection performs no clipboard clear");
+  assert.equal(randomCalls, 0, "window rejection performs no random generation");
+  assert.equal((await readdir(validatorDefaultOperationLockRoot)).includes(`${NAMESPACE}.lock`), false,
+    "window rejection leaves no operation-lock artifact");
+  assert.deepEqual(rejectedOutput,
+    ["STATUS=STOPPED RESULT=F02_KEYCHAIN_INITIALIZE_WINDOW_REJECTED"]);
+}
 
 const staleMemory = makeMemoryKeychain();
 const staleOutput = [];
-assert.equal(await manageF02KeychainMain(["--initialize", NAMESPACE], {
+assert.equal(await manageF02KeychainMain(["--initialize", NAMESPACE, WINDOW_END], {
   keychainAccess: staleMemory,
   readHiddenLine: ackPrompt,
   print: (line) => staleOutput.push(line),
@@ -1686,11 +1761,11 @@ assert.equal(await manageF02KeychainMain(["--initialize", NAMESPACE], {
 }), 1);
 assert.equal(staleMemory.values.size, 0);
 assert.deepEqual(staleOutput,
-  ["STATUS=STOPPED RESULT=F02_KEYCHAIN_INITIALIZE_FRESHNESS_REJECTED"]);
+  ["STATUS=STOPPED RESULT=F02_KEYCHAIN_INITIALIZE_WINDOW_REJECTED"]);
 
 const futureMemory = makeMemoryKeychain();
 const futureOutput = [];
-assert.equal(await manageF02KeychainMain(["--initialize", NAMESPACE], {
+assert.equal(await manageF02KeychainMain(["--initialize", NAMESPACE, WINDOW_END], {
   keychainAccess: futureMemory,
   readHiddenLine: ackPrompt,
   print: (line) => futureOutput.push(line),
@@ -1698,7 +1773,26 @@ assert.equal(await manageF02KeychainMain(["--initialize", NAMESPACE], {
 }), 1);
 assert.equal(futureMemory.values.size, 0);
 assert.deepEqual(futureOutput,
-  ["STATUS=STOPPED RESULT=F02_KEYCHAIN_INITIALIZE_FRESHNESS_REJECTED"]);
+  ["STATUS=STOPPED RESULT=F02_KEYCHAIN_INITIALIZE_WINDOW_REJECTED"]);
+
+const promptExpiryMemory = makeMemoryKeychain();
+const promptExpiryOutput = [];
+let promptFinished = false;
+assert.equal(await manageF02KeychainMain(["--initialize", NAMESPACE, WINDOW_END], {
+  keychainAccess: promptExpiryMemory,
+  readHiddenLine: async () => {
+    promptFinished = true;
+    return managerTest.ACK.initialize;
+  },
+  print: (line) => promptExpiryOutput.push(line),
+  now: () => promptFinished
+    ? Date.parse(WINDOW_START) + (5 * 60 * 1_000) + 1
+    : NOW,
+}), 1);
+assert.equal(promptExpiryMemory.values.size, 0,
+  "namespace freshness is rechecked after acknowledgement and before the first write");
+assert.deepEqual(promptExpiryOutput,
+  ["STATUS=STOPPED RESULT=F02_KEYCHAIN_INITIALIZE_WINDOW_REJECTED"]);
 
 for (const [name, keychainAccess, expected] of [
   ["dependency", {}, "F02_KEYCHAIN_INITIALIZE_DEPENDENCY_REJECTED"],
@@ -1712,7 +1806,7 @@ for (const [name, keychainAccess, expected] of [
   }, "F02_KEYCHAIN_INITIALIZE_STATE_STORE_REJECTED"],
 ]) {
   const phaseOutput = [];
-  assert.equal(await manageF02KeychainMain(["--initialize", NAMESPACE], {
+  assert.equal(await manageF02KeychainMain(["--initialize", NAMESPACE, WINDOW_END], {
     keychainAccess,
     readHiddenLine: ackPrompt,
     print: (line) => phaseOutput.push(line),
@@ -1721,8 +1815,29 @@ for (const [name, keychainAccess, expected] of [
   assert.deepEqual(phaseOutput, [`STATUS=STOPPED RESULT=${expected}`]);
 }
 
+const endStoreMemory = makeMemoryKeychain();
+const endStoreBase = endStoreMemory.storeNew.bind(endStoreMemory);
+let endStoreWrites = 0;
+endStoreMemory.storeNew = async (...args) => {
+  endStoreWrites += 1;
+  if (endStoreWrites === 2) throw new Error("simulated end store failure");
+  return endStoreBase(...args);
+};
+const endStoreOutput = [];
+assert.equal(await manageF02KeychainMain(["--initialize", NAMESPACE, WINDOW_END], {
+  keychainAccess: endStoreMemory,
+  readHiddenLine: ackPrompt,
+  print: (line) => endStoreOutput.push(line),
+  now: () => NOW,
+}), 1);
+assert.deepEqual(endStoreOutput,
+  ["STATUS=STOPPED RESULT=F02_KEYCHAIN_INITIALIZE_END_STORE_REJECTED"]);
+assert.equal(endStoreMemory.values.get(F02_KEYCHAIN_ITEMS.bundleState), "STAGING");
+assert.equal(endStoreMemory.values.has(F02_KEYCHAIN_ITEMS.windowEndUtc), false);
+assert.equal(endStoreMemory.values.has(F02_KEYCHAIN_ITEMS.windowStartUtc), false);
+
 const initializeConstructorOutput = [];
-assert.equal(await manageF02KeychainMain(["--initialize", NAMESPACE], {
+assert.equal(await manageF02KeychainMain(["--initialize", NAMESPACE, WINDOW_END], {
   createKeychainAccess: () => { throw new Error("simulated Keychain constructor failure"); },
   readHiddenLine: ackPrompt,
   print: (line) => initializeConstructorOutput.push(line),
@@ -1732,7 +1847,7 @@ assert.deepEqual(initializeConstructorOutput,
   ["STATUS=STOPPED RESULT=F02_KEYCHAIN_INITIALIZE_DEPENDENCY_REJECTED"]);
 
 const initializeAckOutput = [];
-assert.equal(await manageF02KeychainMain(["--initialize", NAMESPACE], {
+assert.equal(await manageF02KeychainMain(["--initialize", NAMESPACE, WINDOW_END], {
   keychainAccess: makeMemoryKeychain(),
   readHiddenLine: async () => "WRONG_ACK",
   print: (line) => initializeAckOutput.push(line),
@@ -1746,17 +1861,18 @@ const partialInitializeStore = partialInitializeMemory.storeNew.bind(partialInit
 let partialInitializeWrites = 0;
 partialInitializeMemory.storeNew = async (...args) => {
   partialInitializeWrites += 1;
-  if (partialInitializeWrites === 2) throw new Error("simulated interrupted initialization");
+  if (partialInitializeWrites === 3) throw new Error("simulated interrupted initialization");
   return partialInitializeStore(...args);
 };
 const partialInitializeOutput = [];
-assert.equal(await manageF02KeychainMain(["--initialize", NAMESPACE], {
+assert.equal(await manageF02KeychainMain(["--initialize", NAMESPACE, WINDOW_END], {
   keychainAccess: partialInitializeMemory,
   readHiddenLine: ackPrompt,
   print: (line) => partialInitializeOutput.push(line),
   now: () => NOW,
 }), 1);
 assert.equal(partialInitializeMemory.values.get(F02_KEYCHAIN_ITEMS.bundleState), "STAGING");
+assert.equal(partialInitializeMemory.values.get(F02_KEYCHAIN_ITEMS.windowEndUtc), WINDOW_END);
 assert.equal(partialInitializeMemory.values.has(F02_KEYCHAIN_ITEMS.windowStartUtc), false);
 assert.deepEqual(partialInitializeOutput,
   ["STATUS=STOPPED RESULT=F02_KEYCHAIN_INITIALIZE_START_STORE_REJECTED"]);
@@ -1782,6 +1898,28 @@ assert.equal(await manageF02KeychainMain(["--cleanup", NAMESPACE], {
 }), 0);
 assert.equal(partialInitializeMemory.values.size, 0,
   "a state-first interrupted initialization remains recoverably deletable");
+
+let legacyWindowClipboardReads = 0;
+let legacyWindowClipboardClears = 0;
+let legacyWindowStores = 0;
+const legacyWindowStoreOutput = [];
+assert.equal(await manageF02KeychainMain([
+  "--store-clipboard", NAMESPACE, F02_KEYCHAIN_ITEMS.windowEndUtc,
+], {
+  keychainAccess: {
+    async storeNew() { legacyWindowStores += 1; },
+  },
+  readHiddenLine: ackPrompt,
+  clipboardRead: async () => { legacyWindowClipboardReads += 1; return WINDOW_END; },
+  clipboardClear: async () => { legacyWindowClipboardClears += 1; },
+  print: (line) => legacyWindowStoreOutput.push(line),
+}), 1);
+assert.equal(legacyWindowClipboardReads, 0,
+  "the retired window-end clipboard path never reads the pasteboard");
+assert.equal(legacyWindowStores, 0);
+assert.equal(legacyWindowClipboardClears, 1);
+assert.deepEqual(legacyWindowStoreOutput,
+  ["STATUS=STOPPED RESULT=F02_KEYCHAIN_INPUT_REJECTED"]);
 
 const badAckMemory = makeMemoryKeychain({
   [F02_KEYCHAIN_ITEMS.bundleState]: "STAGING",
@@ -2395,7 +2533,6 @@ const staged = new Map([
   [F02_KEYCHAIN_ITEMS.forbiddenAppsUrl, forbiddenUrl],
   [F02_KEYCHAIN_ITEMS.mainQueueId, "c".repeat(32)],
   [F02_KEYCHAIN_ITEMS.dlqId, "d".repeat(32)],
-  [F02_KEYCHAIN_ITEMS.windowEndUtc, WINDOW_END],
 ]);
 let clipboardClears = 0;
 for (const [account, value] of staged) {
@@ -2622,6 +2759,17 @@ for (const privateValue of coordinatorMemory.values.values()) {
   if (privateValue.length >= 8) assert.ok(!coordinatorOutput.join("\n").includes(privateValue));
 }
 
+await memory.storeNew(F02_KEYCHAIN_ITEMS.retirementVerifierLease, "PID:999", {
+  maxBytes: 14, pattern: F02_KEYCHAIN_PID_OWNER_PATTERN,
+});
+await memory.storeNew(
+  F02_KEYCHAIN_ITEMS.retirementComplete,
+  "W_TOKEN_VERIFY_HTTP_401_R_TOKEN_VERIFY_HTTP_401_MAIN_QUEUE_HTTP_401_DLQ_HTTP_401",
+  {
+    maxBytes: 96,
+    pattern: /^W_TOKEN_VERIFY_HTTP_401_R_TOKEN_VERIFY_HTTP_401_MAIN_QUEUE_HTTP_401_DLQ_HTTP_401$/,
+  },
+);
 assert.equal(await manageF02KeychainMain(["--cleanup", NAMESPACE], {
   keychainAccess: memory,
   readHiddenLine: ackPrompt,
@@ -2953,5 +3101,5 @@ try {
 }
 
 process.stdout.write(
-  "Project 2 F-02 Keychain validation passed: zero-secret two-acknowledgement native macOS pasteboard preflight with initial/final verified clearing and isolated signal cleanup, namespace freshness, managed native-prompt PTY with an exact CRLF-delimited two-prompt/retype same-value handshake, copy-minimized input and failure-path wiping, prompt/separator drift rejection and descendant reaping, a full default-reader PTY initialization, bounded hidden input with its listener armed before prompt exposure and resume, stage-specific initialization diagnostics, durable helper-death fencing, advisory-lock serialization and last-child reap, fixed labels, stdin-only writes, exact absence handling, buffer clearing, clipboard custody, one-use claims, redacted helper output, READY-time final GO, lifecycle-guarded namespace deletion, and verified cleanup.\n",
+  "Project 2 F-02 Keychain validation passed: zero-secret two-acknowledgement native macOS pasteboard preflight with initial/final verified clearing and isolated signal cleanup, namespace freshness, pre-lock canonical approved-window admission with state/end/start fencing, managed native-prompt PTY with an exact CRLF-delimited two-prompt/retype same-value handshake, copy-minimized input and failure-path wiping, prompt/separator drift rejection and descendant reaping, a full default-reader PTY initialization, bounded hidden input with its listener armed before prompt exposure and resume, stage-specific initialization diagnostics, durable helper-death fencing, advisory-lock serialization and last-child reap, fixed labels, stdin-only writes, exact absence handling, buffer clearing, clipboard custody, one-use claims, redacted helper output, READY-time final GO, retirement-proof-guarded namespace deletion, and verified cleanup.\n",
 );
