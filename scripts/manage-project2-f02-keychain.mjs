@@ -11,18 +11,23 @@ import {
   abortF02NamespaceOperationLocksSync,
   abortF02KeychainSecurityProcesses,
   abortF02KeychainSecurityProcessesSync,
+  assertF02PublicWindowBoundary,
   assertF02NamespaceOperationLockOwned,
   assertF02KeychainWindow,
+  assertF02ProviderWorkClosed,
   createF02KeychainAccess,
   f02ShutdownReapVerified,
   f02KeychainPidOwner,
   f02KeychainNamespaceStartUtc,
   F02_KEYCHAIN_ITEMS,
-  F02_KEYCHAIN_LIFECYCLE_OWNER_PATTERN,
   F02_KEYCHAIN_NAMESPACE,
   F02_KEYCHAIN_PID_OWNER_PATTERN,
   F02_KEYCHAIN_STATE_PATTERN,
+  F02_RETIREMENT_COMPLETION,
+  F02_RETIREMENT_COMPLETION_PATTERN,
+  F02_WINDOW_UTC_PATTERN,
   isF02NamespaceOperationLockHeld,
+  isF02LocalProcessAlive,
   retainF02NamespaceOperationLockFailStickySync,
   retainF02NamespaceOperationLocksFailStickySync,
   retainF02NamespaceOperationLocksForShutdownSync,
@@ -55,11 +60,12 @@ const ACK = Object.freeze({
   cleanup: "DELETE_F02_KEYCHAIN_NAMESPACE_ONCE",
 });
 const INITIALIZE_STAGE_RESULT = Object.freeze({
+  WINDOW: "F02_KEYCHAIN_INITIALIZE_WINDOW_REJECTED",
   ACK: "F02_KEYCHAIN_INITIALIZE_ACK_REJECTED",
   DEPENDENCY: "F02_KEYCHAIN_INITIALIZE_DEPENDENCY_REJECTED",
   NAMESPACE_CHECK: "F02_KEYCHAIN_INITIALIZE_NAMESPACE_CHECK_REJECTED",
-  FRESHNESS: "F02_KEYCHAIN_INITIALIZE_FRESHNESS_REJECTED",
   STATE_STORE: "F02_KEYCHAIN_INITIALIZE_STATE_STORE_REJECTED",
+  END_STORE: "F02_KEYCHAIN_INITIALIZE_END_STORE_REJECTED",
   START_STORE: "F02_KEYCHAIN_INITIALIZE_START_STORE_REJECTED",
 });
 const STORE_MACOS_PASTEBOARD_READ_REJECTED =
@@ -92,81 +98,46 @@ const INPUT_VALIDATION = Object.freeze({
   [F02_KEYCHAIN_ITEMS.readBundleToken]: Object.freeze({ maxBytes: 512, pattern: /^[^\s\0]{32,512}$/ }),
   [F02_KEYCHAIN_ITEMS.mainQueueId]: Object.freeze({ maxBytes: 32, pattern: /^[a-f0-9]{32}$/ }),
   [F02_KEYCHAIN_ITEMS.dlqId]: Object.freeze({ maxBytes: 32, pattern: /^[a-f0-9]{32}$/ }),
-  [F02_KEYCHAIN_ITEMS.windowEndUtc]: Object.freeze({
-    maxBytes: 24,
-    pattern: /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/,
-  }),
 });
 
 function exactArgs(argv, expected) {
   return argv.length === expected.length && argv.every((value, index) => value === expected[index]);
 }
 
-function isLocalProcessAlive(pid) {
-  if (!Number.isSafeInteger(pid) || pid <= 1 || pid > 9_999_999_999) return true;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error?.code !== "ESRCH";
-  }
-}
+const isLocalProcessAlive = isF02LocalProcessAlive;
 
-async function assertNamespaceDeletionSafe(keychain, processAlive = isLocalProcessAlive) {
+async function assertNamespaceDeletionSafe(keychain, processAlive = isF02LocalProcessAlive) {
   if (!keychain || typeof keychain.has !== "function" || typeof keychain.read !== "function" ||
       typeof processAlive !== "function") throw new Error("INPUT_REJECTED");
-  const uuidValidation = {
-    maxBytes: 36,
-    pattern: /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i,
-  };
-  let lifecycleExists = false;
-  if (await keychain.has(F02_KEYCHAIN_ITEMS.lifecycleLease)) {
-    lifecycleExists = true;
-    const owner = await keychain.read(F02_KEYCHAIN_ITEMS.lifecycleLease, {
-      maxBytes: 26, pattern: F02_KEYCHAIN_LIFECYCLE_OWNER_PATTERN,
-    });
-    const ownerPid = Number(F02_KEYCHAIN_LIFECYCLE_OWNER_PATTERN.exec(owner)?.[2]);
-    if (!Number.isSafeInteger(ownerPid) || processAlive(ownerPid) !== false) {
-      throw new Error("INPUT_REJECTED");
-    }
-  }
-  for (const item of [
-    F02_KEYCHAIN_ITEMS.generateLease,
-    F02_KEYCHAIN_ITEMS.helperLease,
-    F02_KEYCHAIN_ITEMS.operatorLease,
-    F02_KEYCHAIN_ITEMS.coordinatorLease,
-    F02_KEYCHAIN_ITEMS.rollbackLease,
-    F02_KEYCHAIN_ITEMS.rollbackRecoveryLease,
-    F02_KEYCHAIN_ITEMS.cleanupLease,
-    F02_KEYCHAIN_ITEMS.cleanupRecoveryLease,
-  ]) {
-    if (!await keychain.has(item)) continue;
-    const owner = await keychain.read(item, {
-      maxBytes: 14, pattern: F02_KEYCHAIN_PID_OWNER_PATTERN,
+  await assertF02ProviderWorkClosed(keychain, processAlive);
+  if (await keychain.has(F02_KEYCHAIN_ITEMS.retirementVerifierLease)) {
+    const owner = await keychain.read(F02_KEYCHAIN_ITEMS.retirementVerifierLease, {
+      maxBytes: 14,
+      pattern: F02_KEYCHAIN_PID_OWNER_PATTERN,
     });
     const ownerPid = Number(F02_KEYCHAIN_PID_OWNER_PATTERN.exec(owner)?.[1]);
     if (!Number.isSafeInteger(ownerPid) || processAlive(ownerPid) !== false) {
       throw new Error("INPUT_REJECTED");
     }
   }
-  const deployClaimed = await keychain.has(F02_KEYCHAIN_ITEMS.deployLease);
-  const candidateDeployed = await keychain.has(F02_KEYCHAIN_ITEMS.candidateDeployed);
-  const cleanupCandidateRecorded = await keychain.has(
-    F02_KEYCHAIN_ITEMS.cleanupCandidateVersion,
-  );
-  const rollbackClaimed = await keychain.has(F02_KEYCHAIN_ITEMS.rollbackLease) ||
-    await keychain.has(F02_KEYCHAIN_ITEMS.rollbackRecoveryLease);
-  if (lifecycleExists || deployClaimed || candidateDeployed || cleanupCandidateRecorded ||
-      rollbackClaimed) {
-    const baseline = await keychain.read(F02_KEYCHAIN_ITEMS.baselineVersion, uuidValidation);
-    const rollbackComplete = await keychain.read(F02_KEYCHAIN_ITEMS.rollbackComplete, uuidValidation);
-    if (baseline.toLowerCase() !== rollbackComplete.toLowerCase()) {
-      throw new Error("INPUT_REJECTED");
-    }
-  }
-  const cleanupClaimed = await keychain.has(F02_KEYCHAIN_ITEMS.cleanupLease);
-  if (deployClaimed || candidateDeployed || cleanupCandidateRecorded || cleanupClaimed) {
-    await keychain.read(F02_KEYCHAIN_ITEMS.cleanupComplete, uuidValidation);
+  const workersTokenExists = await keychain.has(F02_KEYCHAIN_ITEMS.workersEditToken);
+  const readTokenExists = await keychain.has(F02_KEYCHAIN_ITEMS.readBundleToken);
+  const retirementClaimExists = await keychain.has(F02_KEYCHAIN_ITEMS.retirementVerifierLease);
+  const retirementCompleteExists = await keychain.has(F02_KEYCHAIN_ITEMS.retirementComplete);
+  if (!workersTokenExists && !readTokenExists) {
+    if (retirementClaimExists || retirementCompleteExists) throw new Error("INPUT_REJECTED");
+  } else {
+    if (!retirementClaimExists || !retirementCompleteExists) throw new Error("INPUT_REJECTED");
+    const expectedRetirement = workersTokenExists && readTokenExists
+      ? F02_RETIREMENT_COMPLETION.WR
+      : workersTokenExists
+        ? F02_RETIREMENT_COMPLETION.W
+        : F02_RETIREMENT_COMPLETION.R;
+    const retirementComplete = await keychain.read(F02_KEYCHAIN_ITEMS.retirementComplete, {
+      maxBytes: 96,
+      pattern: F02_RETIREMENT_COMPLETION_PATTERN,
+    });
+    if (retirementComplete !== expectedRetirement) throw new Error("INPUT_REJECTED");
   }
 }
 
@@ -450,7 +421,7 @@ async function requireState(keychain, expected) {
 async function requireNamespaceStart(keychain, namespace) {
   const startUtc = await keychain.read(F02_KEYCHAIN_ITEMS.windowStartUtc, {
     maxBytes: 24,
-    pattern: /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/,
+    pattern: F02_WINDOW_UTC_PATTERN,
   });
   if (startUtc !== f02KeychainNamespaceStartUtc(namespace)) {
     throw new Error("INPUT_REJECTED");
@@ -480,6 +451,29 @@ export async function manageF02KeychainMain(argv = process.argv.slice(2), depend
   if (argv.length === 0) {
     print("STATUS=INERT RESULT=NO_ACTION");
     return 0;
+  }
+  let initializationBoundary = null;
+  if (argv[0] === "--initialize") {
+    try {
+      const initializeNamespace = String(argv[1] || "");
+      const suppliedWindowEnd = String(argv[2] || "");
+      if (!exactArgs(argv, ["--initialize", initializeNamespace, suppliedWindowEnd]) ||
+          !F02_KEYCHAIN_NAMESPACE.test(initializeNamespace)) {
+        throw new Error("INPUT_REJECTED");
+      }
+      const currentEpoch = Number(now());
+      initializationBoundary = assertF02PublicWindowBoundary(
+        initializeNamespace,
+        suppliedWindowEnd,
+        currentEpoch,
+      );
+      if (currentEpoch - initializationBoundary.startEpoch > INITIALIZE_MAX_SKEW_MS) {
+        throw new Error("INPUT_REJECTED");
+      }
+    } catch {
+      print(`STATUS=STOPPED RESULT=${INITIALIZE_STAGE_RESULT.WINDOW}`);
+      return 1;
+    }
   }
   if (argv[0] === "--preflight-macos-pasteboard") {
     signalState.preflightTerminalEmitted = false;
@@ -712,13 +706,13 @@ export async function manageF02KeychainMain(argv = process.argv.slice(2), depend
     const createKeychainAccess = dependencies.createKeychainAccess || createF02KeychainAccess;
     keychain = dependencies.keychainAccess || createKeychainAccess({ namespace });
   } catch {
-    print(`STATUS=STOPPED RESULT=${exactArgs(argv, ["--initialize", namespace])
+    print(`STATUS=STOPPED RESULT=${initializationBoundary !== null
       ? INITIALIZE_STAGE_RESULT.DEPENDENCY
       : "F02_KEYCHAIN_INPUT_REJECTED"}`);
     return 1;
   }
   try {
-    if (exactArgs(argv, ["--initialize", namespace])) {
+    if (initializationBoundary !== null) {
       let initializeStage = "ACK";
       try {
         await requireAck(prompt, ACK.initialize);
@@ -729,28 +723,34 @@ export async function manageF02KeychainMain(argv = process.argv.slice(2), depend
         }
         initializeStage = "NAMESPACE_CHECK";
         await keychain.assertNamespaceEmpty();
-        initializeStage = "FRESHNESS";
-        const startUtc = f02KeychainNamespaceStartUtc(namespace);
+        initializeStage = "WINDOW";
         const currentEpoch = Number(now());
-        const startEpoch = Date.parse(startUtc);
-        if (!Number.isSafeInteger(currentEpoch) || currentEpoch < startEpoch ||
-            currentEpoch - startEpoch > INITIALIZE_MAX_SKEW_MS) {
+        initializationBoundary = assertF02PublicWindowBoundary(
+          namespace,
+          initializationBoundary.endUtc,
+          currentEpoch,
+        );
+        if (currentEpoch - initializationBoundary.startEpoch > INITIALIZE_MAX_SKEW_MS) {
           throw new Error("INPUT_REJECTED");
         }
+        const { startUtc, endUtc } = initializationBoundary;
         initializeStage = "STATE_STORE";
         await keychain.storeNew(
           F02_KEYCHAIN_ITEMS.bundleState,
           "STAGING",
           { maxBytes: 32, pattern: F02_KEYCHAIN_STATE_PATTERN },
         );
+        initializeStage = "END_STORE";
+        await keychain.storeNew(
+          F02_KEYCHAIN_ITEMS.windowEndUtc,
+          endUtc,
+          { maxBytes: 24, pattern: F02_WINDOW_UTC_PATTERN },
+        );
         initializeStage = "START_STORE";
         await keychain.storeNew(
           F02_KEYCHAIN_ITEMS.windowStartUtc,
           startUtc,
-          {
-            maxBytes: 24,
-            pattern: /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/,
-          },
+          { maxBytes: 24, pattern: F02_WINDOW_UTC_PATTERN },
         );
         print("STATUS=COMPLETE RESULT=F02_KEYCHAIN_NAMESPACE_INITIALIZED");
         return 0;
