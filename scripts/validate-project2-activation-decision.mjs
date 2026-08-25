@@ -59,15 +59,22 @@ const REQUIRED_SECTION_TERMS = Object.freeze({
     /HTTP `000` \/ request count `0` for a fixed pre-request stop/i,
     /must be recorded exactly as `NOT REACHED`/i,
     /must never be represented as a request attempt, success or retry authority/i,
+    /\| If F-02 Keychain mode: fresh zero-secret macOS pasteboard preflight passed before console access or credentials \| `\[REVIEW\/FILL\]` \| `\[REVIEW\/FILL\]` \| `\[REVIEW\/FILL\]` \|/,
+    /START_F02_MACOS_PASTEBOARD_PREFLIGHT_ONCE/,
+    /before any pasteboard access/i,
+    /F02_MACOS_PASTEBOARD_PREFLIGHT_V1:<namespace>:<32hex>/,
+    /NONSECRET_F02_MACOS_PASTEBOARD_CHALLENGE=<challenge>/,
+    /ACTION=COPY_CHALLENGE_WITH_NATIVE_MACOS_COPY/,
+    /VERIFY_F02_MACOS_PASTEBOARD_PREFLIGHT_ONCE/,
+    /native macOS Command-C or Edit > Copy/,
+    /same namespace/i, /no retry or namespace reuse/i,
   ],
   "Queue credentials": [
     /Queues Read/, /Queues Write/, /DLQ inspect\/redrive/, /Revocation owner/i,
-    /Exact sandbox account restriction/, /Exact `Queues Read` scope/, /explicit absence of `Queues Write`/,
-    /Credential issuance UTC time/, /Credential expiry UTC time and TTL/,
-    /Named credential custodian/, /Credential revocation UTC time/,
-    /token verification rejected with fixed HTTP `401` evidence/,
-    /main Queue and DLQ metrics reads both rejected with fixed HTTP `401` evidence/,
-    /Working-session credential material cleared/, /three post-revocation unusability checks/,
+    /Temporary `W` Workers Scripts Edit custody field/,
+    /Temporary `R` aggregate-observer custody field/,
+    /`W` requires one post-revocation unusability check/,
+    /`R` requires three separate post-revocation unusability checks/,
     /complete every field below with a non-identifying private reference only/i,
   ],
   "Alert delivery": [/excluded/i, /separate operations decision/i, /remains unchanged/i],
@@ -97,6 +104,32 @@ const REQUIRED_SECTION_TERMS = Object.freeze({
     /HTTP `400`, requests `1` with terminal PASS/,
     /fixed\/count\/time-only causal checkpoint chronology complete/,
   ],
+});
+const REQUIRED_F02_CREDENTIAL_TABLES = Object.freeze({
+  "Temporary `W` Workers Scripts Edit custody field": Object.freeze([
+    "`W` exact sandbox account restriction",
+    "`W` exact `Workers Scripts Edit` scope, fixed `spartan-square-connector-sandbox` operator only",
+    "`W` credential issuance UTC time",
+    "`W` credential expiry UTC time and TTL",
+    "`W` named credential custodian",
+    "`W` named revocation owner",
+    "`W` credential revocation UTC time",
+    "`W` post-revocation token verification rejected with fixed HTTP `401` evidence",
+    "`W` working-session credential material cleared without retaining the value",
+  ]),
+  "Temporary `R` aggregate-observer custody field": Object.freeze([
+    "`R` exact sandbox account restriction",
+    "`R` exact `Workers Scripts Read`, `D1 Read` and `Queues Read` scopes and explicit absence of corresponding write permissions",
+    "`R` credential issuance UTC time",
+    "`R` credential expiry UTC time and TTL",
+    "`R` named credential custodian",
+    "`R` named revocation owner",
+    "`R` credential revocation UTC time",
+    "`R` post-revocation token verification rejected with fixed HTTP `401` evidence",
+    "`R` post-revocation main Queue metrics read rejected with fixed HTTP `401` evidence",
+    "`R` post-revocation DLQ metrics read rejected with fixed HTTP `401` evidence",
+    "`R` working-session credential material cleared without retaining the value",
+  ]),
 });
 const MIGRATION_REQUIRED_SECTIONS = Object.freeze([
   "One migration window and scope",
@@ -258,6 +291,26 @@ const REQUIRED_F02_GOVERNANCE_CONTRACTS = Object.freeze({
     /signals both the top-level validator/,
     /nested terminal parent/,
     /grants no credential, candidate, traffic or request authority/,
+    /--preflight-macos-pasteboard <namespace>/,
+    /START_F02_MACOS_PASTEBOARD_PREFLIGHT_ONCE/,
+    /before any pasteboard access/,
+    /initially clear and verify the macOS general pasteboard/,
+    /F02_MACOS_PASTEBOARD_PREFLIGHT_V1:<namespace>:<32hex>/,
+    /NONSECRET_F02_MACOS_PASTEBOARD_CHALLENGE=F02_MACOS_PASTEBOARD_PREFLIGHT_V1:<namespace>:<32hex>/,
+    /ACTION=COPY_CHALLENGE_WITH_NATIVE_MACOS_COPY/,
+    /native macOS Command-C or Edit > Copy/,
+    /provider Copy control.*not the certified route/i,
+    /reads only `\/usr\/bin\/pbpaste`/,
+    /rechecks namespace freshness after the read/,
+    /F02_MACOS_PASTEBOARD_PREFLIGHT_INPUT_REJECTED/,
+    /F02_MACOS_PASTEBOARD_PREFLIGHT_ROUTE_REJECTED/,
+    /F02_MACOS_PASTEBOARD_PREFLIGHT_CLEAR_REJECTED/,
+    /F02_MACOS_PASTEBOARD_PREFLIGHT_INTERRUPTED/,
+    /F02_MACOS_PASTEBOARD_PREFLIGHT_SHUTDOWN_AMBIGUOUS/,
+    /F02_MACOS_PASTEBOARD_PREFLIGHT_VERIFIED_AND_CLEARED/,
+    /After its sole terminal `STATUS` line has been emitted, a late signal is inert and cannot produce a second result/,
+    /immediately initialize that same namespace after PASS/i,
+    /grants no retry or namespace reuse/,
     /atomically creates `claim\.lifecycle` as `COORDINATOR:PID:<pid>`/,
     /same coordinator then stores FINAL GO acceptance, internally runs the exact deployment action/,
     /baseline remains at 100% and the candidate at 0% until FINAL GO/,
@@ -517,6 +570,23 @@ function markdownTableDataRows(lines) {
   return rows;
 }
 
+function exactMarkdownTableLabels(source, firstHeaderCell) {
+  if (typeof source !== "string" || typeof firstHeaderCell !== "string") return null;
+  const lines = source.split("\n");
+  const headerLine = `| ${firstHeaderCell} | Private owner record reference |`;
+  const indices = lines.flatMap((line, index) => line.trim() === headerLine ? [index] : []);
+  if (indices.length !== 1) return null;
+  const start = indices[0];
+  if (!/^\s*\|(?:\s*:?-{3,}:?\s*\|)+\s*$/.test(lines[start + 1] || "")) return null;
+  const labels = [];
+  for (let index = start + 2; index < lines.length && /^\s*\|/.test(lines[index]); index += 1) {
+    const cells = lines[index].trim().replace(/^\||\|$/g, "").split("|").map((cell) => cell.trim());
+    if (cells.length !== 2) return null;
+    labels.push(cells[0]);
+  }
+  return labels;
+}
+
 function validateIncompleteFields(source, ranges, errors) {
   for (const heading of REQUIRED_SECTIONS) {
     const section = ranges.get(heading);
@@ -546,6 +616,16 @@ function validateRequiredTerms(ranges, errors) {
     const section = ranges.get(heading);
     if (section && terms.some((term) => !term.test(section))) {
       addError(errors, `SECTION_CONTRACT_${heading.toUpperCase().replaceAll(/[^A-Z0-9]+/g, "_")}`);
+    }
+  }
+  const queueSection = ranges.get("Queue credentials");
+  if (queueSection) {
+    for (const [header, expectedLabels] of Object.entries(REQUIRED_F02_CREDENTIAL_TABLES)) {
+      const actualLabels = exactMarkdownTableLabels(queueSection, header);
+      if (!actualLabels || actualLabels.length !== expectedLabels.length ||
+          actualLabels.some((label, index) => label !== expectedLabels[index])) {
+        addError(errors, "SECTION_CONTRACT_QUEUE_CREDENTIALS");
+      }
     }
   }
 }
@@ -946,6 +1026,10 @@ function assertUnsafeMutationsFail(source, knownDocTargets) {
       "production coordinator main and default hidden reader",
       "coordinator logic",
     )],
+    ["SECTION_CONTRACT_TEMPORARY_SANDBOX_AUTHORIZATION", source.replace(
+      "| If F-02 Keychain mode: fresh zero-secret macOS pasteboard preflight passed before console access or credentials | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |\n",
+      "",
+    )],
     ["SECTION_CONTRACT_ROLLBACK_AUTHORITY", source.replace(
       "For F-02, a launcher failure, pseudo-terminal loss or exit before one fixed terminal result is `STOP`",
       "For F-02, a launcher failure may be reviewed",
@@ -953,12 +1037,12 @@ function assertUnsafeMutationsFail(source, knownDocTargets) {
     ["F02_ACTIVATION_READ_ONLY_AUTHORIZATION_CONTRADICTION_PRESENT",
       `${source}\nF-02 does not authorize Square, Apps, Queue or D1 activity.\n`],
     ["SECTION_CONTRACT_QUEUE_CREDENTIALS", source.replace(
-      "| Exact sandbox account restriction |",
-      "| Sandbox account reviewed |",
+      "`W` exact `Workers Scripts Edit` scope, fixed `spartan-square-connector-sandbox` operator only",
+      "Workers edit scope reviewed",
     )],
     ["SECTION_CONTRACT_QUEUE_CREDENTIALS", source.replace(
-      "Post-revocation main Queue and DLQ metrics reads both rejected with fixed HTTP `401` evidence",
-      "Post-revocation Queue checks reviewed",
+      "`R` post-revocation main Queue metrics read rejected with fixed HTTP `401` evidence",
+      "Post-revocation main Queue check reviewed",
     )],
     ["SECTION_CONTRACT_BACKUP_AND_DELETION_MANIFEST_CUSTODY", source.replace(
       "Disposal-review owner and authority reference; no deletion is authorized here",
@@ -1358,7 +1442,7 @@ process.stdout.write("Project 2 decision validation passed: the one-case and one
   "remain default NOT APPROVED with required REVIEW/FILL authority, preparation, retained-exception acceptance, " +
   "separate final-deploy, rollback, " +
   "standalone exact-legacy recovery, closed-template non-reuse, readiness, monitored closure, " +
-  "reference-only Queue credential custody, F-02 causal timestamps, private raw evidence, sanitized shared evidence " +
+  "separate reference-only F-02 W and R credential custody and revocation proofs, F-02 causal timestamps, private raw evidence, sanitized shared evidence " +
   "and signature fields, including conditional HTTP 000/request-zero NOT REACHED closure; " +
   "no private material, safe relative links, production OAuth-only/no-personal-token boundary and " +
   "proposed-but-unapproved R2 storage; historical zero-request STOP, expired-record non-reuse, " +

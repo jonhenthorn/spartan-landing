@@ -46,6 +46,8 @@ const DRIFT_NAMESPACE = "f02-20260823t190004z-1234abd1";
 const SIGKILL_NAMESPACE = "f02-20260823t190005z-1234abd2";
 const CLIPBOARD_FAILURE_NAMESPACE = "f02-20260823t190006z-1234abd3";
 const ROOT_DRIFT_NAMESPACE = "f02-20260823t190007z-1234abd4";
+const CLIPBOARD_READ_RELEASE_NAMESPACE = "f02-20260823t190008z-1234abd5";
+const CLIPBOARD_READ_CLEAR_FAILURE_NAMESPACE = "f02-20260823t190009z-1234abd6";
 const WINDOW_START = "2026-08-23T19:00:00.000Z";
 const WINDOW_END = "2026-08-23T21:00:00.000Z";
 const NOW = Date.parse("2026-08-23T19:01:00.000Z");
@@ -783,6 +785,231 @@ assert.deepEqual(managerTest.INITIALIZE_STAGE_RESULT, {
   STATE_STORE: "F02_KEYCHAIN_INITIALIZE_STATE_STORE_REJECTED",
   START_STORE: "F02_KEYCHAIN_INITIALIZE_START_STORE_REJECTED",
 });
+assert.equal(managerTest.ACK.store, "STORE_F02_MACOS_PASTEBOARD_ITEM_ONCE");
+assert.equal(
+  managerTest.STORE_MACOS_PASTEBOARD_READ_REJECTED,
+  "F02_KEYCHAIN_STORE_MACOS_PASTEBOARD_READ_REJECTED",
+);
+assert.equal(
+  managerTest.ACK.startPreflightMacosPasteboard,
+  "START_F02_MACOS_PASTEBOARD_PREFLIGHT_ONCE",
+);
+assert.equal(
+  managerTest.ACK.verifyPreflightMacosPasteboard,
+  "VERIFY_F02_MACOS_PASTEBOARD_PREFLIGHT_ONCE",
+);
+assert.equal(
+  managerTest.MACOS_PASTEBOARD_PREFLIGHT_PREFIX,
+  "F02_MACOS_PASTEBOARD_PREFLIGHT_V1:",
+);
+assert.deepEqual(managerTest.MACOS_PASTEBOARD_PREFLIGHT_RESULT, {
+  COMPLETE: "F02_MACOS_PASTEBOARD_PREFLIGHT_VERIFIED_AND_CLEARED",
+  INPUT_REJECTED: "F02_MACOS_PASTEBOARD_PREFLIGHT_INPUT_REJECTED",
+  ROUTE_REJECTED: "F02_MACOS_PASTEBOARD_PREFLIGHT_ROUTE_REJECTED",
+  CLEAR_REJECTED: "F02_MACOS_PASTEBOARD_PREFLIGHT_CLEAR_REJECTED",
+  INTERRUPTED: "F02_MACOS_PASTEBOARD_PREFLIGHT_INTERRUPTED",
+  SHUTDOWN_AMBIGUOUS: "F02_MACOS_PASTEBOARD_PREFLIGHT_SHUTDOWN_AMBIGUOUS",
+});
+assert.equal(managerTest.PBCOPY, "/usr/bin/pbcopy");
+assert.equal(managerTest.PBPASTE, "/usr/bin/pbpaste");
+
+const preflightNonce = Buffer.alloc(16, 0xab);
+const preflightChallenge =
+  `${managerTest.MACOS_PASTEBOARD_PREFLIGHT_PREFIX}${NAMESPACE}:${"ab".repeat(16)}`;
+const successfulPreflightOutput = [];
+const successfulPreflightCalls = [];
+assert.equal(await manageF02KeychainMain([
+  "--preflight-macos-pasteboard", NAMESPACE,
+], {
+  randomBytesImpl: (size) => {
+    successfulPreflightCalls.push("random");
+    assert.equal(size, 16);
+    return preflightNonce;
+  },
+  now: () => { successfulPreflightCalls.push("now"); return NOW; },
+  readHiddenLine: async (promptText, maxLength) => {
+    successfulPreflightCalls.push(promptText.includes("START_") ? "ack-start" : "ack-verify");
+    return ackPrompt(promptText, maxLength);
+  },
+  clipboardRead: async () => {
+    successfulPreflightCalls.push("read");
+    return preflightChallenge;
+  },
+  clipboardClear: async () => { successfulPreflightCalls.push("clear"); },
+  retainLockFailSticky: () => { throw new Error("preflight must not retain a lock"); },
+  retainLocksFailSticky: () => { throw new Error("preflight must not retain locks"); },
+  print: (line) => {
+    successfulPreflightCalls.push(`print:${line.split("=")[0]}`);
+    successfulPreflightOutput.push(line);
+  },
+}), 0);
+assert.deepEqual(successfulPreflightCalls, [
+  "now", "ack-start", "clear", "random",
+  "print:NONSECRET_F02_MACOS_PASTEBOARD_CHALLENGE", "print:ACTION",
+  "ack-verify", "read", "now", "clear", "print:STATUS",
+]);
+assert.equal(preflightNonce.equals(Buffer.alloc(16)), true,
+  "the preflight wipes its mutable random nonce");
+assert.deepEqual(successfulPreflightOutput, [
+  `NONSECRET_F02_MACOS_PASTEBOARD_CHALLENGE=${preflightChallenge}`,
+  "ACTION=COPY_CHALLENGE_WITH_NATIVE_MACOS_COPY",
+  "STATUS=COMPLETE RESULT=F02_MACOS_PASTEBOARD_PREFLIGHT_VERIFIED_AND_CLEARED",
+]);
+
+for (const preflightCase of [
+  {
+    name: "argument",
+    argv: ["--preflight-macos-pasteboard"],
+    now: NOW,
+    expectedPrompts: 0,
+  },
+  {
+    name: "stale-namespace",
+    argv: ["--preflight-macos-pasteboard", NAMESPACE],
+    now: NOW + (10 * 60 * 1_000),
+    expectedPrompts: 0,
+  },
+  {
+    name: "future-namespace",
+    argv: ["--preflight-macos-pasteboard", NAMESPACE],
+    now: Date.parse(WINDOW_START) - 1,
+    expectedPrompts: 0,
+  },
+  {
+    name: "first-acknowledgement",
+    argv: ["--preflight-macos-pasteboard", NAMESPACE],
+    now: NOW,
+    expectedPrompts: 1,
+    wrongFirstAck: true,
+  },
+]) {
+  const lines = [];
+  let prompts = 0;
+  let clears = 0;
+  let reads = 0;
+  let randomCalls = 0;
+  assert.equal(await manageF02KeychainMain(preflightCase.argv, {
+    randomBytesImpl: () => { randomCalls += 1; return Buffer.alloc(16, 0xac); },
+    now: () => preflightCase.now,
+    readHiddenLine: async (promptText, maxLength) => {
+      prompts += 1;
+      if (preflightCase.wrongFirstAck) return "WRONG_ACK";
+      return ackPrompt(promptText, maxLength);
+    },
+    clipboardRead: async () => { reads += 1; return "must-not-read"; },
+    clipboardClear: async () => { clears += 1; },
+    print: (line) => lines.push(line),
+  }), 1, preflightCase.name);
+  assert.equal(prompts, preflightCase.expectedPrompts, preflightCase.name);
+  assert.equal(randomCalls, 0, preflightCase.name);
+  assert.equal(reads, 0, preflightCase.name);
+  assert.equal(clears, 0, preflightCase.name);
+  assert.equal(lines.at(-1),
+    "STATUS=STOPPED RESULT=F02_MACOS_PASTEBOARD_PREFLIGHT_INPUT_REJECTED",
+    preflightCase.name);
+}
+
+for (const dependencyCase of [
+  { name: "random-throw", randomBytesImpl: () => { throw new Error("random drift"); } },
+  { name: "random-shape", randomBytesImpl: () => Buffer.alloc(15, 0xad) },
+]) {
+  const lines = [];
+  let clears = 0;
+  let reads = 0;
+  assert.equal(await manageF02KeychainMain([
+    "--preflight-macos-pasteboard", NAMESPACE,
+  ], {
+    randomBytesImpl: dependencyCase.randomBytesImpl,
+    now: () => NOW,
+    readHiddenLine: ackPrompt,
+    clipboardRead: async () => { reads += 1; return "must-not-read"; },
+    clipboardClear: async () => { clears += 1; },
+    print: (line) => lines.push(line),
+  }), 1, dependencyCase.name);
+  assert.equal(reads, 0, dependencyCase.name);
+  assert.equal(clears, 2, dependencyCase.name);
+  assert.deepEqual(lines, [
+    "STATUS=STOPPED RESULT=F02_MACOS_PASTEBOARD_PREFLIGHT_INPUT_REJECTED",
+  ], dependencyCase.name);
+}
+
+for (const routeCase of [
+  { name: "second-ack", wrongSecondAck: true, expectedReads: 0 },
+  { name: "read", readThrows: true, expectedReads: 1 },
+  { name: "browser-only-dummy", observed: "BROWSER_CONTROLLER_CLIPBOARD_DUMMY", expectedReads: 1 },
+  { name: "old-nonce", observed:
+      `${managerTest.MACOS_PASTEBOARD_PREFLIGHT_PREFIX}${NAMESPACE}:${"00".repeat(16)}`,
+    expectedReads: 1 },
+  { name: "final-freshness", observed: preflightChallenge, finalNow: NOW + (10 * 60 * 1_000),
+    expectedReads: 1 },
+]) {
+  const lines = [];
+  let prompts = 0;
+  let clears = 0;
+  let reads = 0;
+  let nowCalls = 0;
+  const nonce = Buffer.alloc(16, 0xab);
+  assert.equal(await manageF02KeychainMain([
+    "--preflight-macos-pasteboard", NAMESPACE,
+  ], {
+    randomBytesImpl: () => nonce,
+    now: () => (++nowCalls === 1 ? NOW : (routeCase.finalNow ?? NOW)),
+    readHiddenLine: async (promptText, maxLength) => {
+      prompts += 1;
+      if (prompts === 2 && routeCase.wrongSecondAck) return "WRONG_ACK";
+      return ackPrompt(promptText, maxLength);
+    },
+    clipboardRead: async () => {
+      reads += 1;
+      if (routeCase.readThrows) throw new Error("simulated macOS pasteboard read failure");
+      return routeCase.observed ?? preflightChallenge;
+    },
+    clipboardClear: async () => { clears += 1; },
+    print: (line) => lines.push(line),
+  }), 1, routeCase.name);
+  assert.equal(prompts, 2, routeCase.name);
+  assert.equal(reads, routeCase.expectedReads, routeCase.name);
+  assert.equal(clears, 2, routeCase.name);
+  assert.equal(nonce.equals(Buffer.alloc(16)), true, routeCase.name);
+  assert.equal(lines.at(-1),
+    "STATUS=STOPPED RESULT=F02_MACOS_PASTEBOARD_PREFLIGHT_ROUTE_REJECTED",
+    routeCase.name);
+}
+
+for (const clearCase of [
+  { name: "initial", failedClearCall: 1, expectedRandom: 0, expectedReads: 0 },
+  { name: "final-success-path", failedClearCall: 2, expectedRandom: 1, expectedReads: 1 },
+  { name: "final-route-path", failedClearCall: 2, expectedRandom: 1, expectedReads: 1,
+    observed: "ROUTE_MISMATCH_BEFORE_FINAL_CLEAR_FAILURE" },
+]) {
+  const lines = [];
+  let clears = 0;
+  let randomCalls = 0;
+  let reads = 0;
+  assert.equal(await manageF02KeychainMain([
+    "--preflight-macos-pasteboard", NAMESPACE,
+  ], {
+    randomBytesImpl: () => { randomCalls += 1; return Buffer.alloc(16, 0xaf); },
+    now: () => NOW,
+    readHiddenLine: ackPrompt,
+    clipboardRead: async () => {
+      reads += 1;
+      return clearCase.observed ??
+        `${managerTest.MACOS_PASTEBOARD_PREFLIGHT_PREFIX}${NAMESPACE}:${"af".repeat(16)}`;
+    },
+    clipboardClear: async () => {
+      clears += 1;
+      if (clears === clearCase.failedClearCall) throw new Error("simulated clear failure");
+    },
+    print: (line) => lines.push(line),
+  }), 1, clearCase.name);
+  assert.equal(clears, 2, clearCase.name);
+  assert.equal(randomCalls, clearCase.expectedRandom, clearCase.name);
+  assert.equal(reads, clearCase.expectedReads, clearCase.name);
+  assert.equal(lines.at(-1),
+    "STATUS=STOPPED RESULT=F02_MACOS_PASTEBOARD_PREFLIGHT_CLEAR_REJECTED",
+    clearCase.name);
+}
 
 function makeHiddenLineTty({ onResume, onPrompt } = {}) {
   const input = new EventEmitter();
@@ -1575,6 +1802,49 @@ assert.equal(badAckReads, 0);
 assert.equal(badAckClears, 1);
 assert.deepEqual(badAckOutput, ["STATUS=STOPPED RESULT=F02_KEYCHAIN_INPUT_REJECTED"]);
 
+const clipboardReadRejectedMemory = makeMemoryKeychain({
+  [F02_KEYCHAIN_ITEMS.bundleState]: "STAGING",
+  [F02_KEYCHAIN_ITEMS.windowStartUtc]: WINDOW_START,
+});
+const clipboardReadRejectedOutput = [];
+let clipboardReadRejectedClears = 0;
+let clipboardReadRejectedStores = 0;
+const browserSessionClipboard = "BROWSER_SESSION_DUMMY_NEVER_PRINT";
+const macosPasteboard = "";
+const clipboardReadRejectedStore = clipboardReadRejectedMemory.storeNew.bind(
+  clipboardReadRejectedMemory,
+);
+clipboardReadRejectedMemory.storeNew = async (...args) => {
+  clipboardReadRejectedStores += 1;
+  return clipboardReadRejectedStore(...args);
+};
+assert.equal(await manageF02KeychainMain([
+  "--store-clipboard", NAMESPACE, F02_KEYCHAIN_ITEMS.accountId,
+], {
+  keychainAccess: clipboardReadRejectedMemory,
+  readHiddenLine: ackPrompt,
+  clipboardRead: async () => {
+    assert.equal(browserSessionClipboard.length > 0, true);
+    assert.equal(macosPasteboard, "");
+    throw new Error("simulated empty macOS pasteboard");
+  },
+  clipboardClear: async () => { clipboardReadRejectedClears += 1; },
+  print: (line) => clipboardReadRejectedOutput.push(line),
+}), 1);
+assert.equal(clipboardReadRejectedClears, 1);
+assert.equal(clipboardReadRejectedStores, 0);
+assert.equal(
+  clipboardReadRejectedMemory.values.has(F02_KEYCHAIN_ITEMS.accountId),
+  false,
+);
+assert.deepEqual(clipboardReadRejectedOutput, [
+  "STATUS=STOPPED RESULT=F02_KEYCHAIN_STORE_MACOS_PASTEBOARD_READ_REJECTED",
+]);
+assert.equal(
+  clipboardReadRejectedOutput.join("\n").includes(browserSessionClipboard),
+  false,
+);
+
 for (const invalidStoreArgs of [
   ["--store-clipboard", "not-a-namespace", F02_KEYCHAIN_ITEMS.accountId],
   ["--store-clipboard", NAMESPACE, "not-an-allowlisted-label"],
@@ -1623,11 +1893,340 @@ assert.deepEqual(failedClearOutput, [
   "STATUS=STOPPED RESULT=F02_KEYCHAIN_CLIPBOARD_CLEAR_REJECTED",
 ]);
 
+for (const preflightSignalCase of [
+  { name: "before-start", pasteboardIntent: false, clearResult: true,
+    expectedResult: "F02_MACOS_PASTEBOARD_PREFLIGHT_INTERRUPTED", expectedClear: false },
+  { name: "after-start", pasteboardIntent: true, clearResult: true,
+    expectedResult: "F02_MACOS_PASTEBOARD_PREFLIGHT_INTERRUPTED", expectedClear: true },
+  { name: "clear-rejected", pasteboardIntent: true, clearResult: false,
+    expectedResult: "F02_MACOS_PASTEBOARD_PREFLIGHT_CLEAR_REJECTED", expectedClear: true },
+]) {
+  const calls = [];
+  const lines = [];
+  const exits = [];
+  const signalState = {
+    storeClipboardIntent: false,
+    preflightInvocation: true,
+    preflightPasteboardIntent: preflightSignalCase.pasteboardIntent,
+    preflightTerminalEmitted: false,
+    handling: false,
+  };
+  assert.equal(await managerTest.stopF02KeychainCliForSignal(15, {
+    state: signalState,
+    retainLocks: () => calls.push("UNEXPECTED-retain-locks"),
+    abortSecuritySync: () => calls.push("UNEXPECTED-abort-security-sync"),
+    abortSecurityAsync: async () => {
+      calls.push("UNEXPECTED-abort-security-async");
+      return { ok: true, activeCount: 0 };
+    },
+    abortClipboardSync: () => calls.push("abort-clipboard-sync"),
+    abortClipboardAsync: async () => {
+      calls.push("abort-clipboard-async");
+      return { ok: true, activeCount: 0 };
+    },
+    clearClipboard: () => {
+      calls.push("clear-clipboard");
+      return preflightSignalCase.clearResult;
+    },
+    restoreTerminal: () => calls.push("restore-terminal"),
+    abortLocksSync: () => calls.push("UNEXPECTED-abort-locks-sync"),
+    abortLocksAsync: async () => {
+      calls.push("UNEXPECTED-abort-locks-async");
+      return true;
+    },
+    writeLine: (line) => lines.push(line),
+    exit: (code) => exits.push(code),
+  }), true, preflightSignalCase.name);
+  assert.deepEqual(calls, [
+    "abort-clipboard-sync", "abort-clipboard-async",
+    ...(preflightSignalCase.expectedClear ? ["clear-clipboard"] : []),
+    "restore-terminal",
+  ], preflightSignalCase.name);
+  assert.deepEqual(lines, [
+    `STATUS=STOPPED RESULT=${preflightSignalCase.expectedResult}`,
+  ], preflightSignalCase.name);
+  assert.deepEqual(exits, [143], preflightSignalCase.name);
+  assert.equal(signalState.preflightInvocation, true, preflightSignalCase.name);
+  assert.equal(signalState.preflightPasteboardIntent, false, preflightSignalCase.name);
+  assert.equal(signalState.preflightTerminalEmitted, true, preflightSignalCase.name);
+  assert.equal(await managerTest.stopF02KeychainCliForSignal(15, {
+    state: signalState,
+    exit: () => { throw new Error("must not run twice"); },
+  }), false, preflightSignalCase.name);
+}
+
+{
+  const calls = [];
+  const signalState = {
+    storeClipboardIntent: false,
+    preflightInvocation: true,
+    preflightPasteboardIntent: false,
+    preflightTerminalEmitted: true,
+    handling: false,
+  };
+  assert.equal(await managerTest.stopF02KeychainCliForSignal(15, {
+    state: signalState,
+    retainLocks: () => calls.push("retain-locks"),
+    abortSecuritySync: () => calls.push("abort-security-sync"),
+    abortClipboardSync: () => calls.push("abort-clipboard-sync"),
+    clearClipboard: () => calls.push("clear-clipboard"),
+    restoreTerminal: () => calls.push("restore-terminal"),
+    abortLocksSync: () => calls.push("abort-locks-sync"),
+    writeLine: (line) => calls.push(`write:${line}`),
+    exit: (code) => calls.push(`exit:${code}`),
+  }), false, "a signal after the sole terminal result must be inert");
+  assert.deepEqual(calls, []);
+  assert.deepEqual(signalState, {
+    storeClipboardIntent: false,
+    preflightInvocation: true,
+    preflightPasteboardIntent: false,
+    preflightTerminalEmitted: true,
+    handling: false,
+  });
+}
+
+{
+  const calls = [];
+  const lines = [];
+  const exits = [];
+  const signalState = {
+    storeClipboardIntent: false,
+    preflightInvocation: true,
+    preflightPasteboardIntent: true,
+    preflightTerminalEmitted: false,
+    handling: false,
+  };
+  assert.equal(await managerTest.stopF02KeychainCliForSignal(15, {
+    state: signalState,
+    retainLocks: () => calls.push("UNEXPECTED-retain-locks"),
+    abortSecuritySync: () => calls.push("UNEXPECTED-abort-security-sync"),
+    abortSecurityAsync: async () => {
+      calls.push("UNEXPECTED-abort-security-async");
+      return { ok: true, activeCount: 0 };
+    },
+    abortClipboardSync: () => calls.push("abort-clipboard-sync"),
+    abortClipboardAsync: async () => {
+      calls.push("abort-clipboard-async");
+      return { ok: false, activeCount: 1 };
+    },
+    clearClipboard: () => { calls.push("clear-clipboard"); return true; },
+    restoreTerminal: () => calls.push("restore-terminal"),
+    abortLocksSync: () => calls.push("UNEXPECTED-abort-locks-sync"),
+    abortLocksAsync: async () => {
+      calls.push("UNEXPECTED-abort-locks-async");
+      return true;
+    },
+    writeLine: (line) => lines.push(line),
+    exit: (code) => exits.push(code),
+  }), false);
+  assert.deepEqual(calls, [
+    "abort-clipboard-sync", "abort-clipboard-async", "restore-terminal",
+  ]);
+  assert.deepEqual(lines, [
+    "STATUS=STOPPED RESULT=F02_MACOS_PASTEBOARD_PREFLIGHT_SHUTDOWN_AMBIGUOUS",
+  ]);
+  assert.deepEqual(exits, []);
+  assert.equal(signalState.preflightInvocation, true);
+  assert.equal(signalState.preflightPasteboardIntent, true);
+  assert.equal(signalState.preflightTerminalEmitted, true);
+}
+
+{
+  const signalState = {
+    storeClipboardIntent: false,
+    preflightInvocation: true,
+    preflightPasteboardIntent: false,
+    preflightTerminalEmitted: false,
+    handling: false,
+  };
+  const output = [];
+  const signalOutput = [];
+  let clearCalls = 0;
+  let nowCalls = 0;
+  let releaseRead;
+  let markReadStarted;
+  const readGate = new Promise((resolvePromise) => { releaseRead = resolvePromise; });
+  const readStarted = new Promise((resolvePromise) => { markReadStarted = resolvePromise; });
+  const run = manageF02KeychainMain([
+    "--preflight-macos-pasteboard", NAMESPACE,
+  ], {
+    signalState,
+    randomBytesImpl: () => Buffer.alloc(16, 0xab),
+    now: () => { nowCalls += 1; return NOW; },
+    readHiddenLine: ackPrompt,
+    clipboardClear: async () => { clearCalls += 1; },
+    clipboardRead: async () => {
+      markReadStarted();
+      await readGate;
+      return preflightChallenge;
+    },
+    print: (line) => output.push(line),
+  });
+  await readStarted;
+  assert.equal(await managerTest.stopF02KeychainCliForSignal(15, {
+    state: signalState,
+    abortClipboardSync: () => {},
+    abortClipboardAsync: async () => ({ ok: false, activeCount: 1 }),
+    restoreTerminal: () => {},
+    writeLine: (line) => signalOutput.push(line),
+    exit: () => { throw new Error("ambiguous cleanup must not exit here"); },
+  }), false);
+  releaseRead();
+  assert.equal(await run, 1,
+    "an in-flight read resolving after terminal ambiguity cannot return success");
+  assert.equal(clearCalls, 1,
+    "terminal ambiguity after the read starts prevents a racing final clear");
+  assert.equal(nowCalls, 1,
+    "terminal ambiguity prevents the post-read freshness check");
+  assert.deepEqual(output, [
+    `NONSECRET_F02_MACOS_PASTEBOARD_CHALLENGE=${preflightChallenge}`,
+    "ACTION=COPY_CHALLENGE_WITH_NATIVE_MACOS_COPY",
+  ]);
+  assert.deepEqual(signalOutput, [
+    "STATUS=STOPPED RESULT=F02_MACOS_PASTEBOARD_PREFLIGHT_SHUTDOWN_AMBIGUOUS",
+  ]);
+  assert.equal(signalState.preflightPasteboardIntent, true);
+  assert.equal(signalState.preflightTerminalEmitted, true);
+}
+
+{
+  const signalState = {
+    storeClipboardIntent: false,
+    preflightInvocation: true,
+    preflightPasteboardIntent: false,
+    preflightTerminalEmitted: false,
+    handling: false,
+  };
+  const output = [];
+  const signalOutput = [];
+  let clearCalls = 0;
+  let releaseFinalClear;
+  let markFinalClearStarted;
+  const finalClearGate = new Promise((resolvePromise) => { releaseFinalClear = resolvePromise; });
+  const finalClearStarted = new Promise((resolvePromise) => {
+    markFinalClearStarted = resolvePromise;
+  });
+  const run = manageF02KeychainMain([
+    "--preflight-macos-pasteboard", NAMESPACE,
+  ], {
+    signalState,
+    randomBytesImpl: () => Buffer.alloc(16, 0xab),
+    now: () => NOW,
+    readHiddenLine: ackPrompt,
+    clipboardClear: async () => {
+      clearCalls += 1;
+      if (clearCalls === 2) {
+        markFinalClearStarted();
+        await finalClearGate;
+      }
+    },
+    clipboardRead: async () => preflightChallenge,
+    print: (line) => output.push(line),
+  });
+  await finalClearStarted;
+  assert.equal(await managerTest.stopF02KeychainCliForSignal(15, {
+    state: signalState,
+    abortClipboardSync: () => {},
+    abortClipboardAsync: async () => ({ ok: false, activeCount: 1 }),
+    restoreTerminal: () => {},
+    writeLine: (line) => signalOutput.push(line),
+    exit: () => { throw new Error("ambiguous cleanup must not exit here"); },
+  }), false);
+  releaseFinalClear();
+  assert.equal(await run, 1,
+    "an in-flight final clear resolving after terminal ambiguity cannot return success");
+  assert.equal(clearCalls, 2);
+  assert.deepEqual(output, [
+    `NONSECRET_F02_MACOS_PASTEBOARD_CHALLENGE=${preflightChallenge}`,
+    "ACTION=COPY_CHALLENGE_WITH_NATIVE_MACOS_COPY",
+  ]);
+  assert.deepEqual(signalOutput, [
+    "STATUS=STOPPED RESULT=F02_MACOS_PASTEBOARD_PREFLIGHT_SHUTDOWN_AMBIGUOUS",
+  ]);
+  assert.equal(signalState.preflightPasteboardIntent, true);
+  assert.equal(signalState.preflightTerminalEmitted, true);
+}
+
+for (const impossiblePreflightState of [
+  { storeClipboardIntent: true, preflightInvocation: true,
+    preflightPasteboardIntent: false, preflightTerminalEmitted: false, handling: false },
+  { storeClipboardIntent: false, preflightInvocation: false,
+    preflightPasteboardIntent: true, preflightTerminalEmitted: false, handling: false },
+  { storeClipboardIntent: false, preflightInvocation: false,
+    preflightPasteboardIntent: false, preflightTerminalEmitted: true, handling: false },
+]) {
+  assert.equal(await managerTest.stopF02KeychainCliForSignal(15, {
+    state: impossiblePreflightState,
+    exit: () => { throw new Error("invalid state must not act"); },
+  }), false);
+}
+
+for (const exitCleanupCase of [
+  { name: "preflight-late-clean", preflightInvocation: true,
+    storeClipboardIntent: false, preflightPasteboardIntent: false, preflightTerminalEmitted: true,
+    expectedCalls: ["abort-clipboard-sync", "restore-terminal"] },
+  { name: "preflight-post-start", preflightInvocation: true,
+    storeClipboardIntent: false, preflightPasteboardIntent: true, preflightTerminalEmitted: false,
+    expectedCalls: ["abort-clipboard-sync", "clear-clipboard", "restore-terminal"] },
+  { name: "preflight-shutdown-ambiguous", preflightInvocation: true,
+    storeClipboardIntent: false, preflightPasteboardIntent: true, preflightTerminalEmitted: true,
+    expectedPasteboardIntent: true,
+    expectedCalls: ["abort-clipboard-sync", "restore-terminal"] },
+  { name: "keychain-store", preflightInvocation: false,
+    storeClipboardIntent: true, preflightPasteboardIntent: false, preflightTerminalEmitted: false,
+    expectedCalls: [
+      "abort-security-sync", "abort-clipboard-sync", "clear-clipboard",
+      "restore-terminal", "abort-locks-sync",
+    ] },
+]) {
+  const calls = [];
+  const state = {
+    storeClipboardIntent: exitCleanupCase.storeClipboardIntent,
+    preflightInvocation: exitCleanupCase.preflightInvocation,
+    preflightPasteboardIntent: exitCleanupCase.preflightPasteboardIntent,
+    preflightTerminalEmitted: exitCleanupCase.preflightTerminalEmitted,
+    handling: false,
+  };
+  assert.equal(managerTest.cleanupF02KeychainCliForExit(
+    exitCleanupCase.preflightInvocation,
+    {
+      state,
+      abortSecuritySync: () => calls.push("abort-security-sync"),
+      abortClipboardSync: () => calls.push("abort-clipboard-sync"),
+      clearClipboard: () => { calls.push("clear-clipboard"); return true; },
+      restoreTerminal: () => calls.push("restore-terminal"),
+      abortLocksSync: () => calls.push("abort-locks-sync"),
+    },
+  ), true, exitCleanupCase.name);
+  assert.deepEqual(calls, exitCleanupCase.expectedCalls, exitCleanupCase.name);
+  assert.equal(state.preflightInvocation, exitCleanupCase.preflightInvocation,
+    exitCleanupCase.name);
+  assert.equal(state.storeClipboardIntent, false, exitCleanupCase.name);
+  assert.equal(state.preflightPasteboardIntent,
+    exitCleanupCase.expectedPasteboardIntent ?? false, exitCleanupCase.name);
+}
+
+{
+  const calls = [];
+  assert.equal(managerTest.cleanupF02KeychainCliForExit(true, {
+    state: { storeClipboardIntent: false, preflightInvocation: false,
+      preflightPasteboardIntent: false, preflightTerminalEmitted: false, handling: false },
+    abortClipboardSync: () => calls.push("must-not-run"),
+  }), false);
+  assert.deepEqual(calls, []);
+}
+
 for (const clearResult of [true, false]) {
   const calls = [];
   const lines = [];
   const exits = [];
-  const signalState = { storeClipboardIntent: true, handling: false };
+  const signalState = {
+    storeClipboardIntent: true,
+    preflightInvocation: false,
+    preflightPasteboardIntent: false,
+    preflightTerminalEmitted: false,
+    handling: false,
+  };
   assert.equal(await managerTest.stopF02KeychainCliForSignal(15, {
     state: signalState,
     retainLocks: () => calls.push("retain-locks"),
@@ -1686,7 +2285,8 @@ for (const failedLane of ["security", "clipboard"]) {
   const lines = [];
   const exits = [];
   assert.equal(await managerTest.stopF02KeychainCliForSignal(15, {
-    state: { storeClipboardIntent: true, handling: false },
+    state: { storeClipboardIntent: true, preflightInvocation: false,
+      preflightPasteboardIntent: false, preflightTerminalEmitted: false, handling: false },
     retainLocks: () => calls.push("retain-locks"),
     abortSecuritySync: () => calls.push("abort-security-sync"),
     abortSecurityAsync: async () => {
@@ -1724,7 +2324,8 @@ for (const failedLane of ["security", "clipboard"]) {
   const lines = [];
   const exits = [];
   assert.equal(await managerTest.stopF02KeychainCliForSignal(15, {
-    state: { storeClipboardIntent: true, handling: false },
+    state: { storeClipboardIntent: true, preflightInvocation: false,
+      preflightPasteboardIntent: false, preflightTerminalEmitted: false, handling: false },
     retainLocks: () => calls.push("retain-locks"),
     abortSecuritySync: () => calls.push("abort-security-sync"),
     abortSecurityAsync: async () => ({ ok: true, activeCount: 0 }),
@@ -1766,6 +2367,7 @@ assert.equal(await manageF02KeychainMain([
 }), 1);
 assert.equal(failedWriteClears, 1);
 assert.equal(failedWriteOutput.join("\n").includes(failedWriteValue), false);
+assert.deepEqual(failedWriteOutput, ["STATUS=STOPPED RESULT=F02_KEYCHAIN_INPUT_REJECTED"]);
 
 const incompleteMemory = makeMemoryKeychain({
   [F02_KEYCHAIN_ITEMS.bundleState]: "STAGING",
@@ -2151,6 +2753,112 @@ assert.equal(await manageF02KeychainMain(["--cleanup", NAMESPACE], {
 }), 0);
 assert.equal(deletionResumeMemory.values.size, 0);
 
+// The macOS-pasteboard read result is narrower than the custody cleanup
+// result. Prove with fresh real lock roots that a successful clear releases
+// the marker, while a failed clear overrides the read result and stays fenced.
+const managerModuleUrlForClipboardRead =
+  new URL("./manage-project2-f02-keychain.mjs", import.meta.url).href;
+const lockModuleUrlForClipboardRead =
+  new URL("./project2-f02-keychain.mjs", import.meta.url).href;
+const clipboardReadFailureSource = [
+  "const [managerUrl, keychainUrl, namespace, operationLockRoot, clearFails] = process.argv.slice(1)",
+  "const {manageF02KeychainMain} = await import(managerUrl)",
+  "const {F02_KEYCHAIN_ITEMS, f02KeychainNamespaceStartUtc} = await import(keychainUrl)",
+  "const values = new Map([[F02_KEYCHAIN_ITEMS.bundleState, 'STAGING'], [F02_KEYCHAIN_ITEMS.windowStartUtc, f02KeychainNamespaceStartUtc(namespace)]])",
+  "let clearCalls = 0",
+  "let storeCalls = 0",
+  "const check = (value, validation = {}) => { if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > (validation.maxBytes || 4096) || (validation.pattern && !validation.pattern.test(value))) throw new Error('memory-validation') }",
+  "const keychainAccess = { read: async (account, validation) => { if (!values.has(account)) throw new Error('missing'); const value = values.get(account); check(value, validation); return value }, storeNew: async () => { storeCalls += 1 } }",
+  "const lines = []",
+  "const status = await manageF02KeychainMain(['--store-clipboard', namespace, F02_KEYCHAIN_ITEMS.accountId], {operationLockRoot, keychainAccess, readHiddenLine: async () => 'STORE_F02_MACOS_PASTEBOARD_ITEM_ONCE', clipboardRead: async () => { throw new Error('simulated-empty-macos-pasteboard') }, clipboardClear: async () => { clearCalls += 1; if (clearFails === 'yes') throw new Error('simulated-clear-failure') }, print: (line) => lines.push(line)})",
+  "process.stdout.write(JSON.stringify({status, lines, clearCalls, storeCalls}))",
+].join("\n");
+
+const clipboardReadReleaseRoot = await mkdtemp(join(
+  tmpdir(), "project2-f02-clipboard-read-release-validator-",
+));
+const clipboardReadReleasePath = join(
+  clipboardReadReleaseRoot, `${CLIPBOARD_READ_RELEASE_NAMESPACE}.lock`,
+);
+try {
+  const readFailureChild = await runNodeProbe(clipboardReadFailureSource, [
+    managerModuleUrlForClipboardRead,
+    lockModuleUrlForClipboardRead,
+    CLIPBOARD_READ_RELEASE_NAMESPACE,
+    clipboardReadReleaseRoot,
+    "no",
+  ]);
+  assert.deepEqual(readFailureChild.result, { code: 0, signal: null });
+  assert.equal(readFailureChild.stderr.length, 0);
+  assert.deepEqual(JSON.parse(readFailureChild.stdout.toString("utf8")), {
+    status: 1,
+    lines: ["STATUS=STOPPED RESULT=F02_KEYCHAIN_STORE_MACOS_PASTEBOARD_READ_REJECTED"],
+    clearCalls: 1,
+    storeCalls: 0,
+  });
+  await assert.rejects(
+    readFile(clipboardReadReleasePath, "ascii"),
+    (error) => error?.code === "ENOENT",
+    "a proved pasteboard clear releases the exact namespace marker",
+  );
+  const freshLock = await keychainTest.acquireF02NamespaceOperationLock(
+    CLIPBOARD_READ_RELEASE_NAMESPACE,
+    { operationLockRoot: clipboardReadReleaseRoot },
+  );
+  await freshLock.release();
+} finally {
+  try { await unlink(clipboardReadReleasePath); } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  await rmdir(clipboardReadReleaseRoot);
+}
+
+const clipboardReadClearFailureRoot = await mkdtemp(join(
+  tmpdir(), "project2-f02-clipboard-read-clear-failure-validator-",
+));
+const clipboardReadClearFailurePath = join(
+  clipboardReadClearFailureRoot, `${CLIPBOARD_READ_CLEAR_FAILURE_NAMESPACE}.lock`,
+);
+try {
+  const readAndClearFailureChild = await runNodeProbe(clipboardReadFailureSource, [
+    managerModuleUrlForClipboardRead,
+    lockModuleUrlForClipboardRead,
+    CLIPBOARD_READ_CLEAR_FAILURE_NAMESPACE,
+    clipboardReadClearFailureRoot,
+    "yes",
+  ]);
+  assert.deepEqual(readAndClearFailureChild.result, { code: 0, signal: null });
+  assert.equal(readAndClearFailureChild.stderr.length, 0);
+  assert.deepEqual(JSON.parse(readAndClearFailureChild.stdout.toString("utf8")), {
+    status: 1,
+    lines: ["STATUS=STOPPED RESULT=F02_KEYCHAIN_CLIPBOARD_CLEAR_REJECTED"],
+    clearCalls: 1,
+    storeCalls: 0,
+  });
+  const retainedMarker = await readFile(clipboardReadClearFailurePath, "ascii");
+  assert.match(retainedMarker, /^MAIN:[1-9][0-9]{0,9}:ACTION:[a-f0-9]{32}$/,
+    "read-plus-clear failure leaves a nonempty durable marker");
+  const acquireProbeSource = [
+    "const [moduleUrl, namespace, operationLockRoot] = process.argv.slice(1)",
+    "const {__test} = await import(moduleUrl)",
+    "try { await __test.acquireF02NamespaceOperationLock(namespace, {operationLockRoot}); process.exitCode=2 }",
+    "catch { process.exitCode=0 }",
+  ].join("\n");
+  const blockedReadClearProbe = await runNodeProbe(acquireProbeSource, [
+    lockModuleUrlForClipboardRead,
+    CLIPBOARD_READ_CLEAR_FAILURE_NAMESPACE,
+    clipboardReadClearFailureRoot,
+  ]);
+  assert.deepEqual(blockedReadClearProbe.result, { code: 0, signal: null },
+    "read-plus-clear failure blocks a fresh process");
+  assert.equal(await readFile(clipboardReadClearFailurePath, "ascii"), retainedMarker);
+} finally {
+  try { await unlink(clipboardReadClearFailurePath); } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  await rmdir(clipboardReadClearFailureRoot);
+}
+
 // A failed clipboard clear is an unproved custody cleanup, not an ordinary
 // input rejection. Prove in a fresh process that it poisons the durable marker
 // and prevents a second process from acquiring the same namespace.
@@ -2171,7 +2879,7 @@ try {
     "const check = (value, validation = {}) => { if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > (validation.maxBytes || 4096) || (validation.pattern && !validation.pattern.test(value))) throw new Error('memory-validation') }",
     "const keychainAccess = { read: async (account, validation) => { if (!values.has(account)) throw new Error('missing'); const value = values.get(account); check(value, validation); return value }, storeNew: async (account, value, validation) => { check(value, validation); if (values.has(account)) throw new Error('exists'); values.set(account, value) } }",
     "const lines = []",
-    "const status = await manageF02KeychainMain(['--store-clipboard', namespace, F02_KEYCHAIN_ITEMS.accountId], {operationLockRoot, keychainAccess, readHiddenLine: async () => 'STORE_F02_CLIPBOARD_ITEM_ONCE', clipboardRead: async () => 'a'.repeat(32), clipboardClear: async () => { throw new Error('simulated-clear-failure') }, print: (line) => lines.push(line)})",
+    "const status = await manageF02KeychainMain(['--store-clipboard', namespace, F02_KEYCHAIN_ITEMS.accountId], {operationLockRoot, keychainAccess, readHiddenLine: async () => 'STORE_F02_MACOS_PASTEBOARD_ITEM_ONCE', clipboardRead: async () => 'a'.repeat(32), clipboardClear: async () => { throw new Error('simulated-clear-failure') }, print: (line) => lines.push(line)})",
     "process.stdout.write(JSON.stringify({status, lines, stored: values.has(F02_KEYCHAIN_ITEMS.accountId)}))",
   ].join("\n");
   const failedClearChild = await runNodeProbe(clipboardFailureSource, [
@@ -2245,5 +2953,5 @@ try {
 }
 
 process.stdout.write(
-  "Project 2 F-02 Keychain validation passed: namespace freshness, managed native-prompt PTY with an exact CRLF-delimited two-prompt/retype same-value handshake, copy-minimized input and failure-path wiping, prompt/separator drift rejection and descendant reaping, a full default-reader PTY initialization, bounded hidden input with its listener armed before prompt exposure and resume, stage-specific initialization diagnostics, durable helper-death fencing, advisory-lock serialization and last-child reap, fixed labels, stdin-only writes, exact absence handling, buffer clearing, clipboard custody, one-use claims, redacted helper output, READY-time final GO, lifecycle-guarded namespace deletion, and verified cleanup.\n",
+  "Project 2 F-02 Keychain validation passed: zero-secret two-acknowledgement native macOS pasteboard preflight with initial/final verified clearing and isolated signal cleanup, namespace freshness, managed native-prompt PTY with an exact CRLF-delimited two-prompt/retype same-value handshake, copy-minimized input and failure-path wiping, prompt/separator drift rejection and descendant reaping, a full default-reader PTY initialization, bounded hidden input with its listener armed before prompt exposure and resume, stage-specific initialization diagnostics, durable helper-death fencing, advisory-lock serialization and last-child reap, fixed labels, stdin-only writes, exact absence handling, buffer clearing, clipboard custody, one-use claims, redacted helper output, READY-time final GO, lifecycle-guarded namespace deletion, and verified cleanup.\n",
 );
