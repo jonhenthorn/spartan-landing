@@ -361,7 +361,25 @@ Launch this coordinator only in a direct managed pseudo-terminal. Wait for each 
 
 F-02 also has an opt-in custody mode that keeps credentials, raw HMAC/URL secrets and top-level private prompt values out of top-level command arguments, the calling shell environment, operator-supplied staging files and normal terminal output. It is available only on macOS and only through the current login user's default Keychain; it does not support a named, system, iCloud or alternate keychain. The existing commands without `--keychain-input` retain their exact manual hidden-prompt behavior. Do not mix manual and Keychain input within one attempt.
 
-Create one new nonsecret namespace matching `f02-YYYYMMDDtHHMMSSz-8hex` for one attempt, then initialize it in a direct managed pseudo-terminal:
+Create one new nonsecret namespace matching `f02-YYYYMMDDtHHMMSSz-8hex` for one attempt. Before namespace initialization, console access or temporary credential creation, prove the planned native Copy route with the default-inert zero-secret preflight:
+
+```sh
+node scripts/manage-project2-f02-keychain.mjs \
+  --preflight-macos-pasteboard <namespace>
+```
+
+The namespace start must be current within five minutes. After validating the exact command and initial freshness, the command first prompts for `START_F02_MACOS_PASTEBOARD_PREFLIGHT_ONCE`; this first acknowledgement occurs before any pasteboard access. A malformed, stale or future namespace or a wrong first acknowledgement performs no random generation, pasteboard read or pasteboard clear. Only after that exact acknowledgement does it initially clear and verify the macOS general pasteboard, generate a fresh 128-bit nonsecret challenge bound to the namespace and print exactly these two instruction lines before its second prompt:
+
+```text
+NONSECRET_F02_MACOS_PASTEBOARD_CHALLENGE=F02_MACOS_PASTEBOARD_PREFLIGHT_V1:<namespace>:<32hex>
+ACTION=COPY_CHALLENGE_WITH_NATIVE_MACOS_COPY
+```
+
+Put that harmless challenge in the planned rendered-UI field and transfer it with native macOS Command-C or Edit > Copy. A provider Copy control, Codex/browser-controller clipboard, injected clipboard write, AppleScript or scripted retyping is not the certified route. Then type `VERIFY_F02_MACOS_PASTEBOARD_PREFLIGHT_ONCE`. The command reads only `/usr/bin/pbpaste`, compares the complete challenge exactly without printing the observed value, rechecks namespace freshness after the read and finally clears and verifies the pasteboard on every normally settled post-START result. If a clipboard child cannot be proved reaped, it reports shutdown ambiguity without attempting a potentially racing clear; the attempt remains stopped for exact review. It never opens the Keychain, creates an operation lock or contacts a provider.
+
+Success is only `STATUS=COMPLETE RESULT=F02_MACOS_PASTEBOARD_PREFLIGHT_VERIFIED_AND_CLEARED`. A malformed input, stale/future initial namespace, wrong first acknowledgement or random/dependency drift returns `F02_MACOS_PASTEBOARD_PREFLIGHT_INPUT_REJECTED`; a wrong second acknowledgement, read failure, mismatch or final freshness failure returns `F02_MACOS_PASTEBOARD_PREFLIGHT_ROUTE_REJECTED`; and an initial or final clear ambiguity overrides either result with `F02_MACOS_PASTEBOARD_PREFLIGHT_CLEAR_REJECTED`. A handled signal reports `F02_MACOS_PASTEBOARD_PREFLIGHT_INTERRUPTED`; unproved clipboard-child shutdown reports `F02_MACOS_PASTEBOARD_PREFLIGHT_SHUTDOWN_AMBIGUOUS`. After its sole terminal `STATUS` line has been emitted, a late signal is inert and cannot produce a second result. Every non-success closes readiness before credential creation and grants no retry or namespace reuse; a clear rejection additionally requires manual pasteboard review before any later work. Record only the fixed success result, its UTC time and a non-identifying route reference. Immediately initialize that same namespace after PASS; do not substitute or age it.
+
+Only after that exact PASS, initialize the same namespace in a direct managed pseudo-terminal:
 
 ```sh
 node scripts/manage-project2-f02-keychain.mjs --initialize <namespace>
@@ -369,14 +387,14 @@ node scripts/manage-project2-f02-keychain.mjs --initialize <namespace>
 
 Type the fixed nonsecret acknowledgement `INITIALIZE_F02_KEYCHAIN_NAMESPACE_ONCE`. Before any namespace read, initialization acquires the attempt's private OS advisory lock and holds it through its final verified Keychain write. Initialization then proves that the namespaced service is empty and validates the canonical UTC start encoded by the namespace, stores state `STAGING`, and stores that exact start. Clipboard staging acquires the same lock before its state read and holds it through verified clipboard clearing. It requires both records to match, so an interruption between the initialization writes cannot admit private material; the state-first partial namespace remains eligible for the deletion fence and narrow cleanup. Initialization rejects a namespace more than five minutes old or in the future. After the outer lock is acquired, its fixed rejection result identifies only the failed nonsecret stage—acknowledgement, dependency shape, namespace check, freshness, state store or start store—so a terminal stop can be diagnosed without exposing Keychain content. Failure to enter that locked body remains the generic input-rejection result; shutdown ambiguity keeps its dedicated fail-closed result. Keep the namespace in the private attempt record; it is an identifier, not a credential.
 
-Stage each approved value exactly once by first placing only that value on the macOS general pasteboard. Use either Command-C/Edit > Copy on the rendered value or the provider's own rendered Copy control without extracting or retyping the value, then run:
+Stage each approved value exactly once by first placing only that value on the macOS general pasteboard through the route proved by the preflight, then run:
 
 ```sh
 node scripts/manage-project2-f02-keychain.mjs \
   --store-clipboard <namespace> <item-label>
 ```
 
-Type `STORE_F02_MACOS_PASTEBOARD_ITEM_ONCE` at each invocation. The command reads only `/usr/bin/pbpaste`. Codex `tab.clipboard` and script-injected page clipboard writes are not valid ingress. Before credential creation or staging, use one fresh nonsecret value to test the planned rendered-UI Copy route, privately confirm that `/usr/bin/pbpaste` receives that exact value, then clear and verify the Mac pasteboard. Choose the provider's own rendered Copy control only if that preflight proves its normal UI action reaches the system pasteboard; that route requires no owner physical action. Otherwise, before credential creation, arrange with the owner to perform exactly one native Command-C/Edit > Copy after the credential is rendered and before the first `--store-clipboard` invocation. An ambiguous or failed preflight stops readiness before credential creation. Once `--store-clipboard` is invoked, every STOP is terminal: do not copy again or rerun that namespace or attempt. Never bridge the value through a command argument, environment variable, file, pipe, AppleScript, controller clipboard write, injected script, tool output, or automation that reads or retypes the credential. The only accepted staging labels are:
+Type `STORE_F02_MACOS_PASTEBOARD_ITEM_ONCE` at each invocation. The command reads only `/usr/bin/pbpaste`. Codex `tab.clipboard`, a provider Copy control and script-injected page clipboard writes are not valid ingress; use only the native Command-C/Edit > Copy route proved by the preflight. If Codex cannot perform that native route without reading or exposing the value, arrange with the owner before credential creation to perform one native Copy action after each value is rendered and before its first store invocation. This is per value, not one action for the attempt: the distinct `W` and `R` credentials always require separate transfers, as do the other approved private inputs. Once any `--store-clipboard` invocation begins, every STOP is terminal: do not copy again or rerun that namespace or attempt. Never bridge a private value through a command argument, environment variable, file, pipe, AppleScript, controller clipboard write, injected script, tool output, or automation that reads or retypes it. The only accepted staging labels are:
 
 ```text
 input.cloudflare-account-id

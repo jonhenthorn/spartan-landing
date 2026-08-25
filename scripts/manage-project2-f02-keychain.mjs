@@ -36,13 +36,19 @@ const MAX_CLIPBOARD_BYTES = 4096;
 const CLIPBOARD_TIMEOUT_MS = 5_000;
 const INITIALIZE_MAX_SKEW_MS = 5 * 60 * 1_000;
 const HIDDEN_INPUT_TIMEOUT_MS = 5 * 60 * 1_000;
+const MACOS_PASTEBOARD_PREFLIGHT_PREFIX = "F02_MACOS_PASTEBOARD_PREFLIGHT_V1:";
 const ACTIVE_CLIPBOARD_CHILDREN = new Set();
 const CLOSED_CLIPBOARD_CHILDREN = new WeakSet();
 const CLI_SIGNAL_STATE = {
   storeClipboardIntent: false,
+  preflightInvocation: false,
+  preflightPasteboardIntent: false,
+  preflightTerminalEmitted: false,
   handling: false,
 };
 const ACK = Object.freeze({
+  startPreflightMacosPasteboard: "START_F02_MACOS_PASTEBOARD_PREFLIGHT_ONCE",
+  verifyPreflightMacosPasteboard: "VERIFY_F02_MACOS_PASTEBOARD_PREFLIGHT_ONCE",
   initialize: "INITIALIZE_F02_KEYCHAIN_NAMESPACE_ONCE",
   store: "STORE_F02_MACOS_PASTEBOARD_ITEM_ONCE",
   generate: "GENERATE_F02_PRIVATE_BINDING_ONCE",
@@ -58,6 +64,14 @@ const INITIALIZE_STAGE_RESULT = Object.freeze({
 });
 const STORE_MACOS_PASTEBOARD_READ_REJECTED =
   "F02_KEYCHAIN_STORE_MACOS_PASTEBOARD_READ_REJECTED";
+const MACOS_PASTEBOARD_PREFLIGHT_RESULT = Object.freeze({
+  COMPLETE: "F02_MACOS_PASTEBOARD_PREFLIGHT_VERIFIED_AND_CLEARED",
+  INPUT_REJECTED: "F02_MACOS_PASTEBOARD_PREFLIGHT_INPUT_REJECTED",
+  ROUTE_REJECTED: "F02_MACOS_PASTEBOARD_PREFLIGHT_ROUTE_REJECTED",
+  CLEAR_REJECTED: "F02_MACOS_PASTEBOARD_PREFLIGHT_CLEAR_REJECTED",
+  INTERRUPTED: "F02_MACOS_PASTEBOARD_PREFLIGHT_INTERRUPTED",
+  SHUTDOWN_AMBIGUOUS: "F02_MACOS_PASTEBOARD_PREFLIGHT_SHUTDOWN_AMBIGUOUS",
+});
 
 const INPUT_VALIDATION = Object.freeze({
   [F02_KEYCHAIN_ITEMS.accountId]: Object.freeze({ maxBytes: 32, pattern: /^[a-f0-9]{32}$/ }),
@@ -444,10 +458,15 @@ async function requireNamespaceStart(keychain, namespace) {
 }
 
 export async function manageF02KeychainMain(argv = process.argv.slice(2), dependencies = {}) {
+  const preflightCommand = argv[0] === "--preflight-macos-pasteboard";
+  const signalState = dependencies.signalState || CLI_SIGNAL_STATE;
   const rawPrint = dependencies.print || ((line) => process.stdout.write(`${line}\n`));
   const print = (line) => {
-    if (CLI_SIGNAL_STATE.handling && String(line).startsWith("STATUS=")) return;
+    if (signalState.handling && String(line).startsWith("STATUS=")) return;
     rawPrint(line);
+    if (preflightCommand && String(line).startsWith("STATUS=")) {
+      signalState.preflightTerminalEmitted = true;
+    }
   };
   const prompt = dependencies.readHiddenLine || readHiddenLine;
   const randomBytesImpl = dependencies.randomBytesImpl || randomBytes;
@@ -461,6 +480,98 @@ export async function manageF02KeychainMain(argv = process.argv.slice(2), depend
   if (argv.length === 0) {
     print("STATUS=INERT RESULT=NO_ACTION");
     return 0;
+  }
+  if (argv[0] === "--preflight-macos-pasteboard") {
+    signalState.preflightTerminalEmitted = false;
+    let line = `STATUS=STOPPED RESULT=${MACOS_PASTEBOARD_PREFLIGHT_RESULT.INPUT_REJECTED}`;
+    let status = 1;
+    let challenge = "";
+    let observed = "";
+    let nonce;
+    let routeStage = false;
+    let clearRejected = false;
+    const requireFreshNamespace = (namespace) => {
+      const currentEpoch = Number(now());
+      const startEpoch = Date.parse(f02KeychainNamespaceStartUtc(namespace));
+      if (!Number.isSafeInteger(currentEpoch) || currentEpoch < startEpoch ||
+          currentEpoch - startEpoch > INITIALIZE_MAX_SKEW_MS) {
+        throw new Error("INPUT_REJECTED");
+      }
+    };
+    const requirePreflightActive = () => {
+      if (signalState.handling || signalState.preflightTerminalEmitted) {
+        throw new Error("INPUT_REJECTED");
+      }
+    };
+    try {
+      const preflightNamespace = String(argv[1] || "");
+      if (!exactArgs(argv, ["--preflight-macos-pasteboard", preflightNamespace]) ||
+          !F02_KEYCHAIN_NAMESPACE.test(preflightNamespace)) {
+        throw new Error("INPUT_REJECTED");
+      }
+      requireFreshNamespace(preflightNamespace);
+      await requireAck(prompt, ACK.startPreflightMacosPasteboard);
+      requirePreflightActive();
+      signalState.preflightPasteboardIntent = true;
+      try {
+        await clipboardClear();
+      } catch {
+        clearRejected = true;
+        throw new Error("CLIPBOARD_CLEAR_REJECTED");
+      }
+      requirePreflightActive();
+      nonce = randomBytesImpl(16);
+      if (!Buffer.isBuffer(nonce) || nonce.length !== 16) {
+        throw new Error("INPUT_REJECTED");
+      }
+      challenge = `${MACOS_PASTEBOARD_PREFLIGHT_PREFIX}${preflightNamespace}:${nonce.toString("hex")}`;
+      print(`NONSECRET_F02_MACOS_PASTEBOARD_CHALLENGE=${challenge}`);
+      print("ACTION=COPY_CHALLENGE_WITH_NATIVE_MACOS_COPY");
+      routeStage = true;
+      await requireAck(prompt, ACK.verifyPreflightMacosPasteboard);
+      requirePreflightActive();
+      observed = await clipboardRead();
+      requirePreflightActive();
+      requireFreshNamespace(preflightNamespace);
+      if (observed !== challenge) throw new Error("INPUT_REJECTED");
+      requirePreflightActive();
+      line = `STATUS=COMPLETE RESULT=${MACOS_PASTEBOARD_PREFLIGHT_RESULT.COMPLETE}`;
+      status = 0;
+    } catch {
+      line = `STATUS=STOPPED RESULT=${clearRejected
+        ? MACOS_PASTEBOARD_PREFLIGHT_RESULT.CLEAR_REJECTED
+        : routeStage
+          ? MACOS_PASTEBOARD_PREFLIGHT_RESULT.ROUTE_REJECTED
+          : MACOS_PASTEBOARD_PREFLIGHT_RESULT.INPUT_REJECTED}`;
+      status = 1;
+    } finally {
+      challenge = "";
+      observed = "";
+      if (Buffer.isBuffer(nonce)) nonce.fill(0);
+      if (!signalState.handling) {
+        if (signalState.preflightPasteboardIntent) {
+          try {
+            await clipboardClear();
+          } catch {
+            clearRejected = true;
+          }
+        }
+        if (signalState.handling || signalState.preflightTerminalEmitted) {
+          status = 1;
+        } else {
+          signalState.preflightPasteboardIntent = false;
+        }
+      } else {
+        status = 1;
+      }
+      if (clearRejected) {
+        line = `STATUS=STOPPED RESULT=${MACOS_PASTEBOARD_PREFLIGHT_RESULT.CLEAR_REJECTED}`;
+        status = 1;
+      }
+      restoreTerminal();
+    }
+    print(line);
+    return status;
   }
   const lockNamespace = String(argv[1] || "");
   const managerOperation = new Set([
@@ -548,7 +659,7 @@ export async function manageF02KeychainMain(argv = process.argv.slice(2), depend
     }
   }
   if (argv[0] === "--store-clipboard") {
-    CLI_SIGNAL_STATE.storeClipboardIntent = true;
+    signalState.storeClipboardIntent = true;
     let line = "STATUS=STOPPED RESULT=F02_KEYCHAIN_INPUT_REJECTED";
     let status = 1;
     let failureResult = "F02_KEYCHAIN_INPUT_REJECTED";
@@ -585,7 +696,7 @@ export async function manageF02KeychainMain(argv = process.argv.slice(2), depend
         line = "STATUS=STOPPED RESULT=F02_KEYCHAIN_CLIPBOARD_CLEAR_REJECTED";
         status = 1;
       }
-      CLI_SIGNAL_STATE.storeClipboardIntent = false;
+      signalState.storeClipboardIntent = false;
       restoreTerminal();
     }
     print(line);
@@ -780,7 +891,15 @@ async function stopF02KeychainCliForSignal(signalCode, dependencies = {}) {
   const state = dependencies.state || CLI_SIGNAL_STATE;
   if (!Number.isInteger(signalCode) || signalCode < 1 || signalCode > 31 ||
       !state || typeof state !== "object" || typeof state.storeClipboardIntent !== "boolean" ||
+      typeof state.preflightInvocation !== "boolean" ||
+      typeof state.preflightPasteboardIntent !== "boolean" ||
+      typeof state.preflightTerminalEmitted !== "boolean" ||
       typeof state.handling !== "boolean") return false;
+  if ((state.preflightInvocation && state.storeClipboardIntent) ||
+      (!state.preflightInvocation && (state.preflightPasteboardIntent ||
+        state.preflightTerminalEmitted)) ||
+      (state.preflightTerminalEmitted && state.preflightPasteboardIntent)) return false;
+  if (state.preflightInvocation && state.preflightTerminalEmitted) return false;
   if (state.handling) return false;
   state.handling = true;
   const retainLocks = dependencies.retainLocks ||
@@ -799,6 +918,29 @@ async function stopF02KeychainCliForSignal(signalCode, dependencies = {}) {
     writeSync(process.stdout.fd, `${line}\n`);
   });
   const exit = dependencies.exit || ((code) => process.exit(code));
+  if (state.preflightInvocation) {
+    let cleared = !state.preflightPasteboardIntent;
+    try { abortClipboardSync(); } catch {}
+    let clipboardReap;
+    try { clipboardReap = await abortClipboardAsync(); } catch {}
+    const clipboardReaped = f02ShutdownReapVerified(clipboardReap);
+    if (clipboardReaped && state.preflightPasteboardIntent) {
+      try { cleared = clearClipboard() === true; } catch { cleared = false; }
+      state.preflightPasteboardIntent = false;
+    }
+    try { restoreTerminalImpl(); } catch {}
+    try {
+      writeLine(`STATUS=STOPPED RESULT=${!clipboardReaped
+        ? MACOS_PASTEBOARD_PREFLIGHT_RESULT.SHUTDOWN_AMBIGUOUS
+        : cleared
+          ? MACOS_PASTEBOARD_PREFLIGHT_RESULT.INTERRUPTED
+          : MACOS_PASTEBOARD_PREFLIGHT_RESULT.CLEAR_REJECTED}`);
+      state.preflightTerminalEmitted = true;
+    } catch {}
+    if (!clipboardReaped) return false;
+    exit(128 + signalCode);
+    return true;
+  }
   let cleared = !state.storeClipboardIntent;
   try { retainLocks(); } catch {}
   try { abortSecuritySync(); } catch {}
@@ -832,15 +974,54 @@ async function stopF02KeychainCliForSignal(signalCode, dependencies = {}) {
   return true;
 }
 
+function cleanupF02KeychainCliForExit(preflightInvocation, dependencies = {}) {
+  const state = dependencies.state || CLI_SIGNAL_STATE;
+  if (typeof preflightInvocation !== "boolean" ||
+      !state || typeof state !== "object" ||
+      typeof state.storeClipboardIntent !== "boolean" ||
+      typeof state.preflightInvocation !== "boolean" ||
+      typeof state.preflightPasteboardIntent !== "boolean" ||
+      typeof state.preflightTerminalEmitted !== "boolean" ||
+      state.preflightInvocation !== preflightInvocation ||
+      (preflightInvocation && state.storeClipboardIntent) ||
+      (!preflightInvocation && state.preflightPasteboardIntent)) return false;
+  const abortSecuritySync = dependencies.abortSecuritySync ||
+    abortF02KeychainSecurityProcessesSync;
+  const abortClipboardSync = dependencies.abortClipboardSync || abortClipboardProcessesSync;
+  const clearClipboard = dependencies.clearClipboard || clearClipboardSync;
+  const restoreTerminalImpl = dependencies.restoreTerminal || restoreTerminal;
+  const abortLocksSync = dependencies.abortLocksSync || abortF02NamespaceOperationLocksSync;
+  if (!preflightInvocation) {
+    try { abortSecuritySync(); } catch {}
+  }
+  try { abortClipboardSync(); } catch {}
+  const unresolvedPreflightShutdown = preflightInvocation &&
+    state.preflightTerminalEmitted && state.preflightPasteboardIntent;
+  if (!unresolvedPreflightShutdown &&
+      (state.storeClipboardIntent || state.preflightPasteboardIntent)) {
+    try { clearClipboard(); } catch {}
+    state.storeClipboardIntent = false;
+    state.preflightPasteboardIntent = false;
+  }
+  try { restoreTerminalImpl(); } catch {}
+  if (!preflightInvocation) {
+    try { abortLocksSync(); } catch {}
+  }
+  return true;
+}
+
 export const __test = Object.freeze({
   ACK,
   INITIALIZE_STAGE_RESULT,
   INPUT_VALIDATION,
+  MACOS_PASTEBOARD_PREFLIGHT_PREFIX,
+  MACOS_PASTEBOARD_PREFLIGHT_RESULT,
   PBCOPY,
   PBPASTE,
   STORE_MACOS_PASTEBOARD_READ_REJECTED,
   assertNamespaceDeletionSafe,
   abortClipboardProcesses,
+  cleanupF02KeychainCliForExit,
   isLocalProcessAlive,
   readHiddenLine,
   stopF02KeychainCliForSignal,
@@ -848,19 +1029,17 @@ export const __test = Object.freeze({
 
 const invokedPath = process.argv[1] ? pathToFileURL(process.argv[1]).href : "";
 if (invokedPath === import.meta.url) {
+  const command = process.argv.slice(2)[0];
+  const preflightInvocation = command === "--preflight-macos-pasteboard";
   const exitForSignal = (code) => {
     void stopF02KeychainCliForSignal(code);
   };
-  CLI_SIGNAL_STATE.storeClipboardIntent = process.argv.slice(2)[0] === "--store-clipboard";
+  CLI_SIGNAL_STATE.preflightInvocation = preflightInvocation;
+  CLI_SIGNAL_STATE.preflightPasteboardIntent = false;
+  CLI_SIGNAL_STATE.preflightTerminalEmitted = false;
+  CLI_SIGNAL_STATE.storeClipboardIntent = command === "--store-clipboard";
   process.once("exit", () => {
-    try { abortF02KeychainSecurityProcessesSync(); } catch {}
-    try { abortClipboardProcessesSync(); } catch {}
-    if (CLI_SIGNAL_STATE.storeClipboardIntent) {
-      try { clearClipboardSync(); } catch {}
-      CLI_SIGNAL_STATE.storeClipboardIntent = false;
-    }
-    restoreTerminal();
-    try { abortF02NamespaceOperationLocksSync(); } catch {}
+    cleanupF02KeychainCliForExit(preflightInvocation);
   });
   process.on("SIGINT", () => exitForSignal(2));
   process.on("SIGTERM", () => exitForSignal(15));

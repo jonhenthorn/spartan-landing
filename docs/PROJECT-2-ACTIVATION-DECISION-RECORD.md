@@ -70,6 +70,7 @@ Record each decision separately. `NOT APPLICABLE` requires a reason in the priva
 | If F-02: run the coordinator's aggregate read-only Queue and D1 evidence checks | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
 | If F-02: direct managed pseudo-terminal rehearsal passed; no Expect/Tcl, pipe or heredoc | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
 | If F-02 Keychain mode: stage one fresh namespaced private bundle and delete it only after closure | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
+| If F-02 Keychain mode: fresh zero-secret macOS pasteboard preflight passed before console access or credentials | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
 | If F-02: Workers Scripts Edit credential for the fixed sandbox operator only | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
 | If F-02: Workers Scripts Read, D1 Read and Queues Read bundle for fixed aggregate observation only | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
 
@@ -85,6 +86,8 @@ node scripts/manage-square-sandbox-fault-window.mjs \
 ```
 
 Record only `STATUS=COMPLETE RESULT=F02_LOCAL_SOURCE_BOUNDARY_VERIFIED`. It requires the exact local branch `main`, reviewed commit, reviewed tree, no assume-unchanged or skip-worktree entries, and a clean worktree, including non-ignored untracked files. It runs a fixed absolute Git binary with system/global configuration, hooks, filesystem monitoring and optional locks disabled; the child receives no ambient credential, proxy, home or XDG values. It grants no credential, provider, readiness, traffic or retry authority. Any rejection must be resolved in a new clean checkout before live authority begins; do not create a token to diagnose a source-boundary failure. The live operator retains a second boundary check immediately before provider access.
+
+For F-02 Keychain mode, after that source PASS and before namespace initialization, console access or credential creation, run `node scripts/manage-project2-f02-keychain.mjs --preflight-macos-pasteboard <fresh-namespace>`. The first acknowledgement is `START_F02_MACOS_PASTEBOARD_PREFLIGHT_ONCE` and occurs before any pasteboard access. After initial clear-and-verify, the command prints the exact dynamic `F02_MACOS_PASTEBOARD_PREFLIGHT_V1:<namespace>:<32hex>` challenge as `NONSECRET_F02_MACOS_PASTEBOARD_CHALLENGE=<challenge>` plus `ACTION=COPY_CHALLENGE_WITH_NATIVE_MACOS_COPY`. Transfer it only with native macOS Command-C or Edit > Copy, then type `VERIFY_F02_MACOS_PASTEBOARD_PREFLIGHT_ONCE`. The preflight reads only `/usr/bin/pbpaste`, exact-compares, rechecks freshness and finally clears and verifies; it opens no Keychain, takes no operation lock and contacts no provider. Record only `STATUS=COMPLETE RESULT=F02_MACOS_PASTEBOARD_PREFLIGHT_VERIFIED_AND_CLEARED`, its UTC time and a non-identifying route reference, then immediately initialize that same namespace. `F02_MACOS_PASTEBOARD_PREFLIGHT_INPUT_REJECTED`, `F02_MACOS_PASTEBOARD_PREFLIGHT_ROUTE_REJECTED`, `F02_MACOS_PASTEBOARD_PREFLIGHT_CLEAR_REJECTED`, interruption or shutdown ambiguity closes readiness before credentials and grants no retry or namespace reuse. A provider Copy control, browser/controller clipboard or injected clipboard write is not the certified route. The native route must be used separately for every staged value; `W` and `R` are distinct transfers. If Codex cannot use it without reading or exposing a private value, arrange the required per-value native Copy actions with the owner before credential creation.
 
 If the selected case is F-02, the coordinator must privately bind the approved candidate, synthetic submission ID and coupon to this one window. It may send only consent `no`, must require the candidate's remotely verified canary before transport and must accept only one exact HTTP `400` / `CONSENT_REQUIRED` response. A missing completion handshake, second callback, unexpected response or sent-but-unconfirmed request is not retry authority: it requires immediate rollback. The F-02 request path performs no Turnstile, provider, Apps or Square call and no Queue or D1 mutation. The coordinator separately performs only the aggregate read-only Queue and D1 evidence checks approved in this record; those checks are evidence collection, not request-path business activity, and they do not authorize message inspection or a write. Shared evidence may retain only fixed result/checkpoint names, bounded time, aggregate zero-delta/Queue evidence and either HTTP `400` / request count `1` with the fixed completion handshake, or HTTP `000` / request count `0` for a fixed pre-request stop. For the zero-request path, every candidate-traffic and request checkpoint that was not reached must be recorded exactly as `NOT REACHED`; it must never be represented as a request attempt, success or retry authority. The record must not retain the canary, coupon, URL, request/response body, header, cookie, credential or version ID. This sandbox-only preflight does not change the common production request order.
 
@@ -102,7 +105,7 @@ Queue access is separate from provider and deployment authority. Do not record c
 | Temporary Queues Write access | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
 | Exact-target DLQ inspect/redrive | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
 | Temporary Workers Scripts Edit access, F-02 fixed sandbox operator only | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
-| Temporary Workers Scripts Read plus D1 Read access, F-02 aggregate observer only | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
+| Temporary Workers Scripts Read, D1 Read and Queues Read access, F-02 aggregate observer only | `[REVIEW/FILL]` | `[REVIEW/FILL]` | `[REVIEW/FILL]` |
 
 Whole-Queue purge, arbitrary replay, message editing and D1 editing are never authorized by this record.
 
@@ -110,20 +113,33 @@ For F-02, complete every field below with a non-identifying private reference on
 
 F-02 requires two distinct temporary account-restricted credentials. `W` has only Workers Scripts Edit and is injected only into the fixed `spartan-square-connector-sandbox` Wrangler children. `R` has only Workers Scripts Read, D1 Read and Queues Read, with no corresponding write permission, and is injected only into fixed metadata, aggregate `SELECT`-only D1, topology and Queue-metrics reads. The two values must differ and may not be replaced by cached Wrangler OAuth or one combined broad credential. Their approved expiry must cover the derived closure-claim cutoff and bounded settlement/verification of a provider request started before it. Retain both only through terminal rollback, cleanup and monitored all-off closure, then revoke and prove each unusable. The Keychain utility stores or deletes approved values but never creates, broadens, revokes or verifies a provider credential.
 
-| Temporary Queues Read custody field | Private owner record reference |
+| Temporary `W` Workers Scripts Edit custody field | Private owner record reference |
 | --- | --- |
-| Exact sandbox account restriction | `[REVIEW/FILL — reference only; no value]` |
-| Exact `Queues Read` scope and explicit absence of `Queues Write` | `[REVIEW/FILL — reference only; no value]` |
-| Credential issuance UTC time | `[REVIEW/FILL — reference only; no value]` |
-| Credential expiry UTC time and TTL | `[REVIEW/FILL — reference only; no value]` |
-| Named credential custodian | `[REVIEW/FILL — reference only; no value]` |
-| Named revocation owner | `[REVIEW/FILL — reference only; no value]` |
-| Credential revocation UTC time | `[REVIEW/FILL — reference only; no value]` |
-| Post-revocation token verification rejected with fixed HTTP `401` evidence | `[REVIEW/FILL — reference only; no value]` |
-| Post-revocation main Queue and DLQ metrics reads both rejected with fixed HTTP `401` evidence | `[REVIEW/FILL — reference only; no value]` |
-| Working-session credential material cleared without retaining the value | `[REVIEW/FILL — reference only; no value]` |
+| `W` exact sandbox account restriction | `[REVIEW/FILL — reference only; no value]` |
+| `W` exact `Workers Scripts Edit` scope, fixed `spartan-square-connector-sandbox` operator only | `[REVIEW/FILL — reference only; no value]` |
+| `W` credential issuance UTC time | `[REVIEW/FILL — reference only; no value]` |
+| `W` credential expiry UTC time and TTL | `[REVIEW/FILL — reference only; no value]` |
+| `W` named credential custodian | `[REVIEW/FILL — reference only; no value]` |
+| `W` named revocation owner | `[REVIEW/FILL — reference only; no value]` |
+| `W` credential revocation UTC time | `[REVIEW/FILL — reference only; no value]` |
+| `W` post-revocation token verification rejected with fixed HTTP `401` evidence | `[REVIEW/FILL — reference only; no value]` |
+| `W` working-session credential material cleared without retaining the value | `[REVIEW/FILL — reference only; no value]` |
 
-The three post-revocation unusability checks are evidence of the retired temporary credential only. They must not include its value, account or Queue identifiers, response bodies or raw authorization headers.
+| Temporary `R` aggregate-observer custody field | Private owner record reference |
+| --- | --- |
+| `R` exact sandbox account restriction | `[REVIEW/FILL — reference only; no value]` |
+| `R` exact `Workers Scripts Read`, `D1 Read` and `Queues Read` scopes and explicit absence of corresponding write permissions | `[REVIEW/FILL — reference only; no value]` |
+| `R` credential issuance UTC time | `[REVIEW/FILL — reference only; no value]` |
+| `R` credential expiry UTC time and TTL | `[REVIEW/FILL — reference only; no value]` |
+| `R` named credential custodian | `[REVIEW/FILL — reference only; no value]` |
+| `R` named revocation owner | `[REVIEW/FILL — reference only; no value]` |
+| `R` credential revocation UTC time | `[REVIEW/FILL — reference only; no value]` |
+| `R` post-revocation token verification rejected with fixed HTTP `401` evidence | `[REVIEW/FILL — reference only; no value]` |
+| `R` post-revocation main Queue metrics read rejected with fixed HTTP `401` evidence | `[REVIEW/FILL — reference only; no value]` |
+| `R` post-revocation DLQ metrics read rejected with fixed HTTP `401` evidence | `[REVIEW/FILL — reference only; no value]` |
+| `R` working-session credential material cleared without retaining the value | `[REVIEW/FILL — reference only; no value]` |
+
+`W` requires one post-revocation unusability check: its token verification. `R` requires three separate post-revocation unusability checks: token verification, main Queue metrics and DLQ metrics. These checks are evidence only for the retired temporary credential. They must not include either credential value, account or Queue identifiers, response bodies or raw authorization headers.
 
 ## Alert delivery
 
@@ -183,7 +199,7 @@ Complete this table only for F-02. Each row records a fixed code or fixed catego
 | `OBSERVED_F02_REQUEST_COMPLETION_HANDSHAKE`, HTTP `400`, requests `1` with terminal PASS; or HTTP `000`, conservative request marker `0` or `1`, `NOT REACHED` | `[REVIEW/FILL]` |
 | Terminal fixed pass, stop or inconclusive result | `[REVIEW/FILL]` |
 | Exact rollback and all-off verification | `[REVIEW/FILL]` |
-| Cleanup, credential revocation and three-check unusability proof | `[REVIEW/FILL]` |
+| Cleanup, `W` revocation and one-check unusability proof, and `R` revocation and three-check unusability proof | `[REVIEW/FILL]` |
 
 ### Custody and closure record
 
@@ -192,7 +208,7 @@ Complete this table only for F-02. Each row records a fixed code or fixed catego
 | Private acceptance ledger and case selectors | `[REVIEW/FILL]` | Access and retention confirmed: `[REVIEW/FILL]` |
 | Temporary local fixture/result records | `[REVIEW/FILL]` | Verified narrow cleanup confirmed: `[REVIEW/FILL]` |
 | Read-only and mutating provider authorizations | `[REVIEW/FILL]` | Full revocation and unusability proof confirmed: `[REVIEW/FILL]` |
-| Queue credentials | `[REVIEW/FILL]` | Revocation confirmed: `[REVIEW/FILL]` |
+| F-02 `W` and `R` Cloudflare credentials | `[REVIEW/FILL]` | `W` revocation plus one-check proof and `R` revocation plus three-check proof confirmed: `[REVIEW/FILL]` |
 | Temporary Apps and fault-window material | `[REVIEW/FILL]` | Disabled/removed as required: `[REVIEW/FILL]` |
 | F-02 conditional completion handshake and aggregate evidence | `[REVIEW/FILL]` | Exact-one request confirmed only by handshake plus terminal PASS; otherwise HTTP `000`, conservative request marker `0` or `1` and `NOT REACHED` checkpoints confirmed: `[REVIEW/FILL]` |
 | Raw coordinator/operator/Wrangler transcripts and candidate/rollback outputs | `[REVIEW/FILL]` | Private custody and sanitized shared extract confirmed: `[REVIEW/FILL]` |
@@ -216,7 +232,7 @@ Complete this table only for F-02. Each row records a fixed code or fixed catego
 | If F-02: conservative request marker `0` or `1`; actual one request only if completion handshake and terminal PASS; `NOT REACHED` checkpoints and no-retry closure | `[REVIEW/FILL]` |
 | If F-02: fixed/count/time-only causal checkpoint chronology complete | `[REVIEW/FILL]` |
 | Exact rollback and all-off verification complete | `[REVIEW/FILL]` |
-| Temporary cleanup and credential revocation complete | `[REVIEW/FILL]` |
+| Temporary cleanup, `W` revocation and one-check proof, and `R` revocation and three-check proof complete | `[REVIEW/FILL]` |
 | Evidence transferred to the named custodian | `[REVIEW/FILL]` |
 | Independent reviewer decision | `[REVIEW/FILL]` |
 | Owner closure signature and date | `[REVIEW/FILL]` |
