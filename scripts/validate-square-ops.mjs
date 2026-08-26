@@ -19,6 +19,7 @@ const TEST_APPS_REDIRECT_URL = "https://script.googleusercontent.com/macros/echo
 
 const expectedFlags = [
   "OPS_MONITORING_ENABLED",
+  "OPS_PROVIDER_MONITORING_ENABLED",
   "OPS_QUEUE_MONITORING_ENABLED",
   "OPS_APPS_SCRIPT_MONITORING_ENABLED",
   "OPS_ALERTS_ENABLED",
@@ -96,7 +97,7 @@ function validateWranglerConfiguration(relativePath, environment) {
   assert.doesNotMatch(config, /^routes?\s*=/m, `${relativePath} must remain scheduled-only`);
   assert.match(config, /\[triggers\][\s\S]*?crons\s*=/, `${relativePath} needs a scheduled trigger`);
   assert.match(config, new RegExp(`^OPS_ENVIRONMENT\\s*=\\s*"${environment}"$`, "m"));
-  assert.match(config, /^OPS_SCHEMA_VERSION\s*=\s*"4"$/m, `${relativePath} must require operations schema 4`);
+  assert.match(config, /^OPS_SCHEMA_VERSION\s*=\s*"5"$/m, `${relativePath} must require operations schema 5`);
 
   for (const flagName of expectedFlags) {
     assert.match(config, new RegExp(`^${flagName}\\s*=\\s*"false"$`, "m"), `${flagName} must default false`);
@@ -798,11 +799,15 @@ class MockStatement {
 }
 
 class MockConnectorDB {
-  constructor({ webhookRows = [], outboxRows = [], rejectedRows = [], stateRows = [{}], failOp = "" } = {}) {
+  constructor({ webhookRows = [], outboxRows = [], rejectedRows = [], stateRows = [{}], providerRows = [],
+    providerSourceRows = [],
+    failOp = "" } = {}) {
     this.webhookRows = webhookRows;
     this.outboxRows = outboxRows;
     this.rejectedRows = rejectedRows;
     this.stateRows = stateRows;
+    this.providerRows = providerRows;
+    this.providerSourceRows = providerSourceRows;
     this.failOp = failOp;
     this.executed = [];
   }
@@ -820,6 +825,22 @@ class MockConnectorDB {
       ops_source_outbox_open: this.outboxRows,
       ops_source_rejected_recent: this.rejectedRows,
       ops_source_connector_state: this.stateRows,
+      ops_source_provider_outcomes: this.providerRows.length > 0
+        ? this.providerRows
+        : this.providerSourceRows.map((row) => ({
+            ...row,
+            open_attempt_count: 0,
+            pending_attempt_count: 0,
+            faulted_attempt_count: 0,
+            invalid_attempt_state_count: 0,
+            invalid_attempt_time_count: 0,
+            future_attempt_count: 0,
+            outcome_class: null,
+            event_count: null,
+            oldest_observed_at: null,
+            invalid_time_count: null,
+            future_time_count: null,
+          })),
     }[op];
     assert.ok(rows, `Unexpected connector source operation ${op}`);
     return { success: true, results: rows.map((row) => ({ ...row })) };
@@ -1015,7 +1036,7 @@ async function validateSourceContract() {
   const workerModule = await import(`${pathToFileURL(sourcePath).href}?source-contract=${Date.now()}`);
   const queries = workerModule.CONNECTOR_SOURCE_QUERIES;
   assert.deepEqual(Object.keys(queries).sort(),
-    ["connectorState", "outboxOpen", "rejectedRecent", "webhookNonterminal"],
+    ["connectorState", "outboxOpen", "providerOutcomes", "rejectedRecent", "webhookNonterminal"],
     "Connector signal query surface changed without review");
   for (const [name, query] of Object.entries(queries)) {
     assert.match(query, /\/\*op:ops_source_[a-z0-9_]+\*\/[\s\S]*\bSELECT\b/i,
@@ -1037,6 +1058,7 @@ async function validateSourceContract() {
     "square-worker/migrations/0001_initial.sql",
     "square-worker/migrations/0002_processing_leases.sql",
     "square-worker/migrations/0003_webhook_retry_schedule.sql",
+    "square-worker/migrations/0004_provider_outcomes.sql",
   ]) {
     execFileSync("sqlite3", [databasePath], { input: read(migrationPath), stdio: ["pipe", "pipe", "pipe"] });
   }
@@ -1277,6 +1299,15 @@ async function validateWorkerBoundary() {
     ),
     /OPS_QUEUE_MONITORING_REQUIRES_MONITORING/,
     "Queue monitoring must require the aggregate monitor on the exact five-minute cron",
+  );
+  await assert.rejects(
+    workerModule.default.scheduled(
+      { cron: "*/5 * * * *", scheduledTime: Date.now() },
+      { OPS_PROVIDER_MONITORING_ENABLED: "true", OPS_MONITORING_ENABLED: "false" },
+      {},
+    ),
+    /OPS_PROVIDER_MONITORING_REQUIRES_MONITORING/,
+    "Provider monitoring must require the aggregate monitor on the exact five-minute cron",
   );
   await assert.rejects(
     workerModule.default.scheduled(
@@ -1549,7 +1580,7 @@ async function validateQueueMonitorBehavior(workerModule) {
   });
   const baseEnvironment = (ops = new MockOpsDB(), connector = new MockConnectorDB(), extra = {}) => ({
     OPS_ENVIRONMENT: "sandbox",
-    OPS_SCHEMA_VERSION: "4",
+    OPS_SCHEMA_VERSION: "5",
     OPS_MONITORING_ENABLED: "true",
     OPS_QUEUE_MONITORING_ENABLED: "true",
     OPS_ALERTS_ENABLED: "false",
@@ -1864,7 +1895,7 @@ async function validateAppsScriptHealthMonitorBehavior(workerModule) {
   ];
   const baseEnvironment = (ops = new MockOpsDB(), connector = new MockConnectorDB(), extra = {}) => ({
     OPS_ENVIRONMENT: "sandbox",
-    OPS_SCHEMA_VERSION: "4",
+    OPS_SCHEMA_VERSION: "5",
     OPS_MONITORING_ENABLED: "true",
     OPS_QUEUE_MONITORING_ENABLED: "false",
     OPS_APPS_SCRIPT_MONITORING_ENABLED: "true",
@@ -2626,7 +2657,7 @@ function createAlertFixture({ ownerOutcomes = [], backupOutcomes = [], failSentF
   const db = new SqliteD1(databasePath, { failSentFinalizations, mutateCandidates, beforeClaimOnce });
   const env = {
     OPS_ENVIRONMENT: "sandbox",
-    OPS_SCHEMA_VERSION: "4",
+    OPS_SCHEMA_VERSION: "5",
     OPS_MONITORING_ENABLED: "true",
     OPS_ALERTS_ENABLED: "true",
     OPS_ALERT_DEDUPE_SECONDS: "3600",
@@ -2708,7 +2739,7 @@ async function validateAlertBehavior(workerModule) {
   await assert.rejects(workerModule.__test.runAlertEngine({
     OPS_DB: poisonDb,
     OPS_ENVIRONMENT: "sandbox",
-    OPS_SCHEMA_VERSION: "4",
+    OPS_SCHEMA_VERSION: "5",
     OPS_ALERT_FROM_EMAIL: TEST_ALERT_FROM,
   }, base), /OPS_ALERT_BINDING_NOT_CONFIGURED/);
   assert.equal(poisonPrepareCalls, 0, "Missing email bindings must fail before a D1 operation");
@@ -2716,7 +2747,7 @@ async function validateAlertBehavior(workerModule) {
   await assert.rejects(workerModule.__test.runAlertEngine({
     OPS_DB: poisonDb,
     OPS_ENVIRONMENT: "sandbox",
-    OPS_SCHEMA_VERSION: "4",
+    OPS_SCHEMA_VERSION: "5",
     OPS_ALERT_FROM_EMAIL: TEST_ALERT_FROM,
     OPS_OWNER_EMAIL: sharedBinding,
     OPS_BACKUP_OWNER_EMAIL: sharedBinding,
@@ -2725,7 +2756,7 @@ async function validateAlertBehavior(workerModule) {
   await assert.rejects(workerModule.__test.runAlertEngine({
     OPS_DB: poisonDb,
     OPS_ENVIRONMENT: "unknown",
-    OPS_SCHEMA_VERSION: "4",
+    OPS_SCHEMA_VERSION: "5",
   }, base), /OPS_ENVIRONMENT_INVALID/);
   assert.equal(poisonPrepareCalls, 0, "An invalid alert environment must fail before D1 is touched");
 
@@ -3241,6 +3272,7 @@ function applyOpsMigrations(databasePath) {
     "square-ops/migrations/0002_alert_delivery_engine.sql",
     "square-ops/migrations/0003_queue_monitoring_alerts.sql",
     "square-ops/migrations/0004_apps_script_health_alerts.sql",
+    "square-ops/migrations/0005_provider_monitoring_alerts.sql",
   ]) {
     applyOpsMigrationAtomically(databasePath, migrationPath);
   }

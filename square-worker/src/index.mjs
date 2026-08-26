@@ -98,6 +98,10 @@ const worker = {
     if (flag(env.SQUARE_CONSUMER_ENABLED)) ctx.waitUntil(maintainDeliveryQueues(env));
     if (flag(env.SQUARE_RECONCILIATION_ENABLED)) ctx.waitUntil(reconcileSquare(env));
     if (flag(env.SQUARE_PASS_ENABLED) && env.DB) ctx.waitUntil(cleanupExpiredPasses(env));
+    if ((flag(env.SQUARE_PROVIDER_OUTCOME_JOURNAL_ENABLED) ||
+        flag(env.SQUARE_PROVIDER_OUTCOME_RETENTION_ENABLED)) && env.DB) {
+      ctx.waitUntil(pruneSquareProviderOutcomes(env));
+    }
   },
 };
 
@@ -3088,6 +3092,10 @@ async function boundedResponseText(response, maximumBytes) {
 }
 
 async function appsCall(action, fields, env, options = null) {
+  return appsCallOnce(action, fields, env, options);
+}
+
+async function appsCallOnce(action, fields, env, options = null) {
   const appsScriptUrl = canonicalAppsScriptUrl(env.APPS_SCRIPT_URL);
   if (!appsScriptUrl || !env.APPS_SCRIPT_SHARED_SECRET) throw new ConnectorError("APPS_NOT_CONFIGURED", 503);
   const transport = exactTransportOptions(options);
@@ -3111,60 +3119,73 @@ async function appsCall(action, fields, env, options = null) {
   const unsignedBody = operation.signedFields.map((key) => `${key}=${encodeURIComponent(signed[key])}`).join("&");
   const signature = await hmacHex(env.APPS_SCRIPT_SHARED_SECRET, unsignedBody);
   const body = `${unsignedBody}&connector_signature=${encodeURIComponent(signature)}`;
-  let response;
+  const providerAttempt = await admitSquareProviderAttempt(env);
+  let observedOutcomeClass = null;
   try {
-    response = await fetch(appsScriptUrl, {
-      method: "POST",
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-      },
-      body,
-      redirect: "manual",
-      ...(transport ? { signal: transport.signal } : {}),
-    });
-  } catch {
-    throw transient("APPS_REQUEST_FAILED");
+    let response;
+    try {
+      response = await fetch(appsScriptUrl, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+        },
+        body,
+        redirect: "manual",
+        ...(transport ? { signal: transport.signal } : {}),
+      });
+    } catch {
+      throw transient("APPS_REQUEST_FAILED");
+    }
+    if (![302, 303].includes(Number(response?.status))) {
+      throw appsProviderOutcomeError(transient("APPS_REQUEST_FAILED"), Number(response?.status));
+    }
+    const responseUrl = canonicalAppsScriptResponseUrl(response.headers?.get("location"));
+    if (!responseUrl) throw new ConnectorError("APPS_RESPONSE_INVALID", 502);
+    try {
+      response = await fetch(responseUrl, {
+        method: "GET",
+        headers: { Accept: "application/json" },
+        redirect: "manual",
+        ...(transport ? { signal: transport.signal } : {}),
+      });
+    } catch {
+      throw transient("APPS_REQUEST_FAILED");
+    }
+    if (Number(response?.status) >= 300 && Number(response?.status) < 400) {
+      throw new ConnectorError("APPS_RESPONSE_INVALID", 502);
+    }
+    if (!response?.ok) {
+      throw appsProviderOutcomeError(transient("APPS_REQUEST_FAILED"), Number(response?.status));
+    }
+    const contentType = String(response.headers?.get("content-type") || "");
+    if (contentType.length > 128 ||
+        !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(contentType)) {
+      throw new ConnectorError("APPS_RESPONSE_INVALID", 502);
+    }
+    let text;
+    const maximumResponseBytes = Math.min(
+      APPS_SCRIPT_MAX_RESPONSE_BYTES,
+      transport?.maxResponseBytes ?? APPS_SCRIPT_MAX_RESPONSE_BYTES,
+    );
+    try { text = await boundedResponseText(response, maximumResponseBytes); }
+    catch (error) {
+      if (error?.code === "RESPONSE_TOO_LARGE") throw new ConnectorError("APPS_RESPONSE_TOO_LARGE", 502);
+      throw transient("APPS_REQUEST_FAILED");
+    }
+    let parsed;
+    try { parsed = JSON.parse(text); } catch {
+      throw new ConnectorError("APPS_RESPONSE_INVALID", 502);
+    }
+    rejectEmailFields(parsed);
+    if (parsed?.ok === false) throw appsResponseError(action, parsed);
+    return parsed;
+  } catch (error) {
+    observedOutcomeClass = squareProviderOutcomeClass(error);
+    throw error;
+  } finally {
+    await finalizeSquareProviderAttempt(env, providerAttempt, observedOutcomeClass);
   }
-  if (![302, 303].includes(Number(response?.status))) throw transient("APPS_REQUEST_FAILED");
-  const responseUrl = canonicalAppsScriptResponseUrl(response.headers?.get("location"));
-  if (!responseUrl) throw new ConnectorError("APPS_RESPONSE_INVALID", 502);
-  try {
-    response = await fetch(responseUrl, {
-      method: "GET",
-      headers: { Accept: "application/json" },
-      redirect: "manual",
-      ...(transport ? { signal: transport.signal } : {}),
-    });
-  } catch {
-    throw transient("APPS_REQUEST_FAILED");
-  }
-  if (Number(response?.status) >= 300 && Number(response?.status) < 400) {
-    throw new ConnectorError("APPS_RESPONSE_INVALID", 502);
-  }
-  if (!response?.ok) throw transient("APPS_REQUEST_FAILED");
-  const contentType = String(response.headers?.get("content-type") || "");
-  if (contentType.length > 128 ||
-      !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(contentType)) {
-    throw new ConnectorError("APPS_RESPONSE_INVALID", 502);
-  }
-  let text;
-  const maximumResponseBytes = Math.min(
-    APPS_SCRIPT_MAX_RESPONSE_BYTES,
-    transport?.maxResponseBytes ?? APPS_SCRIPT_MAX_RESPONSE_BYTES,
-  );
-  try { text = await boundedResponseText(response, maximumResponseBytes); }
-  catch (error) {
-    if (error?.code === "RESPONSE_TOO_LARGE") throw new ConnectorError("APPS_RESPONSE_TOO_LARGE", 502);
-    throw transient("APPS_REQUEST_FAILED");
-  }
-  let parsed;
-  try { parsed = JSON.parse(text); } catch {
-    throw new ConnectorError("APPS_RESPONSE_INVALID", 502);
-  }
-  rejectEmailFields(parsed);
-  if (parsed?.ok === false) throw appsResponseError(action, parsed);
-  return parsed;
 }
 
 function canonicalAppsScriptUrl(value) {
@@ -3249,7 +3270,20 @@ function rejectEmailFields(value) {
   }
 }
 
+const SQUARE_PROVIDER_OUTCOME_CLASSES = Object.freeze([
+  "AUTH_401",
+  "SCOPE_403",
+  "RATE_429",
+  "SERVER_5XX",
+  "OTHER",
+]);
+const SQUARE_PROVIDER_OUTCOME_RETENTION_SECONDS = 30 * 24 * 60 * 60;
+
 async function squareRequest(method, path, body, env, options = null) {
+  return squareRequestOnce(method, path, body, env, options);
+}
+
+async function squareRequestOnce(method, path, body, env, options = null) {
   if (!env.SQUARE_ACCESS_TOKEN) throw new ConnectorError("SQUARE_NOT_CONFIGURED", 503);
   const transport = exactTransportOptions(options);
   if (env.SQUARE_API_VERSION !== EXPECTED_SQUARE_VERSION) throw new ConnectorError("SQUARE_VERSION_MISMATCH", 503);
@@ -3266,28 +3300,217 @@ async function squareRequest(method, path, body, env, options = null) {
     headers["Content-Type"] = "application/json";
     init.body = JSON.stringify(body);
   }
-  let response;
-  try { response = await fetch(`${base}${path}`, init); }
-  catch { throw transient("SQUARE_NETWORK_ERROR"); }
-  let text;
-  try { text = transport
-    ? await boundedResponseText(response, transport.maxResponseBytes)
-    : await response.text(); }
-  catch (error) {
-    if (error?.code === "RESPONSE_TOO_LARGE") throw transient("SQUARE_RESPONSE_TOO_LARGE");
-    throw transient("SQUARE_NETWORK_ERROR");
-  }
-  let parsed = {};
-  if (text) {
-    try { parsed = JSON.parse(text); } catch { throw transient("SQUARE_RESPONSE_INVALID"); }
-  }
-  if (!response.ok) {
-    const code = parsed.errors?.[0]?.code || `HTTP_${response.status}`;
-    const error = new SquareApiError(code, response.status);
-    if (response.status >= 500 || response.status === 429) error.permanent = false;
+  const providerAttempt = await admitSquareProviderAttempt(env);
+  let observedOutcomeClass = null;
+  try {
+    let response;
+    try { response = await fetch(`${base}${path}`, init); }
+    catch { throw squareProviderOutcomeError(transient("SQUARE_NETWORK_ERROR"), "OTHER"); }
+    const responseOutcomeClass = response.ok ? "OTHER" : squareProviderHttpOutcomeClass(response.status);
+    let text;
+    try { text = transport
+      ? await boundedResponseText(response, transport.maxResponseBytes)
+      : await response.text(); }
+    catch (error) {
+      if (error?.code === "RESPONSE_TOO_LARGE") {
+        throw squareProviderOutcomeError(transient("SQUARE_RESPONSE_TOO_LARGE"), responseOutcomeClass);
+      }
+      throw squareProviderOutcomeError(transient("SQUARE_NETWORK_ERROR"), responseOutcomeClass);
+    }
+    let parsed = {};
+    if (text) {
+      try { parsed = JSON.parse(text); }
+      catch { throw squareProviderOutcomeError(transient("SQUARE_RESPONSE_INVALID"), responseOutcomeClass); }
+    }
+    if (!response.ok) {
+      const code = parsed.errors?.[0]?.code || `HTTP_${response.status}`;
+      const error = new SquareApiError(code, response.status);
+      if (response.status >= 500 || response.status === 429) error.permanent = false;
+      throw error;
+    }
+    return parsed;
+  } catch (error) {
+    observedOutcomeClass = squareProviderOutcomeClass(error);
     throw error;
+  } finally {
+    await finalizeSquareProviderAttempt(env, providerAttempt, observedOutcomeClass);
   }
-  return parsed;
+}
+
+function squareProviderHttpOutcomeClass(httpStatus) {
+  if (httpStatus === 401) return "AUTH_401";
+  if (httpStatus === 403) return "SCOPE_403";
+  if (httpStatus === 429) return "RATE_429";
+  if (Number.isInteger(httpStatus) && httpStatus >= 500 && httpStatus <= 599) return "SERVER_5XX";
+  return "OTHER";
+}
+
+function squareProviderOutcomeError(error, outcomeClass) {
+  const fixedClass = SQUARE_PROVIDER_OUTCOME_CLASSES.includes(outcomeClass) ? outcomeClass : "OTHER";
+  Object.defineProperty(error, "providerOutcomeClass", {
+    configurable: false,
+    enumerable: false,
+    value: fixedClass,
+    writable: false,
+  });
+  return error;
+}
+
+function squareProviderOutcomeClass(error) {
+  return SQUARE_PROVIDER_OUTCOME_CLASSES.includes(error?.providerOutcomeClass)
+    ? error.providerOutcomeClass
+    : null;
+}
+
+function appsProviderOutcomeError(error, httpStatus) {
+  const outcomeClass = squareProviderHttpOutcomeClass(httpStatus);
+  return outcomeClass === "RATE_429" || outcomeClass === "SERVER_5XX"
+    ? squareProviderOutcomeError(error, outcomeClass)
+    : error;
+}
+
+function squareProviderOutcomeTimestamp(observedAt = new Date()) {
+  return observedAt instanceof Date && Number.isFinite(observedAt.getTime())
+    ? observedAt.toISOString()
+    : new Date().toISOString();
+}
+
+async function admitSquareProviderAttempt(env, observedAt = new Date()) {
+  if (!flag(env?.SQUARE_PROVIDER_OUTCOME_JOURNAL_ENABLED)) return null;
+  const attemptedAt = squareProviderOutcomeTimestamp(observedAt);
+  const admission = Object.freeze({
+    attemptId: crypto.randomUUID(),
+    attemptedAt,
+  });
+  try {
+    if (!env?.DB) throw new Error("PROVIDER_OUTCOME_DB_UNAVAILABLE");
+    const result = await dbStatement(env, "provider_attempt_admit", `
+      INSERT INTO square_provider_attempts (attempt_id, attempt_state, attempted_at)
+      VALUES (?1, 'PENDING', ?2)
+    `, [admission.attemptId, admission.attemptedAt]).run();
+    if (!result || result.success === false || dbChanges(result) !== 1) {
+      throw new Error("PROVIDER_ATTEMPT_ADMISSION_INCOMPLETE");
+    }
+    return admission;
+  } catch {
+    console.error("square_provider_attempt_admission_unavailable");
+    throw transient("PROVIDER_OUTCOME_ADMISSION_UNAVAILABLE");
+  }
+}
+
+async function markSquareProviderAttemptFaulted(env, admission) {
+  if (!env?.DB || !admission) return false;
+  try {
+    const result = await dbStatement(env, "provider_attempt_fault", `
+      INSERT INTO square_provider_attempts (attempt_id, attempt_state, attempted_at)
+      VALUES (?1, 'FAULTED', ?2)
+      ON CONFLICT(attempt_id) DO UPDATE
+        SET attempt_state = 'FAULTED'
+    `, [admission.attemptId, admission.attemptedAt]).run();
+    return Boolean(result && result.success !== false && dbChanges(result) === 1);
+  } catch {
+    return false;
+  }
+}
+
+async function finalizeSquareProviderAttempt(env, admission, outcomeClass = null, observedAt = new Date()) {
+  if (!admission) return true;
+  const fixedClass = outcomeClass === null
+    ? null
+    : SQUARE_PROVIDER_OUTCOME_CLASSES.includes(outcomeClass) ? outcomeClass : "OTHER";
+  const timestamp = squareProviderOutcomeTimestamp(observedAt);
+  const retentionCutoff = new Date(
+    Date.parse(timestamp) - SQUARE_PROVIDER_OUTCOME_RETENTION_SECONDS * 1000,
+  ).toISOString();
+  try {
+    const statements = [];
+    if (fixedClass !== null) {
+      statements.push(dbStatement(env, "provider_outcome_record", `
+        INSERT INTO square_provider_outcomes (outcome_class, observed_at, event_count)
+        VALUES (?1, ?2, 1)
+        ON CONFLICT(outcome_class, observed_at) DO UPDATE
+          SET event_count = event_count + 1
+      `, [fixedClass, timestamp]));
+    }
+    statements.push(
+      dbStatement(env, "provider_outcome_prune", `
+        DELETE FROM square_provider_outcomes
+         WHERE observed_at < ?1
+      `, [retentionCutoff]),
+      dbStatement(env, "provider_outcome_heartbeat", `
+        INSERT INTO square_provider_outcome_source (singleton_key, producer_state, heartbeat_at)
+        VALUES ('PROVIDER_OUTCOME_JOURNAL', 'ACTIVE', ?1)
+        ON CONFLICT(singleton_key) DO UPDATE
+          SET producer_state = 'ACTIVE',
+              heartbeat_at = CASE
+                WHEN excluded.heartbeat_at > heartbeat_at THEN excluded.heartbeat_at
+                ELSE heartbeat_at
+              END
+      `, [timestamp]),
+      dbStatement(env, "provider_attempt_close", `
+        DELETE FROM square_provider_attempts
+         WHERE attempt_id = ?1 AND attempt_state = 'PENDING'
+      `, [admission.attemptId]),
+    );
+    const results = await env.DB.batch(statements);
+    const expectedLength = fixedClass === null ? 3 : 4;
+    if (!Array.isArray(results) || results.length !== expectedLength ||
+        results.some((result) => !result || result.success === false) ||
+        (fixedClass !== null && dbChanges(results[0]) !== 1) ||
+        dbChanges(results.at(-2)) !== 1 || dbChanges(results.at(-1)) !== 1) {
+      throw new Error("PROVIDER_ATTEMPT_FINALIZATION_INCOMPLETE");
+    }
+    return true;
+  } catch {
+    await markSquareProviderAttemptFaulted(env, admission);
+    console.error("square_provider_attempt_finalization_unavailable");
+    return false;
+  }
+}
+
+async function pruneSquareProviderOutcomes(env, observedAt = new Date()) {
+  const journalingEnabled = flag(env?.SQUARE_PROVIDER_OUTCOME_JOURNAL_ENABLED);
+  const retentionEnabled = flag(env?.SQUARE_PROVIDER_OUTCOME_RETENTION_ENABLED);
+  if ((!journalingEnabled && !retentionEnabled) || !env?.DB) return false;
+  const timestamp = observedAt instanceof Date && Number.isFinite(observedAt.getTime())
+    ? observedAt.toISOString()
+    : new Date().toISOString();
+  const retentionCutoff = new Date(
+    Date.parse(timestamp) - SQUARE_PROVIDER_OUTCOME_RETENTION_SECONDS * 1000,
+  ).toISOString();
+  try {
+    const sourceStatement = journalingEnabled
+      ? dbStatement(env, "provider_outcome_heartbeat", `
+          INSERT INTO square_provider_outcome_source (singleton_key, producer_state, heartbeat_at)
+          VALUES ('PROVIDER_OUTCOME_JOURNAL', 'ACTIVE', ?1)
+          ON CONFLICT(singleton_key) DO UPDATE
+            SET producer_state = 'ACTIVE',
+                heartbeat_at = CASE
+                  WHEN excluded.heartbeat_at > heartbeat_at THEN excluded.heartbeat_at
+                  ELSE heartbeat_at
+                END
+        `, [timestamp])
+      : dbStatement(env, "provider_outcome_deactivate", `
+          DELETE FROM square_provider_outcome_source
+           WHERE singleton_key = 'PROVIDER_OUTCOME_JOURNAL'
+        `);
+    const results = await env.DB.batch([
+      dbStatement(env, "provider_outcome_prune", `
+      DELETE FROM square_provider_outcomes
+       WHERE observed_at < ?1
+      `, [retentionCutoff]),
+      sourceStatement,
+    ]);
+    if (!Array.isArray(results) || results.length !== 2 ||
+        results.some((result) => !result || result.success === false) ||
+        (journalingEnabled && dbChanges(results[1]) !== 1)) {
+      throw new Error("PROVIDER_OUTCOME_MAINTENANCE_INCOMPLETE");
+    }
+    return true;
+  } catch {
+    console.error("square_provider_outcome_prune_unavailable");
+    return false;
+  }
 }
 
 async function verifyTurnstile(token, request, env) {
@@ -3629,6 +3852,7 @@ class SquareApiError extends ConnectorError {
   constructor(squareCode, httpStatus) {
     super("SQUARE_API_ERROR", httpStatus >= 500 || httpStatus === 429 ? 503 : 502, httpStatus < 500 && httpStatus !== 429);
     this.squareCode = squareCode;
+    squareProviderOutcomeError(this, squareProviderHttpOutcomeClass(httpStatus));
   }
 }
 
@@ -3779,4 +4003,11 @@ export const __test = Object.freeze({
   identityPhoneHash,
   reconciliationEventId,
   maybeSandboxFault,
+  squareRequest,
+  admitSquareProviderAttempt,
+  finalizeSquareProviderAttempt,
+  pruneSquareProviderOutcomes,
+  squareProviderHttpOutcomeClass,
+  squareProviderOutcomeClass,
+  SQUARE_PROVIDER_OUTCOME_CLASSES,
 });

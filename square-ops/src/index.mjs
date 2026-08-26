@@ -1,5 +1,6 @@
 export const OPS_FLAG_NAMES = Object.freeze([
   "OPS_MONITORING_ENABLED",
+  "OPS_PROVIDER_MONITORING_ENABLED",
   "OPS_QUEUE_MONITORING_ENABLED",
   "OPS_APPS_SCRIPT_MONITORING_ENABLED",
   "OPS_ALERTS_ENABLED",
@@ -67,8 +68,45 @@ export const CONNECTOR_SOURCE_QUERIES = Object.freeze({
                END) AS overflow_count,
            SUM(CASE WHEN strftime('%s', updated_at) IS NULL THEN 1 ELSE 0 END) AS invalid_time_count,
            SUM(CASE WHEN updated_at > ?1 THEN 1 ELSE 0 END) AS future_time_count
-      FROM connector_state
+     FROM connector_state
      WHERE state_key IN ('last_reconciliation', 'reconciliation_overflow_payment', 'reconciliation_overflow_refund')`,
+  providerOutcomes: `/*op:ops_source_provider_outcomes*/
+    WITH provider_source AS (
+      SELECT producer_state, heartbeat_at
+        FROM square_provider_outcome_source
+       WHERE singleton_key = 'PROVIDER_OUTCOME_JOURNAL'
+    ), outcome_counts AS (
+      SELECT outcome_class,
+             SUM(event_count) AS event_count,
+             MIN(observed_at) AS oldest_observed_at,
+             SUM(CASE WHEN strftime('%s', observed_at) IS NULL THEN event_count ELSE 0 END) AS invalid_time_count,
+             SUM(CASE WHEN observed_at > ?2 THEN event_count ELSE 0 END) AS future_time_count
+        FROM square_provider_outcomes
+       WHERE (observed_at > ?1 AND observed_at <= ?2)
+          OR strftime('%s', observed_at) IS NULL
+          OR observed_at > ?2
+       GROUP BY outcome_class
+    ), attempt_health AS (
+      SELECT COUNT(*) AS open_attempt_count,
+             SUM(CASE WHEN attempt_state = 'PENDING' THEN 1 ELSE 0 END) AS pending_attempt_count,
+             SUM(CASE WHEN attempt_state = 'FAULTED' THEN 1 ELSE 0 END) AS faulted_attempt_count,
+             SUM(CASE WHEN attempt_state NOT IN ('PENDING', 'FAULTED') THEN 1 ELSE 0 END)
+               AS invalid_attempt_state_count,
+             SUM(CASE WHEN strftime('%s', attempted_at) IS NULL THEN 1 ELSE 0 END)
+               AS invalid_attempt_time_count,
+             SUM(CASE WHEN attempted_at > ?2 THEN 1 ELSE 0 END) AS future_attempt_count
+        FROM square_provider_attempts
+    )
+    SELECT provider_source.producer_state, provider_source.heartbeat_at,
+           attempt_health.open_attempt_count, attempt_health.pending_attempt_count,
+           attempt_health.faulted_attempt_count, attempt_health.invalid_attempt_state_count,
+           attempt_health.invalid_attempt_time_count, attempt_health.future_attempt_count,
+           outcome_counts.outcome_class, outcome_counts.event_count,
+           outcome_counts.oldest_observed_at, outcome_counts.invalid_time_count,
+           outcome_counts.future_time_count
+      FROM provider_source
+      CROSS JOIN attempt_health
+      LEFT JOIN outcome_counts ON 1 = 1`,
 });
 
 const MONITOR_CRON = "*/5 * * * *";
@@ -76,6 +114,9 @@ const DEFAULT_WARNING_AGE_SECONDS = 600;
 const DEFAULT_CRITICAL_AGE_SECONDS = 1800;
 const DEFAULT_RECONCILIATION_MAX_AGE_SECONDS = 1800;
 const DEFAULT_REJECTION_LOOKBACK_HOURS = 24;
+const PROVIDER_OUTCOME_LOOKBACK_SECONDS = 15 * 60;
+const PROVIDER_OUTCOME_HEARTBEAT_MAX_AGE_SECONDS = 10 * 60;
+const PROVIDER_RATE_WARNING_COUNT = 3;
 const DEFAULT_MONITOR_RETENTION_DAYS = 30;
 const DEFAULT_ALERT_DEDUPE_SECONDS = 3600;
 const DEFAULT_QUEUE_WARNING_AGE_SECONDS = 600;
@@ -180,7 +221,7 @@ const APPS_HEALTH_ALLOWED_STATES = Object.freeze({
   owner_notification_state: Object.freeze(["READY", "DISABLED", "MISCONFIGURED", "NOT_CHECKED"]),
   square_journey_state: Object.freeze(["READY", "DISABLED", "MISCONFIGURED", "NOT_CHECKED"]),
 });
-const ALERT_SCHEMA_VERSION = "4";
+const ALERT_SCHEMA_VERSION = "5";
 const ALERT_MESSAGE_VERSION = "OPS_ALERT_V1";
 const ALERT_MAX_ATTEMPTS = 3;
 const ALERT_LEASE_SECONDS = 240;
@@ -234,6 +275,11 @@ const APPS_SCRIPT_ALERT_KEYS = Object.freeze([
   "APPS_HEALTH_INTEGRITY_FAILURE",
   "APPS_CONFIGURATION_UNHEALTHY",
 ]);
+const PROVIDER_ALERT_KEYS = Object.freeze([
+  "PROVIDER_OUTCOME_UNAVAILABLE",
+  "SQUARE_PROVIDER_AUTH_REJECTED",
+  "PROVIDER_RATE_WARNING",
+]);
 const CONFIRMED_WARNING_ALERT_KEYS = Object.freeze(new Set([
   "QUEUE_BACKLOG_STALE",
   "APPS_HEALTH_UNAVAILABLE",
@@ -244,6 +290,7 @@ const FIXED_ALERT_KEYS = Object.freeze([
   ...DLQ_ALERT_KEYS,
   ...QUEUE_SOURCE_ALERT_KEYS,
   ...APPS_SCRIPT_ALERT_KEYS,
+  ...PROVIDER_ALERT_KEYS,
 ]);
 const ALERT_REASON_BY_KEY = Object.freeze({
   SOURCE_UNAVAILABLE: "CONNECTOR_SIGNAL_SOURCE_UNAVAILABLE",
@@ -260,6 +307,9 @@ const ALERT_REASON_BY_KEY = Object.freeze({
   APPS_HEALTH_UNAVAILABLE: "APPS_HEALTH_SOURCE_UNAVAILABLE",
   APPS_HEALTH_INTEGRITY_FAILURE: "APPS_HEALTH_AUTH_OR_CONTRACT_INVALID",
   APPS_CONFIGURATION_UNHEALTHY: "APPS_RUNTIME_CONFIGURATION_UNHEALTHY",
+  PROVIDER_OUTCOME_UNAVAILABLE: "PROVIDER_OUTCOME_SOURCE_UNAVAILABLE",
+  SQUARE_PROVIDER_AUTH_REJECTED: "SQUARE_PROVIDER_AUTH_OR_SCOPE_REJECTED",
+  PROVIDER_RATE_WARNING: "PROVIDER_RATE_OR_SERVER_FAILURE",
   ALERT_PATH_TEST: "MONTHLY_ALERT_PATH_TEST",
 });
 
@@ -269,17 +319,21 @@ export default {
     if (enabledFlags.length === 0) return;
 
     const unsupported = enabledFlags.filter((flagName) =>
-      !new Set(["OPS_MONITORING_ENABLED", "OPS_QUEUE_MONITORING_ENABLED",
+      !new Set(["OPS_MONITORING_ENABLED", "OPS_PROVIDER_MONITORING_ENABLED", "OPS_QUEUE_MONITORING_ENABLED",
         "OPS_APPS_SCRIPT_MONITORING_ENABLED", "OPS_ALERTS_ENABLED"])
         .has(flagName));
     if (unsupported.length > 0) throw new Error("SQUARE_OPS_SCAFFOLD_NOT_ACTIVATION_READY");
 
     if (controller?.cron !== MONITOR_CRON) return;
     const monitoringEnabled = flag(env?.OPS_MONITORING_ENABLED);
+    const providerMonitoringEnabled = flag(env?.OPS_PROVIDER_MONITORING_ENABLED);
     const queueMonitoringEnabled = flag(env?.OPS_QUEUE_MONITORING_ENABLED);
     const appsScriptMonitoringEnabled = flag(env?.OPS_APPS_SCRIPT_MONITORING_ENABLED);
     const alertsEnabled = flag(env?.OPS_ALERTS_ENABLED);
     if (queueMonitoringEnabled && !monitoringEnabled) throw new Error("OPS_QUEUE_MONITORING_REQUIRES_MONITORING");
+    if (providerMonitoringEnabled && !monitoringEnabled) {
+      throw new Error("OPS_PROVIDER_MONITORING_REQUIRES_MONITORING");
+    }
     if (appsScriptMonitoringEnabled && !monitoringEnabled) {
       throw new Error("OPS_APPS_SCRIPT_MONITORING_REQUIRES_MONITORING");
     }
@@ -309,6 +363,13 @@ async function runMonitor(env, scheduledAt, observedAt = new Date(), appsHealthC
     sourceState = "UNAVAILABLE";
     signals.push(makeSignal("SOURCE_UNAVAILABLE", "CRITICAL", 1, "CONNECTOR_SIGNAL_SOURCE_UNAVAILABLE"));
     resolvableKeys.add("SOURCE_UNAVAILABLE");
+  }
+
+  if (flag(env?.OPS_PROVIDER_MONITORING_ENABLED)) {
+    const providerResult = await readProviderSignals(env, observationTime);
+    signals.push(...providerResult.signals);
+    for (const alertKey of providerResult.resolvableKeys) resolvableKeys.add(alertKey);
+    if (providerResult.sourceState === "UNAVAILABLE") sourceState = "UNAVAILABLE";
   }
 
   if (flag(env?.OPS_QUEUE_MONITORING_ENABLED)) {
@@ -1074,6 +1135,102 @@ async function readConnectorSignals(env, now) {
   return signals;
 }
 
+async function readProviderSignals(env, now) {
+  const unavailable = () => Object.freeze({
+    sourceState: "UNAVAILABLE",
+    signals: Object.freeze([
+      makeSignal("PROVIDER_OUTCOME_UNAVAILABLE", "CRITICAL", 1, "PROVIDER_OUTCOME_SOURCE_UNAVAILABLE"),
+    ]),
+    resolvableKeys: Object.freeze([]),
+  });
+  try {
+    if (String(env?.OPS_SCHEMA_VERSION || "").trim() !== ALERT_SCHEMA_VERSION) return unavailable();
+    if (!env?.CONNECTOR_DB) return unavailable();
+    const observedAt = now.toISOString();
+    const cutoff = new Date(now.getTime() - PROVIDER_OUTCOME_LOOKBACK_SECONDS * 1000).toISOString();
+    const rows = await sourceAll(env.CONNECTOR_DB, CONNECTOR_SOURCE_QUERIES.providerOutcomes,
+      [cutoff, observedAt]);
+    if (rows.length < 1) return unavailable();
+    const source = rows[0];
+    const heartbeatAt = requiredDate(source.heartbeat_at);
+    const heartbeatAgeSeconds = Math.floor((now.getTime() - heartbeatAt.getTime()) / 1000);
+    if (source.producer_state !== "ACTIVE" || heartbeatAt.toISOString() !== source.heartbeat_at ||
+        heartbeatAgeSeconds < 0 || heartbeatAgeSeconds > PROVIDER_OUTCOME_HEARTBEAT_MAX_AGE_SECONDS ||
+        rows.some((row) => row.producer_state !== source.producer_state ||
+          row.heartbeat_at !== source.heartbeat_at)) {
+      return unavailable();
+    }
+    const attemptHealthFields = [
+      "open_attempt_count",
+      "pending_attempt_count",
+      "faulted_attempt_count",
+      "invalid_attempt_state_count",
+      "invalid_attempt_time_count",
+      "future_attempt_count",
+    ];
+    const attemptHealth = Object.fromEntries(attemptHealthFields.map((field) => [field, boundedCount(source[field])]));
+    if (rows.some((row) => attemptHealthFields.some((field) =>
+      boundedCount(row[field]) !== attemptHealth[field])) ||
+        attemptHealth.open_attempt_count !==
+          attemptHealth.pending_attempt_count + attemptHealth.faulted_attempt_count ||
+        attemptHealth.open_attempt_count > 0 || attemptHealth.invalid_attempt_state_count > 0 ||
+        attemptHealth.invalid_attempt_time_count > 0 || attemptHealth.future_attempt_count > 0) {
+      return unavailable();
+    }
+    const counts = new Map([
+      ["AUTH_401", 0],
+      ["SCOPE_403", 0],
+      ["RATE_429", 0],
+      ["SERVER_5XX", 0],
+      ["OTHER", 0],
+    ]);
+    const oldest = new Map();
+    for (const row of rows) {
+      if (row.outcome_class === null && row.event_count === null && row.oldest_observed_at === null &&
+          row.invalid_time_count === null && row.future_time_count === null && rows.length === 1) continue;
+      const outcomeClass = String(row.outcome_class || "");
+      if (!counts.has(outcomeClass) || boundedCount(row.invalid_time_count) > 0 ||
+          boundedCount(row.future_time_count) > 0) return unavailable();
+      const count = boundedCount(row.event_count);
+      const oldestAt = requiredDate(row.oldest_observed_at);
+      if (count < 1 || oldestAt.toISOString() !== row.oldest_observed_at || oldestAt > now) return unavailable();
+      counts.set(outcomeClass, counts.get(outcomeClass) + count);
+      oldest.set(outcomeClass, oldestAt.toISOString());
+    }
+    const signals = [];
+    const authCount = counts.get("AUTH_401") + counts.get("SCOPE_403");
+    if (authCount > 0) {
+      signals.push(makeSignal(
+        "SQUARE_PROVIDER_AUTH_REJECTED",
+        "CRITICAL",
+        authCount,
+        "SQUARE_PROVIDER_AUTH_OR_SCOPE_REJECTED",
+        [oldest.get("AUTH_401"), oldest.get("SCOPE_403")].filter(Boolean).sort()[0] || null,
+      ));
+    }
+    const rateCount = counts.get("RATE_429") + counts.get("SERVER_5XX");
+    if (rateCount >= PROVIDER_RATE_WARNING_COUNT) {
+      signals.push(makeSignal(
+        "PROVIDER_RATE_WARNING",
+        "WARNING",
+        rateCount,
+        "PROVIDER_RATE_OR_SERVER_FAILURE",
+        [oldest.get("RATE_429"), oldest.get("SERVER_5XX")].filter(Boolean).sort()[0] || null,
+      ));
+    }
+    return Object.freeze({
+      sourceState: "AVAILABLE",
+      signals: Object.freeze(signals),
+      resolvableKeys: Object.freeze([
+        "PROVIDER_OUTCOME_UNAVAILABLE",
+        "PROVIDER_RATE_WARNING",
+      ]),
+    });
+  } catch {
+    return unavailable();
+  }
+}
+
 async function readQueueSignals(env, now, fetchImpl = globalThis.fetch) {
   let config;
   try {
@@ -1746,6 +1903,7 @@ function flag(value) {
 export const __test = Object.freeze({
   runMonitor,
   readConnectorSignals,
+  readProviderSignals,
   readQueueSignals,
   fetchQueueMetrics,
   readAppsScriptHealthSignals,

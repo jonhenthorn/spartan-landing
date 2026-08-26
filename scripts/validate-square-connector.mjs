@@ -15,6 +15,7 @@ const sandboxWrangler = readFileSync(new URL("square-worker/wrangler.sandbox.tom
 const migration = readFileSync(new URL("square-worker/migrations/0001_initial.sql", ROOT), "utf8");
 const leaseMigration = readFileSync(new URL("square-worker/migrations/0002_processing_leases.sql", ROOT), "utf8");
 const retryScheduleMigration = readFileSync(new URL("square-worker/migrations/0003_webhook_retry_schedule.sql", ROOT), "utf8");
+const providerOutcomeMigration = readFileSync(new URL("square-worker/migrations/0004_provider_outcomes.sql", ROOT), "utf8");
 const source = readFileSync(new URL("square-worker/src/index.mjs", ROOT), "utf8");
 
 const checks = [];
@@ -1204,6 +1205,11 @@ check("static configuration is default-off and pinned", () => {
   for (const flag of ["SQUARE_OFFER_ENABLED", "SQUARE_WEBHOOK_ENABLED", "SQUARE_PASS_ENABLED", "SQUARE_CONSUMER_ENABLED", "SQUARE_RECONCILIATION_ENABLED"]) {
     assert.match(wrangler, new RegExp(`${flag} = "false"`));
   }
+  assert.doesNotMatch(
+    wrangler,
+    /^SQUARE_PROVIDER_OUTCOME_(?:JOURNAL|RETENTION)_ENABLED\s*=/m,
+    "provider outcome flags must remain absent so the exact deployed all-off variable set is preserved",
+  );
   assert.match(wrangler, /CONNECTOR_ENVIRONMENT = "production"/);
   assert.match(wrangler, /SQUARE_ENVIRONMENT = "production"/);
   assert.match(wrangler, /SQUARE_API_BASE_URL = "https:\/\/connect\.squareup\.com"/);
@@ -1222,6 +1228,11 @@ check("static configuration is default-off and pinned", () => {
   assert.match(retryScheduleMigration, /ALTER TABLE webhook_events ADD COLUMN available_at TEXT/);
   assert.match(retryScheduleMigration, /WHERE state = 'RETRY' AND available_at IS NULL/);
   assert.match(retryScheduleMigration, /webhook_events_retry_ready_idx/);
+  assert.match(providerOutcomeMigration, /CREATE TABLE IF NOT EXISTS square_provider_outcomes/);
+  assert.match(providerOutcomeMigration, /CREATE TABLE IF NOT EXISTS square_provider_attempts/);
+  assert.match(providerOutcomeMigration, /CREATE TABLE IF NOT EXISTS square_provider_outcome_source/);
+  assert.doesNotMatch(providerOutcomeMigration,
+    /(?:customer|claim|submission|coupon|reference|order|payment|refund|request|response|body|error|status)_id/i);
   assert.match(source, /WEBHOOK_ENQUEUED_STALE_SECONDS = 1800/);
   assert.doesNotMatch(wrangler, /SQUARE_ACCESS_TOKEN\s*=/);
 });
@@ -1273,6 +1284,11 @@ check("sandbox configuration is isolated, placeholder-gated, and default-off", a
   for (const flag of ["SQUARE_OFFER_ENABLED", "SQUARE_WEBHOOK_ENABLED", "SQUARE_PASS_ENABLED", "SQUARE_CONSUMER_ENABLED", "SQUARE_RECONCILIATION_ENABLED"]) {
     assert.match(sandboxWrangler, new RegExp(`${flag} = "false"`));
   }
+  assert.doesNotMatch(
+    sandboxWrangler,
+    /^SQUARE_PROVIDER_OUTCOME_(?:JOURNAL|RETENTION)_ENABLED\s*=/m,
+    "provider outcome flags must remain absent so the exact deployed all-off variable set is preserved",
+  );
   const readValue = (text, key) => text.match(new RegExp(`^${key} = "([^"]*)"$`, "m"))?.[1] || "";
   const sandboxLocation = readValue(sandboxWrangler, "SQUARE_LOCATION_ID");
   const sandboxDatabaseId = readValue(sandboxWrangler, "database_id");

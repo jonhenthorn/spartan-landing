@@ -537,7 +537,7 @@ const REQUIRED_F02_GOVERNANCE_CONTRACTS = Object.freeze({
     /entire PTY process group and temporary state/,
     /signals both the top-level validator/,
     /nested terminal parent/,
-    /runs all 23 local validators/,
+    /runs all 26 local validators/,
     /bounded POSIX process-group and request-cancellation boundary/,
     /per-action exact-`0600` lock file containing only a nonsecret `MAIN:<pid>:ACTION:<128-bit nonce>` marker/,
     /<OS-account-home>\/Library\/Application Support\/com\.spartan\.project2\.f02\/namespace-operation-locks-v2/,
@@ -1422,7 +1422,7 @@ function assertUnsafeF02GovernanceMutationsFail(
     }],
     ["F02_ROOT_README_GOVERNANCE_CONTRACT_MISSING", {
       faultHooks, acceptance, ownerGuide,
-      rootReadme: rootReadme.replace("runs all 23 local validators", "runs the local validators"),
+      rootReadme: rootReadme.replace("runs all 26 local validators", "runs the local validators"),
       squareWorkerReadme,
     }],
     ["F02_ROOT_README_GOVERNANCE_CONTRACT_MISSING", {
