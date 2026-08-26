@@ -1,8 +1,8 @@
 # Square sandbox provider fixture guide
 
-Last reviewed: August 20, 2026
+Last reviewed: August 26, 2026
 
-Status: **local preparation and a bounded read-only preflight are implemented; live provider execution remains BLOCKED in code.** No provider fixture or read-only preflight in this guide has been created, run or accepted live. `scripts/prepare-square-sandbox-provider-fixtures.mjs` is default-inert. Its five mutating fixture cases and three read-only preflight cases pass only through validator-injected transport at `https://provider-fixture.invalid`. The separately compiled mutation and read-only OAuth client IDs are deliberately `null`, so every otherwise valid `--execute` or `--execute-read-only` command returns `CREDENTIAL_GATE_BLOCKED` before prompting, creating or reading a private package, or making a request. The helper does not deploy a Worker, enable a flag or subscription, send a webhook, touch D1/Queue/Apps, mutate a provider object, or reach production. A future unblock requires a separate code/security review, owner approval and the dedicated-app controls below; this guide cannot clear that gate.
+Status: **local preparation, bounded read-only preflights and a separate OAuth lifecycle contract are implemented; live provider execution remains BLOCKED in code.** No provider fixture or read-only preflight in this guide has been created, run or accepted live. `scripts/prepare-square-sandbox-provider-fixtures.mjs` is default-inert. Its five mutating fixture cases and three read-only preflight cases pass only through validator-injected transport at `https://provider-fixture.invalid`. The helper's mutation and read-only OAuth client IDs remain deliberately `null`, so every otherwise valid `--execute` or `--execute-read-only` command returns `CREDENTIAL_GATE_BLOCKED` before prompting, creating or reading a private package, or making a request. The new `manage-square-sandbox-oauth.mjs` contract separately validates exact case scopes, callback state, short-lived issuance, one-attempt admission, full revocation and access/refresh retirement against `.invalid` adapters, but its public path is also compiled shut. That path has no registered app IDs/digests, configured shared admission/custody backing, trusted clock, callback listener, Square transport, case adapter or fixture-helper integration. Neither helper deploys a Worker, enables a flag or subscription, sends a webhook, touches D1/Queue/Apps, mutates a provider object or reaches production. A future unblock still requires reviewed integration, the dedicated-app controls below, current live evidence and separate owner approval; this guide cannot clear that gate.
 
 ## What the helper prepares
 
@@ -52,19 +52,19 @@ Keep the deployed connector all-off and the Square Sandbox webhook subscription 
 
 For `F-03`, independently verify in the private Apps test ledger that the one approved canary's `offer_prepare` result will return the helper's exact fixed synthetic name and phone. The helper does not call Apps. A different name or phone would not exercise the ambiguous-match branch and is a stop. For `O-01` and `P-02`, separately prove through read-only D1/Square evidence that the hidden customer ID belongs to the exact approved claim, that the claim is `READY`, and that the customer is currently Eligible. The API helper checks the Square reference/group boundary but cannot infer the D1 claim association.
 
-The credential gate is **BLOCKED for both read-only preflight and fixture mutation**. The repository neither obtains nor revokes OAuth authorizations. `APPROVED_TEMPORARY_OAUTH_CLIENT_ID` and the intentionally separate `APPROVED_READ_ONLY_OAUTH_CLIENT_ID` both remain compiled as `null`. A Square Sandbox personal access token is broad and is forbidden. The standing connector application, access token and authorization are also forbidden: the preflight must remain isolated from runtime custody, and the fixture window requires transaction writes that must not risk the runtime authorization.
+The credential gate is **BLOCKED for both read-only preflight and fixture mutation**. The repository contains a separate local OAuth lifecycle contract, but its public execution path obtains or revokes nothing and is not integrated with the fixture helper. `APPROVED_TEMPORARY_OAUTH_CLIENT_ID` and the intentionally separate `APPROVED_READ_ONLY_OAUTH_CLIENT_ID` both remain compiled as `null`. A Square Sandbox personal access token is broad and is forbidden. The standing connector application, access token and authorization are also forbidden: the preflight must remain isolated from runtime custody, and the fixture window requires transaction writes that must not risk the runtime authorization.
 
 Any future proposal to change this status must receive a separate code/security review and owner approval. At minimum, that proposal must:
 
 1. create a dedicated temporary Square Sandbox application/client that is not the standing connector client and is used by no other workload;
 2. compile that exact public client ID into the helper through a reviewed source change; no runtime client-ID override is permitted;
-3. use a separately reviewed owner-side OAuth controller to obtain a new token with `short_lived: true`, the exact case-specific `scopes` below and no other scope;
+3. connect the reviewed local lifecycle to a separately reviewed owner-side OAuth controller and shared admission/custody backing, then obtain a new token with `short_lived: true`, the exact case-specific `scopes` below and no other scope;
 4. keep the application client secret and authorization/refresh material outside this repository, command arguments, environment variables, shell history, chat and screenshots;
 5. confirm through `/oauth2/token/status` that the token has the compiled client ID, compiled Sandbox merchant, exact scope set and an expiry no more than 25 hours away;
 6. fully revoke the isolated application's authorization immediately after the evidence window with Square's [Revoke Token](https://developer.squareup.com/reference/square/oauth-api/revoke-token) operation and `revoke_only_access_token: false`; and
 7. prove the temporary access token and its refresh authorization are no longer usable, then separately confirm the standing connector application/authorization was unchanged.
 
-`revoke_only_access_token: true` is insufficient for this model because it leaves the OAuth authorization, and therefore its refresh credential, active. Full revocation is safe here only because the future client must be dedicated and isolated from the standing connector. Until the complete proposal above is implemented, reviewed and approved, live provider execution remains blocked. The current helper does not perform or prove any issuance, custody, revocation or post-revocation check.
+`revoke_only_access_token: true` is insufficient for this model because it leaves the OAuth authorization, and therefore its refresh credential, active. Full revocation is safe here only because the future client must be dedicated and isolated from the standing connector. Until the complete proposal above is integrated, independently accepted and approved, live provider execution remains blocked. The fixture helper does not perform or prove any issuance, custody, revocation or post-revocation check, and the standalone local lifecycle has no live adapters or evidence.
 
 The read-only gate must use its own dedicated temporary Square Sandbox OAuth application and compiled `APPROVED_READ_ONLY_OAUTH_CLIENT_ID`, separate from both the standing connector and any temporary mutation application. Apply the same short-lived issuance, owner custody, full-authorization revocation and post-revocation proof to that client. Its narrower purpose does not authorize a personal token, standing runtime token, extra scope or shared client. Clearing only the read-only client does not clear the mutation client, and the reverse is also true.
 
@@ -91,6 +91,10 @@ node --check scripts/prepare-square-sandbox-provider-fixtures.mjs
 node --check scripts/validate-square-sandbox-provider-fixtures.mjs
 node scripts/validate-square-sandbox-provider-fixtures.mjs
 node scripts/prepare-square-sandbox-provider-fixtures.mjs
+node --check scripts/manage-square-sandbox-oauth.mjs
+node --check scripts/validate-square-sandbox-oauth.mjs
+node scripts/validate-square-sandbox-oauth.mjs
+node scripts/manage-square-sandbox-oauth.mjs
 ```
 
 The validator must report all five fixture cases and all three read-only preflight cases with **validation transport only**. Its transport may receive only the fixed `https://provider-fixture.invalid` origin; any Square or other origin is a test failure. It exercises the core with an injected non-global transport and a compiled synthetic client string that is not an approved Square client. Neither can clear the operator CLI gate, and validator success is not provider evidence. Empty helper invocation must print exactly:
@@ -100,6 +104,8 @@ STATUS=INERT CASE=NONE RESULT=NO_REQUEST REQUESTS=0 MUTATION_REQUESTS=0 PRIVATE_
 ```
 
 That inert check does not prompt, create a temp package or call Square.
+
+The OAuth validator must identify itself as `local contract only`; empty OAuth-manager invocation must report `STATUS=INERT`, `RESULT=NO_REQUEST` and `CONTRACT=LOCAL_CONTRACT_ONLY_LIVE_NOT_READY`. An exact execute-shaped OAuth invocation must still return `CREDENTIAL_GATE_BLOCKED` with zero requests. These checks validate the closed lifecycle boundary only; they do not register an app, start a callback listener, authorize a merchant, issue or revoke a token, integrate the fixture helper, or clear its separate compiled gate.
 
 In the current tree, an otherwise exact mutating or read-only execute command must also return this fixed result without prompting, creating or reading a temp package, or making a request:
 
@@ -195,7 +201,7 @@ The cleanup rejects a renamed/outside-temp directory, symlink, unexpected file, 
 - `UNLINKED_PAYMENT_READY`: the completed $1 order/payment has no customer, catalog link, discount or applied discount; its raw quantity is exactly `"1"`; payment amount, order net total, line total and line base price are integer `100 USD`; and both Square `created_at`/`updated_at` timestamps are canonical, chronological and no more than five seconds ahead of the helper clock.
 - `REFUND_PENDING`: the refund exists but is not yet completed. Do not create another refund or change the run key; preserve the package and recheck under the same approval.
 - `MUTATION_RESULT_AMBIGUOUS`: a mutation request began but the response could not prove acceptance or rejection. Stop. Do not rerun blindly or use a new key. Preserve the package and inspect Square read-only; a later approved retry must use the exact same case and run key.
-- `CREDENTIAL_GATE_BLOCKED`: the exact dedicated temporary OAuth client has not been compiled through a separate review; no prompt, package or request occurred.
+- `CREDENTIAL_GATE_BLOCKED`: the fixture helper's exact dedicated OAuth client remains absent, or the separate lifecycle lacks its reviewed live adapters/integration; no prompt, package or request occurred.
 - Any boundary, auth, scope, provider, response or request-limit failure after a future gate clearance: stop the case, preserve provider/private evidence, invoke the separately approved full isolated-authorization revocation procedure and return connector exposure flags to false. Do not delete provider records or edit evidence to force a pass.
 
 Provider-fixture creation is preparation, not case acceptance. Copy only the required private selectors into the prepared webhook-package or owner-harness step, then complete the aggregate D1, Queue/DLQ, Square and Apps comparisons in `SQUARE-SANDBOX-NEGATIVE-RECOVERY-ACCEPTANCE.md`. A local helper success must remain `NOT RUN` until those live results agree.

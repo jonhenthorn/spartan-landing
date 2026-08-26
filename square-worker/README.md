@@ -101,7 +101,7 @@ D1 commits the qualifying purchase, redemption, claim state, webhook state, and 
 
 ## Required bindings and secrets
 
-Create the D1 database and Queue/DLQ, replace the D1 placeholder in `wrangler.toml`, and apply every migration in numeric order: `0001_initial.sql`, `0002_processing_leases.sql`, then `0003_webhook_retry_schedule.sql`. Never place secrets in `[vars]`.
+Create the D1 database and Queue/DLQ, replace the D1 placeholder in `wrangler.toml`, and apply every reviewed migration in numeric order: `0001_initial.sql`, `0002_processing_leases.sql`, `0003_webhook_retry_schedule.sql`, then `0004_provider_outcomes.sql`. Migration `0004` is a local, default-off provider-monitoring candidate and must not be applied to the current three-migration sandbox baseline without its separately approved preview-first deployment and acceptance window. Never place secrets in `[vars]`.
 
 Required Worker secrets:
 
@@ -138,7 +138,7 @@ The Apps Script project must have `SQUARE_JOURNEY_ENABLED=true` and matching loc
 ## Production release order after sandbox signoff
 
 1. Run `node scripts/validate-square-connector.mjs` from the repository root.
-2. Create bindings, set secrets, apply all three D1 migrations in order, and deploy with all flags false.
+2. Create bindings, set secrets, apply all four reviewed D1 migrations in order, and deploy with all flags false. The fourth migration remains blocked until its separate provider-monitoring review and approval are complete.
 3. Confirm `/api/square/config` reports `enabled:false` and the existing coupon flow is unchanged.
 4. Register the exact webhook URL in Square and verify its signature settings while every write/consumer flag remains false.
 5. Before the owner submits the coupon, generate one valid `square-canary-<date>-<random-uuid>` submission ID, put only that exact ID in `SQUARE_CANARY_SUBMISSION_IDS`, and leave `SQUARE_CANARY_ONLY=true`. In that owner-controlled browser tab, set the standard `spartanPendingCouponSubmission` `sessionStorage` record to `{"id":"<the exact allowlisted ID>","createdAt":<current epoch milliseconds>}` immediately before submit; `prepareSubmission()` will use it. Never place it in the URL, analytics or `localStorage`. With an empty allowlist, nobody is eligible.
