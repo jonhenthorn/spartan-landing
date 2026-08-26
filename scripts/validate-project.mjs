@@ -15,6 +15,8 @@ const VALIDATORS = Object.freeze([
   "scripts/validate-project2-f02-cloudflare-retirement.mjs",
   "scripts/validate-project2-f02-keychain.mjs",
   "scripts/validate-project2-f02-process-scope.mjs",
+  "scripts/validate-project2-launch-decision-records.mjs",
+  "scripts/validate-project2-production-canary-contract.mjs",
   "scripts/validate-site.mjs",
   "scripts/validate-square-apps-script.mjs",
   "scripts/validate-square-connector.mjs",
@@ -30,6 +32,7 @@ const VALIDATORS = Object.freeze([
   "scripts/validate-square-sandbox-faults.mjs",
   "scripts/validate-square-sandbox-observer.mjs",
   "scripts/validate-square-sandbox-oauth.mjs",
+  "scripts/validate-square-sandbox-oauth-fixture-bridge.mjs",
   "scripts/validate-square-sandbox-provider-fixtures.mjs",
   "scripts/validate-square-sandbox-webhook-driver.mjs",
 ]);
@@ -285,7 +288,7 @@ async function assertNoWranglerDotEnv() {
 }
 
 async function assertValidatorInventory() {
-  if (VALIDATORS.length !== 26) fail("VALIDATOR_COUNT_MISMATCH");
+  if (VALIDATORS.length !== 29) fail("VALIDATOR_COUNT_MISMATCH");
   const actual = (await readdir(resolve(ROOT, "scripts")))
     .filter((name) => name !== "validate-project.mjs" && /^validate-.*\.mjs$/.test(name))
     .map((name) => `scripts/${name}`)

@@ -23,6 +23,7 @@ const expectedFlags = [
   "OPS_QUEUE_MONITORING_ENABLED",
   "OPS_APPS_SCRIPT_MONITORING_ENABLED",
   "OPS_ALERTS_ENABLED",
+  "OPS_ALERT_PATH_TEST_ENABLED",
   "OPS_BACKUPS_ENABLED",
   "OPS_RESTORE_TESTS_ENABLED",
 ];
@@ -97,7 +98,7 @@ function validateWranglerConfiguration(relativePath, environment) {
   assert.doesNotMatch(config, /^routes?\s*=/m, `${relativePath} must remain scheduled-only`);
   assert.match(config, /\[triggers\][\s\S]*?crons\s*=/, `${relativePath} needs a scheduled trigger`);
   assert.match(config, new RegExp(`^OPS_ENVIRONMENT\\s*=\\s*"${environment}"$`, "m"));
-  assert.match(config, /^OPS_SCHEMA_VERSION\s*=\s*"5"$/m, `${relativePath} must require operations schema 5`);
+  assert.match(config, /^OPS_SCHEMA_VERSION\s*=\s*"6"$/m, `${relativePath} must require operations schema 6`);
 
   for (const flagName of expectedFlags) {
     assert.match(config, new RegExp(`^${flagName}\\s*=\\s*"false"$`, "m"), `${flagName} must default false`);
@@ -144,6 +145,8 @@ function validateWranglerConfiguration(relativePath, environment) {
   }
   assert.doesNotMatch(config, /\[\[send_email\]\]|destination_address|allowed_destination_addresses/,
     `${relativePath} must not bind an alert destination yet`);
+  assert.doesNotMatch(config, /^OPS_(?:ALERT_FROM_EMAIL|OWNER_EMAIL|BACKUP_OWNER_EMAIL)\s*=/m,
+    `${relativePath} must not check in sender or recipient configuration`);
   assert.doesNotMatch(config, /\[\[queues\.(?:producers|consumers)\]\]/,
     `${relativePath} must not gain a producer-capable or consuming Queue binding`);
   assert.doesNotMatch(config, /OPS_CLOUDFLARE_QUEUES_READ_TOKEN/,
@@ -786,6 +789,125 @@ function validateAppsHealthAlertMigrationUpgrade() {
   "production", "A rejected migration 0004 must preserve the original v3 evidence");
 }
 
+function validateConnectorControlAlertMigrationUpgrade() {
+  const databasePath = path.join(tempRoot, "ops-connector-control-alert-upgrade.sqlite");
+  for (const migrationPath of [
+    "square-ops/migrations/0001_ops_state.sql",
+    "square-ops/migrations/0002_alert_delivery_engine.sql",
+    "square-ops/migrations/0003_queue_monitoring_alerts.sql",
+    "square-ops/migrations/0004_apps_script_health_alerts.sql",
+    "square-ops/migrations/0005_provider_monitoring_alerts.sql",
+  ]) applyOpsMigrationAtomically(databasePath, migrationPath);
+
+  const incident = {
+    alert_incident_id: "v5-preserved-incident",
+    environment_code: "sandbox",
+    alert_key: "PROVIDER_RATE_WARNING",
+    severity_code: "WARNING",
+    incident_state: "OPEN",
+    occurrence_count: 2,
+    latest_signal_count: 3,
+    reason_code: "PROVIDER_RATE_OR_SERVER_FAILURE",
+    first_seen_at: "2026-08-18T14:00:00.000Z",
+    last_seen_at: "2026-08-18T14:05:00.000Z",
+    dedupe_until: "2026-08-18T15:00:00.000Z",
+    created_at: "2026-08-18T14:00:00.000Z",
+    updated_at: "2026-08-18T14:05:00.000Z",
+  };
+  const delivery = {
+    alert_delivery_id: "v5-preserved-delivery",
+    alert_incident_id: incident.alert_incident_id,
+    delivery_kind: "OPEN",
+    channel_code: "OWNER_EMAIL",
+    target_role_code: "OWNER",
+    environment_code: "sandbox",
+    alert_key: incident.alert_key,
+    severity_code: "WARNING",
+    signal_count: 3,
+    reason_code: incident.reason_code,
+    sender_fingerprint: "c".repeat(64),
+    message_version: "OPS_ALERT_V1",
+    delivery_state: "PENDING",
+    attempt_count: 0,
+    queued_at: "2026-08-18T14:05:00.000Z",
+    available_at: "2026-08-18T14:05:00.000Z",
+    first_observed_at: "2026-08-18T14:00:00.000Z",
+    latest_observed_at: "2026-08-18T14:05:00.000Z",
+    created_at: "2026-08-18T14:05:00.000Z",
+    updated_at: "2026-08-18T14:05:00.000Z",
+  };
+  sqlite(databasePath, `${insertStatement("alert_incidents", incident)}\n${insertStatement("alert_deliveries", delivery)}`);
+  const before = execFileSync("sqlite3", ["-json", databasePath,
+    "SELECT * FROM alert_deliveries ORDER BY alert_delivery_id;"], { encoding: "utf8" }).trim();
+  applyOpsMigrationAtomically(databasePath, "square-ops/migrations/0006_connector_control_alerts.sql");
+  const after = execFileSync("sqlite3", ["-json", databasePath,
+    "SELECT * FROM alert_deliveries ORDER BY alert_delivery_id;"], { encoding: "utf8" }).trim();
+  assert.deepEqual(JSON.parse(after), JSON.parse(before), "Migration 0006 must preserve every v5 delivery value");
+  assert.deepEqual(nonemptyLines(sqlite(databasePath,
+    "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='alert_deliveries' AND name NOT LIKE 'sqlite_%' ORDER BY name;")),
+  ["alert_deliveries_incident_state_idx", "alert_deliveries_pending_idx"],
+  "Migration 0006 must recreate both reviewed delivery indexes");
+
+  const newPairs = [
+    ["DELIVERY_RETRY_ATTEMPT_3", "DELIVERY_RETRY_ATTEMPT_THRESHOLD_REACHED", "WARNING"],
+    ["STALE_LEASE_SURVIVED_RECOVERY", "PROCESSING_LEASE_SURVIVED_RECOVERY_CYCLE", "WARNING"],
+    ["STAFF_LOOKUP_THRESHOLD", "STAFF_LOOKUP_RATE_OR_COUNT_ELEVATED", "CRITICAL"],
+    ["DISCOUNT_POLICY_DISABLE_REQUIRED", "OFFER_PASS_DISABLE_REQUIRED", "CRITICAL"],
+  ];
+  for (const [index, [alertKey, reasonCode, severity]] of newPairs.entries()) {
+    const pairIncident = {
+      ...incident,
+      alert_incident_id: `v6-pair-incident-${index}`,
+      alert_key: alertKey,
+      reason_code: reasonCode,
+      severity_code: severity,
+    };
+    const pairDelivery = {
+      ...delivery,
+      alert_delivery_id: `v6-pair-delivery-${index}`,
+      alert_incident_id: pairIncident.alert_incident_id,
+      alert_key: alertKey,
+      reason_code: reasonCode,
+      severity_code: severity,
+    };
+    sqlite(databasePath,
+      `${insertStatement("alert_incidents", pairIncident)}\n${insertStatement("alert_deliveries", pairDelivery)}`);
+  }
+  assertCheckRejected(databasePath, "Migration 0006 must reject crossed connector-control alert/reason pairs",
+    insertStatement("alert_deliveries", {
+      ...delivery,
+      alert_delivery_id: "v6-bad-pair",
+      alert_incident_id: "v6-pair-incident-0",
+      alert_key: "DELIVERY_RETRY_ATTEMPT_3",
+      reason_code: "PROCESSING_LEASE_SURVIVED_RECOVERY_CYCLE",
+    }));
+  assert.equal(sqlite(databasePath, "PRAGMA integrity_check;").trim(), "ok");
+  assert.equal(sqlite(databasePath, "PRAGMA foreign_key_check;").trim(), "");
+
+  const mismatchPath = path.join(tempRoot, "ops-connector-control-alert-mismatch.sqlite");
+  for (const migrationPath of [
+    "square-ops/migrations/0001_ops_state.sql",
+    "square-ops/migrations/0002_alert_delivery_engine.sql",
+    "square-ops/migrations/0003_queue_monitoring_alerts.sql",
+    "square-ops/migrations/0004_apps_script_health_alerts.sql",
+    "square-ops/migrations/0005_provider_monitoring_alerts.sql",
+  ]) applyOpsMigrationAtomically(mismatchPath, migrationPath);
+  sqlite(mismatchPath, `${insertStatement("alert_incidents", incident)}\n${insertStatement("alert_deliveries", {
+    ...delivery,
+    environment_code: "production",
+  })}`);
+  const rejectedUpgrade = spawnSync("sqlite3", [mismatchPath], {
+    input: atomicMigrationInput("square-ops/migrations/0006_connector_control_alerts.sql"),
+    encoding: "utf8",
+  });
+  assert.notEqual(rejectedUpgrade.status, 0,
+    "Migration 0006 must atomically reject environment-mismatched evidence");
+  assert.match(rejectedUpgrade.stderr || "", /CHECK constraint failed/);
+  assert.equal(sqlite(mismatchPath,
+    "SELECT environment_code FROM alert_deliveries WHERE alert_delivery_id='v5-preserved-delivery';").trim(),
+  "production", "A rejected migration 0006 must preserve the original v5 evidence");
+}
+
 class MockStatement {
   constructor(db, op, sql) {
     this.db = db;
@@ -800,7 +922,14 @@ class MockStatement {
 
 class MockConnectorDB {
   constructor({ webhookRows = [], outboxRows = [], rejectedRows = [], stateRows = [{}], providerRows = [],
-    providerSourceRows = [],
+    providerSourceRows = [], retryAttemptRows = [{ attempt_threshold: 3, row_count: 0,
+      oldest_observed_at: null, invalid_time_count: 0, future_time_count: 0, invalid_attempt_count: 0 }],
+    staleLeaseRows = [{ recovery_cycle_seconds: 300, row_count: 0, oldest_observed_at: null,
+      invalid_time_count: 0, future_time_count: 0 }],
+    staffLookupRows = [{ total_offer_count: 0, staff_lookup_count: 0, oldest_observed_at: null,
+      invalid_time_count: 0, future_time_count: 0 }],
+    discountPolicyRows = [{ row_count: 0, oldest_observed_at: null, invalid_time_count: 0,
+      future_time_count: 0 }],
     failOp = "" } = {}) {
     this.webhookRows = webhookRows;
     this.outboxRows = outboxRows;
@@ -808,6 +937,10 @@ class MockConnectorDB {
     this.stateRows = stateRows;
     this.providerRows = providerRows;
     this.providerSourceRows = providerSourceRows;
+    this.retryAttemptRows = retryAttemptRows;
+    this.staleLeaseRows = staleLeaseRows;
+    this.staffLookupRows = staffLookupRows;
+    this.discountPolicyRows = discountPolicyRows;
     this.failOp = failOp;
     this.executed = [];
   }
@@ -824,6 +957,10 @@ class MockConnectorDB {
       ops_source_webhook_nonterminal: this.webhookRows,
       ops_source_outbox_open: this.outboxRows,
       ops_source_rejected_recent: this.rejectedRows,
+      ops_source_retry_attempt_three: this.retryAttemptRows,
+      ops_source_stale_lease_survivors: this.staleLeaseRows,
+      ops_source_staff_lookup_threshold: this.staffLookupRows,
+      ops_source_discount_policy_rejections: this.discountPolicyRows,
       ops_source_connector_state: this.stateRows,
       ops_source_provider_outcomes: this.providerRows.length > 0
         ? this.providerRows
@@ -1036,7 +1173,8 @@ async function validateSourceContract() {
   const workerModule = await import(`${pathToFileURL(sourcePath).href}?source-contract=${Date.now()}`);
   const queries = workerModule.CONNECTOR_SOURCE_QUERIES;
   assert.deepEqual(Object.keys(queries).sort(),
-    ["connectorState", "outboxOpen", "providerOutcomes", "rejectedRecent", "webhookNonterminal"],
+    ["connectorState", "discountPolicyRejections", "outboxOpen", "providerOutcomes", "rejectedRecent",
+      "retryAttemptThree", "staffLookupThreshold", "staleLeaseSurvivors", "webhookNonterminal"],
     "Connector signal query surface changed without review");
   for (const [name, query] of Object.entries(queries)) {
     assert.match(query, /\/\*op:ops_source_[a-z0-9_]+\*\/[\s\S]*\bSELECT\b/i,
@@ -1067,6 +1205,27 @@ async function validateSourceContract() {
       claim_id, submission_id, coupon_code_hash, status, apps_ledger_status, created_at, updated_at
     ) VALUES ('claim-fixture', 'submission-fixture', 'hash-fixture', 'READY', 'READY',
       '2026-08-17T18:00:00.000Z', '2026-08-17T18:00:00.000Z');
+    INSERT INTO offer_claims (
+      claim_id, submission_id, coupon_code_hash, status, apps_ledger_status, created_at, updated_at
+    ) VALUES
+      ('claim-offer-1', 'submission-offer-1', 'hash-offer-1', 'STAFF_LOOKUP_REQUIRED', 'PENDING',
+       '2026-08-17T19:00:00.000Z', '2026-08-17T19:00:00.000Z'),
+      ('claim-offer-2', 'submission-offer-2', 'hash-offer-2', 'STAFF_LOOKUP_REQUIRED', 'PENDING',
+       '2026-08-17T19:01:00.000Z', '2026-08-17T19:01:00.000Z'),
+      ('claim-offer-3', 'submission-offer-3', 'hash-offer-3', 'READY', 'READY',
+       '2026-08-17T19:02:00.000Z', '2026-08-17T19:02:00.000Z'),
+      ('claim-offer-4', 'submission-offer-4', 'hash-offer-4', 'READY', 'READY',
+       '2026-08-17T19:03:00.000Z', '2026-08-17T19:03:00.000Z'),
+      ('claim-offer-5', 'submission-offer-5', 'hash-offer-5', 'READY', 'READY',
+       '2026-08-17T19:04:00.000Z', '2026-08-17T19:04:00.000Z'),
+      ('claim-offer-6', 'submission-offer-6', 'hash-offer-6', 'READY', 'READY',
+       '2026-08-17T19:05:00.000Z', '2026-08-17T19:05:00.000Z'),
+      ('claim-offer-7', 'submission-offer-7', 'hash-offer-7', 'READY', 'READY',
+       '2026-08-17T19:06:00.000Z', '2026-08-17T19:06:00.000Z'),
+      ('claim-offer-8', 'submission-offer-8', 'hash-offer-8', 'READY', 'READY',
+       '2026-08-17T19:07:00.000Z', '2026-08-17T19:07:00.000Z'),
+      ('claim-offer-9', 'submission-offer-9', 'hash-offer-9', 'READY', 'READY',
+       '2026-08-17T00:00:00.000Z', '2026-08-17T00:00:00.000Z');
     INSERT INTO webhook_events (
       event_id, event_type, object_id, merchant_id, payload_json, state, attempts,
       created_at, updated_at, lease_expires_at, available_at
@@ -1087,6 +1246,9 @@ async function validateSourceContract() {
     ) VALUES
       ('outbox-retry-future', 'dedupe-a', 'claim-fixture', 'REMOVE_ELIGIBLE_GROUP', '{}', 'RETRY', 2,
        '2026-08-17T21:00:00.000Z', '2026-08-17T18:00:00.000Z', '2026-08-17T18:00:00.000Z', NULL),
+      ('outbox-retry-attempt-three', 'dedupe-attempt-three', 'claim-fixture', 'REMOVE_ELIGIBLE_GROUP', '{}',
+       'RETRY', 3, '2026-08-17T21:00:00.000Z', '2026-08-17T18:00:00.000Z',
+       '2026-08-17T18:30:00.000Z', NULL),
       ('outbox-pending-future', 'dedupe-d', 'claim-fixture', 'REMOVE_ELIGIBLE_GROUP', '{}', 'PENDING', 0,
        '2026-08-17T21:00:00.000Z', '2026-08-17T18:00:00.000Z', '2026-08-17T18:00:00.000Z', NULL),
       ('outbox-processing-expired', 'dedupe-b', 'claim-fixture', 'REMOVE_ELIGIBLE_GROUP', '{}', 'PROCESSING', 1,
@@ -1108,6 +1270,20 @@ async function validateSourceContract() {
   const outboxRows = parseRows(sqlite(databasePath,
     `${bindSql(queries.outboxOpen, [observedAt])} ORDER BY state;`));
   assert.deepEqual(outboxRows.map((row) => row[0]), ["DEAD", "PROCESSING"]);
+  const retryAttempt = parseRows(sqlite(databasePath,
+    bindSql(queries.retryAttemptThree, [observedAt])))[0];
+  assert.deepEqual(retryAttempt.slice(0, 3), ["3", "2", "2026-08-17T18:00:00.000Z"],
+    "The exact attempt-three threshold must include future-due nonterminal work without identifiers");
+  assert.deepEqual(retryAttempt.slice(3), ["0", "0", "0"]);
+  const staleLease = parseRows(sqlite(databasePath,
+    bindSql(queries.staleLeaseSurvivors, ["2026-08-17T19:55:00.000Z", observedAt])))[0];
+  assert.deepEqual(staleLease.slice(0, 3), ["300", "2", "2026-08-17T19:35:00.000Z"],
+    "Only processing leases surviving the next five-minute recovery cycle may qualify");
+  assert.deepEqual(staleLease.slice(3), ["0", "0"]);
+  const staffLookup = parseRows(sqlite(databasePath,
+    bindSql(queries.staffLookupThreshold, ["2026-08-17T00:00:00.000Z", observedAt])))[0];
+  assert.deepEqual(staffLookup, ["10", "2", "2026-08-17T19:00:00.000Z", "0", "0"],
+    "Staff lookup monitoring must expose only the bounded UTC-day numerator, denominator and oldest time");
 
   let state = sqlite(databasePath,
     bindSql(queries.connectorState, ["2026-08-17T23:00:00.000Z"])).trim().split("|");
@@ -1144,14 +1320,64 @@ async function validateSourceContract() {
       ('rejected-critical', 'payment.updated', 'object-h', 'merchant-a', '{}', 'REJECTED', 1,
        'TARGET_DISCOUNT_WITHOUT_CUSTOMER', '2026-08-17T18:00:00.000Z', '2026-08-17T19:00:00.000Z'),
       ('rejected-warning', 'payment.updated', 'object-i', 'merchant-a', '{}', 'REJECTED', 1,
-       'SOME_OTHER_REJECTION', '2026-08-17T18:00:00.000Z', '2026-08-17T19:00:00.000Z');
+       'SOME_OTHER_REJECTION', '2026-08-17T18:00:00.000Z', '2026-08-17T19:00:00.000Z'),
+      ('rejected-discount-1', 'payment.updated', 'object-j', 'merchant-a', '{}', 'REJECTED', 1,
+       'ORDER_DISCOUNT_STACKING_NOT_ALLOWED', '2026-08-17T18:00:00.000Z', '2026-08-17T19:10:00.000Z'),
+      ('rejected-discount-2', 'payment.updated', 'object-k', 'merchant-a', '{}', 'REJECTED', 1,
+       'ORDER_ITEM_QUANTITY_NOT_ONE', '2026-08-17T18:00:00.000Z', '2026-08-17T19:11:00.000Z');
   `);
   const rejectedMalformed = parseRows(sqlite(databasePath,
-    `${bindSql(queries.rejectedRecent, ["2026-08-16T20:00:00.000Z"])} ORDER BY rejection_class;`));
-  assert.deepEqual(rejectedMalformed.map((row) => row.slice(0, 2)), [["CRITICAL", "1"], ["WARNING", "2"]],
+    `${bindSql(queries.rejectedRecent, ["2026-08-16T20:00:00.000Z", observedAt])} ORDER BY rejection_class;`));
+  assert.deepEqual(rejectedMalformed.map((row) => row.slice(0, 2)), [["CRITICAL", "1"], ["WARNING", "4"]],
     "Rejection classification must remain bounded to two aggregate rows");
   assert.equal(rejectedMalformed.find((row) => row[0] === "WARNING")[2], "1",
     "Malformed rejected-event timestamps must remain visible to fail-closed validation");
+  const discountPolicy = parseRows(sqlite(databasePath,
+    bindSql(queries.discountPolicyRejections, ["2026-08-16T20:00:00.000Z", observedAt])))[0];
+  assert.deepEqual(discountPolicy, ["2", "2026-08-17T19:10:00.000Z", "0", "0"],
+    "Discount-policy monitoring must retain only the bounded 24-hour count and oldest time");
+
+  sqlite(databasePath, `
+    INSERT INTO webhook_events (
+      event_id, event_type, object_id, merchant_id, payload_json, state, attempts,
+      last_error_code, created_at, updated_at, lease_expires_at, available_at
+    ) VALUES
+      ('retry-noncanonical-future', 'payment.updated', 'object-nc-a', 'merchant-a', '{}', 'PENDING', 0,
+       NULL, '2026-08-17T18:00:00.000Z', '2026-08-17 20:30:00', NULL, NULL),
+      ('processing-noncanonical-not-stale', 'payment.updated', 'object-nc-b', 'merchant-a', '{}',
+       'PROCESSING', 1, NULL, '2026-08-17T18:00:00.000Z', '2026-08-17 19:30:00',
+       '2026-08-17 19:59:00', NULL),
+      ('rejected-discount-noncanonical', 'payment.updated', 'object-nc-c', 'merchant-a', '{}',
+       'REJECTED', 1, 'ORDER_ITEM_NOT_QUALIFYING', '2026-08-17T18:00:00.000Z',
+       '2026-08-17T19:30:00Z', NULL, NULL);
+    INSERT INTO offer_claims (
+      claim_id, submission_id, coupon_code_hash, status, apps_ledger_status, created_at, updated_at
+    ) VALUES
+      ('claim-offer-nc-denominator', 'submission-offer-nc-denominator', 'hash-offer-nc-denominator',
+       'READY', 'READY', '2026-08-17 19:30:00', '2026-08-17 19:30:00'),
+      ('claim-offer-nc-staff', 'submission-offer-nc-staff', 'hash-offer-nc-staff',
+       'STAFF_LOOKUP_REQUIRED', 'PENDING', '2026-08-17T19:30:00Z', '2026-08-17T19:30:00Z');
+  `);
+  const noncanonicalRetryAttempt = parseRows(sqlite(databasePath,
+    bindSql(queries.retryAttemptThree, [observedAt])))[0];
+  assert.deepEqual(noncanonicalRetryAttempt,
+    ["3", "2", "2026-08-17T18:00:00.000Z", "2", "1", "0"],
+  "Every valid-but-noncanonical nonterminal timestamp must be counted even when it is not the aggregate oldest");
+  const noncanonicalStaleLease = parseRows(sqlite(databasePath,
+    bindSql(queries.staleLeaseSurvivors, ["2026-08-17T19:55:00.000Z", observedAt])))[0];
+  assert.deepEqual(noncanonicalStaleLease,
+    ["300", "2", "2026-08-17T19:35:00.000Z", "1", "0"],
+  "Numeric lease comparison must not turn a later noncanonical lease into a stale row, and must still flag it");
+  const noncanonicalStaffLookup = parseRows(sqlite(databasePath,
+    bindSql(queries.staffLookupThreshold, ["2026-08-17T00:00:00.000Z", observedAt])))[0];
+  assert.deepEqual(noncanonicalStaffLookup,
+    ["12", "3", "2026-08-17T19:00:00.000Z", "2", "0"],
+  "UTC-day counts must use numeric time and expose noncanonical rows hidden behind a canonical oldest timestamp");
+  const noncanonicalDiscountPolicy = parseRows(sqlite(databasePath,
+    bindSql(queries.discountPolicyRejections, ["2026-08-16T20:00:00.000Z", observedAt])))[0];
+  assert.deepEqual(noncanonicalDiscountPolicy,
+    ["3", "2026-08-17T19:10:00.000Z", "1", "0"],
+  "Discount-policy counts must expose a noncanonical qualifying timestamp that is not the aggregate oldest");
   sqlite(databasePath,
     "UPDATE connector_state SET updated_at='not-a-timestamp' WHERE state_key='reconciliation_overflow_payment';");
   state = sqlite(databasePath,
@@ -1294,6 +1520,15 @@ async function validateWorkerBoundary() {
   await assert.rejects(
     workerModule.default.scheduled(
       { cron: "*/5 * * * *", scheduledTime: Date.now() },
+      { OPS_ALERT_PATH_TEST_ENABLED: "true", OPS_ALERTS_ENABLED: "false", OPS_MONITORING_ENABLED: "true" },
+      {},
+    ),
+    /OPS_ALERT_PATH_TEST_REQUIRES_ALERTS/,
+    "The monthly alert-path planner must require the separately enabled alert engine",
+  );
+  await assert.rejects(
+    workerModule.default.scheduled(
+      { cron: "*/5 * * * *", scheduledTime: Date.now() },
       { OPS_QUEUE_MONITORING_ENABLED: "true", OPS_MONITORING_ENABLED: "false" },
       {},
     ),
@@ -1363,13 +1598,22 @@ async function validateMonitorBehavior(workerModule) {
       { rejection_class: "CRITICAL", row_count: 2 },
       { rejection_class: "WARNING", error_code: plantedRawError, row_count: 4 },
     ],
+    retryAttemptRows: [{ attempt_threshold: 3, row_count: 2, oldest_observed_at: isoOffset(-1200),
+      invalid_time_count: 0, future_time_count: 0, invalid_attempt_count: 0 }],
+    staleLeaseRows: [{ recovery_cycle_seconds: 300, row_count: 1, oldest_observed_at: isoOffset(-900),
+      invalid_time_count: 0, future_time_count: 0 }],
+    staffLookupRows: [{ total_offer_count: 10, staff_lookup_count: 3, oldest_observed_at: isoOffset(-7200),
+      invalid_time_count: 0, future_time_count: 0 }],
+    discountPolicyRows: [{ row_count: 2, oldest_observed_at: isoOffset(-3600),
+      invalid_time_count: 0, future_time_count: 0 }],
     stateRows: [{ last_reconciliation_at: isoOffset(-300), overflow_count: 1 }],
   });
   const signals = await workerModule.__test.readConnectorSignals(baseEnvironment(new MockOpsDB(), signalSource), now);
   const byKey = new Map(signals.map((signal) => [signal.alertKey, signal]));
   assert.deepEqual([...byKey.keys()].sort(), [
-    "OUTBOX_DEAD", "OUTBOX_STALE", "RECONCILIATION_OVERFLOW", "WEBHOOK_REJECTED_CRITICAL",
-    "WEBHOOK_REJECTED_WARNING", "WEBHOOK_STALE",
+    "DELIVERY_RETRY_ATTEMPT_3", "DISCOUNT_POLICY_DISABLE_REQUIRED", "OUTBOX_DEAD", "OUTBOX_STALE",
+    "RECONCILIATION_OVERFLOW", "STAFF_LOOKUP_THRESHOLD", "STALE_LEASE_SURVIVED_RECOVERY",
+    "WEBHOOK_REJECTED_CRITICAL", "WEBHOOK_REJECTED_WARNING", "WEBHOOK_STALE",
   ]);
   assert.deepEqual([byKey.get("WEBHOOK_STALE").severity, byKey.get("WEBHOOK_STALE").count], ["CRITICAL", 2]);
   assert.deepEqual([byKey.get("OUTBOX_STALE").severity, byKey.get("OUTBOX_STALE").count], ["WARNING", 3]);
@@ -1380,11 +1624,61 @@ async function validateMonitorBehavior(workerModule) {
   const signalOps = new MockOpsDB();
   const result = await workerModule.__test.runMonitor(baseEnvironment(signalOps, signalSource), now, now);
   assert.deepEqual([result.runState, result.warningCount, result.criticalCount, result.observedSignalCount],
-    ["CRITICAL", 7, 6, 13]);
-  assert.equal(signalOps.incidents.length, 6);
+    ["CRITICAL", 10, 11, 21]);
+  assert.equal(signalOps.incidents.length, 10);
   assert.doesNotMatch(JSON.stringify(signalOps.executed), /private\.person|19185550100|ORDER-ABC123/,
     "Operations D1 writes must not contain raw connector errors or planted contact/order values");
   validateCapturedOpsStatements(signalOps.executed);
+
+  for (const [label, totalOfferCount, staffLookupCount, expected] of [
+    ["exact daily count", 3, 3, true],
+    ["rate above ten percent", 10, 2, true],
+    ["exactly ten percent", 10, 1, false],
+    ["rate without minimum denominator", 9, 2, false],
+    ["below both thresholds", 20, 2, false],
+  ]) {
+    const thresholdSource = new MockConnectorDB({
+      staffLookupRows: [{ total_offer_count: totalOfferCount, staff_lookup_count: staffLookupCount,
+        oldest_observed_at: staffLookupCount > 0 ? isoOffset(-60) : null,
+        invalid_time_count: 0, future_time_count: 0 }],
+    });
+    const thresholdSignals = await workerModule.__test.readConnectorSignals(
+      baseEnvironment(new MockOpsDB(), thresholdSource), now);
+    assert.equal(thresholdSignals.some((signal) => signal.alertKey === "STAFF_LOOKUP_THRESHOLD"), expected,
+      `Staff lookup ${label} boundary changed`);
+  }
+
+  for (const [count, expected] of [[1, false], [2, true]]) {
+    const discountSource = new MockConnectorDB({
+      discountPolicyRows: [{ row_count: count, oldest_observed_at: isoOffset(-60),
+        invalid_time_count: 0, future_time_count: 0 }],
+    });
+    const discountSignals = await workerModule.__test.readConnectorSignals(
+      baseEnvironment(new MockOpsDB(), discountSource), now);
+    assert.equal(discountSignals.some((signal) => signal.alertKey === "DISCOUNT_POLICY_DISABLE_REQUIRED"), expected,
+      `Discount-policy ${count}/24h boundary changed`);
+  }
+
+  const exactRetrySignals = await workerModule.__test.readConnectorSignals(baseEnvironment(new MockOpsDB(),
+    new MockConnectorDB({
+      retryAttemptRows: [{ attempt_threshold: 3, row_count: 1, oldest_observed_at: isoOffset(-60),
+        invalid_time_count: 0, future_time_count: 0, invalid_attempt_count: 0 }],
+    })), now);
+  assert.ok(exactRetrySignals.some((signal) => signal.alertKey === "DELIVERY_RETRY_ATTEMPT_3"),
+    "One nonterminal row at the exact third-attempt threshold must warn");
+  const staleCycleSignals = await workerModule.__test.readConnectorSignals(baseEnvironment(new MockOpsDB(),
+    new MockConnectorDB({
+      staleLeaseRows: [{ recovery_cycle_seconds: 300, row_count: 1, oldest_observed_at: isoOffset(-300),
+        invalid_time_count: 0, future_time_count: 0 }],
+    })), now);
+  assert.ok(staleCycleSignals.some((signal) => signal.alertKey === "STALE_LEASE_SURVIVED_RECOVERY"),
+    "A lease surviving the exact next five-minute recovery cycle must warn");
+
+  const ambiguousAggregateOps = new MockOpsDB();
+  const ambiguousAggregate = await workerModule.__test.runMonitor(baseEnvironment(ambiguousAggregateOps,
+    new MockConnectorDB({ retryAttemptRows: [] })), now, now);
+  assert.deepEqual([ambiguousAggregate.runState, ambiguousAggregate.sourceState], ["FAILED", "UNAVAILABLE"],
+    "A missing threshold aggregate must fail closed rather than resolve connector conditions");
 
   const outageOps = new MockOpsDB();
   outageOps.incidents.push({
@@ -1580,7 +1874,7 @@ async function validateQueueMonitorBehavior(workerModule) {
   });
   const baseEnvironment = (ops = new MockOpsDB(), connector = new MockConnectorDB(), extra = {}) => ({
     OPS_ENVIRONMENT: "sandbox",
-    OPS_SCHEMA_VERSION: "5",
+    OPS_SCHEMA_VERSION: "6",
     OPS_MONITORING_ENABLED: "true",
     OPS_QUEUE_MONITORING_ENABLED: "true",
     OPS_ALERTS_ENABLED: "false",
@@ -1895,7 +2189,7 @@ async function validateAppsScriptHealthMonitorBehavior(workerModule) {
   ];
   const baseEnvironment = (ops = new MockOpsDB(), connector = new MockConnectorDB(), extra = {}) => ({
     OPS_ENVIRONMENT: "sandbox",
-    OPS_SCHEMA_VERSION: "5",
+    OPS_SCHEMA_VERSION: "6",
     OPS_MONITORING_ENABLED: "true",
     OPS_QUEUE_MONITORING_ENABLED: "false",
     OPS_APPS_SCRIPT_MONITORING_ENABLED: "true",
@@ -2657,7 +2951,7 @@ function createAlertFixture({ ownerOutcomes = [], backupOutcomes = [], failSentF
   const db = new SqliteD1(databasePath, { failSentFinalizations, mutateCandidates, beforeClaimOnce });
   const env = {
     OPS_ENVIRONMENT: "sandbox",
-    OPS_SCHEMA_VERSION: "5",
+    OPS_SCHEMA_VERSION: "6",
     OPS_MONITORING_ENABLED: "true",
     OPS_ALERTS_ENABLED: "true",
     OPS_ALERT_DEDUPE_SECONDS: "3600",
@@ -2690,6 +2984,11 @@ function insertAlertIncident(databasePath, {
     APPS_HEALTH_UNAVAILABLE: "APPS_HEALTH_SOURCE_UNAVAILABLE",
     APPS_HEALTH_INTEGRITY_FAILURE: "APPS_HEALTH_AUTH_OR_CONTRACT_INVALID",
     APPS_CONFIGURATION_UNHEALTHY: "APPS_RUNTIME_CONFIGURATION_UNHEALTHY",
+    DELIVERY_RETRY_ATTEMPT_3: "DELIVERY_RETRY_ATTEMPT_THRESHOLD_REACHED",
+    STALE_LEASE_SURVIVED_RECOVERY: "PROCESSING_LEASE_SURVIVED_RECOVERY_CYCLE",
+    STAFF_LOOKUP_THRESHOLD: "STAFF_LOOKUP_RATE_OR_COUNT_ELEVATED",
+    DISCOUNT_POLICY_DISABLE_REQUIRED: "OFFER_PASS_DISABLE_REQUIRED",
+    ALERT_PATH_TEST: "MONTHLY_ALERT_PATH_TEST",
   }[alertKey];
   assert.ok(reasonCode, `Missing test reason for ${alertKey}`);
   const dedupeUntil = new Date(Date.parse(firstSeenAt) + 3600 * 1000).toISOString();
@@ -2728,6 +3027,108 @@ async function validateAlertBehavior(workerModule) {
   const base = new Date("2026-08-18T12:00:00.000Z");
   const at = (seconds) => new Date(base.getTime() + seconds * 1000);
 
+  const monthlyPlanner = createAlertFixture();
+  const monthlyFingerprint = "d".repeat(64);
+  let monthlyResult = await workerModule.__test.planMonthlyAlertPathTest(
+    monthlyPlanner.db, base.toISOString(), monthlyFingerprint, "sandbox");
+  assert.deepEqual(monthlyResult, { monthKey: "2026-08", planned: true, deliveryCount: 2 });
+  let monthlyRows = alertDeliveryRows(monthlyPlanner.databasePath, "delivery_kind='TEST'");
+  assert.equal(monthlyRows.length, 2, "The monthly planner must create exactly one role-isolated TEST pair");
+  assert.deepEqual(monthlyRows.map((row) => [row.target_role_code, row.channel_code]).sort(), [
+    ["BACKUP_OWNER", "BACKUP_OWNER_EMAIL"],
+    ["OWNER", "OWNER_EMAIL"],
+  ]);
+  assert.ok(monthlyRows.every((row) => row.alert_key === "ALERT_PATH_TEST" &&
+    row.reason_code === "MONTHLY_ALERT_PATH_TEST" && row.signal_count === 1 &&
+    row.delivery_state === "PENDING" && row.sender_fingerprint === monthlyFingerprint));
+  assert.deepEqual([monthlyPlanner.owner.calls.length, monthlyPlanner.backup.calls.length], [0, 0],
+    "Planning alone must perform zero email or network activity");
+  monthlyResult = await workerModule.__test.planMonthlyAlertPathTest(
+    monthlyPlanner.db, at(24 * 60 * 60).toISOString(), monthlyFingerprint, "sandbox");
+  assert.deepEqual(monthlyResult, { monthKey: "2026-08", planned: false, deliveryCount: 2 });
+  assert.equal(alertDeliveryRows(monthlyPlanner.databasePath, "delivery_kind='TEST'").length, 2,
+    "A second invocation in the same UTC month must not duplicate TEST evidence");
+  monthlyResult = await workerModule.__test.planMonthlyAlertPathTest(
+    monthlyPlanner.db, "2026-09-01T00:00:00.000Z", monthlyFingerprint, "sandbox");
+  assert.deepEqual(monthlyResult, { monthKey: "2026-09", planned: true, deliveryCount: 2 });
+  assert.equal(alertDeliveryRows(monthlyPlanner.databasePath, "delivery_kind='TEST'").length, 4,
+    "The next UTC month may plan exactly one new role-isolated TEST pair");
+
+  const ambiguousMonthlyPlanner = createAlertFixture();
+  insertAlertIncident(ambiguousMonthlyPlanner.databasePath, {
+    id: "unexpected-monthly-test", alertKey: "ALERT_PATH_TEST", state: "RESOLVED",
+    firstSeenAt: base.toISOString(), resolvedAt: base.toISOString(),
+  });
+  await assert.rejects(workerModule.__test.planMonthlyAlertPathTest(
+    ambiguousMonthlyPlanner.db, base.toISOString(), monthlyFingerprint, "sandbox"),
+  /OPS_ALERT_TEST_SOURCE_AMBIGUOUS/);
+  assert.equal(alertDeliveryRows(ambiguousMonthlyPlanner.databasePath).length, 0,
+    "Ambiguous monthly source evidence must fail before planning a delivery");
+
+  const flaggedMonthlyPath = createAlertFixture();
+  flaggedMonthlyPath.env.OPS_ALERT_PATH_TEST_ENABLED = "true";
+  await workerModule.__test.runAlertEngine(flaggedMonthlyPath.env, base);
+  assert.deepEqual([flaggedMonthlyPath.owner.calls.length, flaggedMonthlyPath.backup.calls.length], [1, 1],
+    "Only the separate monthly flag may plan and drain one TEST notice per role");
+  assert.ok([...flaggedMonthlyPath.owner.calls, ...flaggedMonthlyPath.backup.calls].every((message) =>
+    message.text.includes("Condition: ALERT_PATH_TEST") &&
+    message.text.includes("Reason: MONTHLY_ALERT_PATH_TEST") &&
+    !message.text.includes("alert-path-test-") && !message.text.includes(TEST_PRIVATE_EMAIL)));
+  await workerModule.__test.runAlertEngine(flaggedMonthlyPath.env, at(300));
+  assert.deepEqual([flaggedMonthlyPath.owner.calls.length, flaggedMonthlyPath.backup.calls.length], [1, 1],
+    "A successful monthly TEST must not be resent in the same UTC month");
+
+  const disabledPendingPath = createAlertFixture();
+  await workerModule.__test.planMonthlyAlertPathTest(
+    disabledPendingPath.db, base.toISOString(), monthlyFingerprint, "sandbox");
+  let disabledResult = await workerModule.__test.runAlertEngine(disabledPendingPath.env, base);
+  assert.deepEqual([disabledResult.candidateCount, disabledResult.claimedCount, disabledResult.sentCount], [0, 0, 0]);
+  assert.deepEqual([disabledPendingPath.owner.calls.length, disabledPendingPath.backup.calls.length], [0, 0]);
+  assert.ok(alertDeliveryRows(disabledPendingPath.databasePath, "delivery_kind='TEST'")
+    .every((row) => row.delivery_state === "PENDING"),
+  "Turning the separate TEST flag off before drain must leave its planned rows inert");
+
+  const disabledRetryPath = createAlertFixture();
+  await workerModule.__test.planMonthlyAlertPathTest(
+    disabledRetryPath.db, base.toISOString(), monthlyFingerprint, "sandbox");
+  sqlite(disabledRetryPath.databasePath, `
+    UPDATE alert_deliveries
+       SET delivery_state='RETRY', attempt_count=1,
+           last_error_code='ALERT_EMAIL_TRANSIENT_ERROR', attempted_at='${base.toISOString()}',
+           available_at='${base.toISOString()}', updated_at='${base.toISOString()}'
+     WHERE delivery_kind='TEST' AND target_role_code='OWNER';
+  `);
+  disabledResult = await workerModule.__test.runAlertEngine(disabledRetryPath.env, base);
+  assert.deepEqual([disabledResult.candidateCount, disabledResult.claimedCount, disabledResult.sentCount], [0, 0, 0]);
+  assert.deepEqual([disabledRetryPath.owner.calls.length, disabledRetryPath.backup.calls.length], [0, 0]);
+  assert.equal(alertDeliveryRows(disabledRetryPath.databasePath,
+    "delivery_kind='TEST' AND target_role_code='OWNER'")[0].delivery_state, "RETRY",
+  "A disabled TEST retry must remain inert while ordinary alert draining stays enabled");
+
+  const disabledExpiredLeasePath = createAlertFixture();
+  await workerModule.__test.planMonthlyAlertPathTest(
+    disabledExpiredLeasePath.db, base.toISOString(), monthlyFingerprint, "sandbox");
+  sqlite(disabledExpiredLeasePath.databasePath, `
+    UPDATE alert_deliveries
+       SET delivery_state='ATTEMPTING', attempt_count=1, last_error_code=NULL,
+           lease_token='expiredtestlease1234', lease_expires_at='${at(-1).toISOString()}',
+           attempted_at='${at(-300).toISOString()}', updated_at='${at(-300).toISOString()}'
+     WHERE delivery_kind='TEST' AND target_role_code='OWNER';
+  `);
+  await assert.rejects(workerModule.__test.runAlertEngine(disabledExpiredLeasePath.env, base),
+    /OPS_ALERT_DELIVERY_INCOMPLETE/,
+  "Expired TEST lease evidence must be recovered without bypassing the disabled action-time gate");
+  assert.deepEqual([disabledExpiredLeasePath.owner.calls.length, disabledExpiredLeasePath.backup.calls.length], [0, 0]);
+  const disabledExpiredRows = alertDeliveryRows(disabledExpiredLeasePath.databasePath, "delivery_kind='TEST'");
+  assert.equal(disabledExpiredRows.find((row) => row.target_role_code === "OWNER").delivery_state, "RETRY");
+  assert.equal(disabledExpiredRows.find((row) => row.target_role_code === "OWNER").last_error_code,
+    "ALERT_DELIVERY_LEASE_EXPIRED");
+  assert.equal(disabledExpiredRows.find((row) => row.target_role_code === "BACKUP_OWNER").delivery_state, "PENDING");
+  disabledResult = await workerModule.__test.runAlertEngine(disabledExpiredLeasePath.env, at(60));
+  assert.deepEqual([disabledResult.candidateCount, disabledResult.claimedCount, disabledResult.sentCount], [0, 0, 0]);
+  assert.deepEqual([disabledExpiredLeasePath.owner.calls.length, disabledExpiredLeasePath.backup.calls.length], [0, 0],
+    "A recovered TEST lease must remain unsent on later disabled invocations");
+
   let poisonPrepareCalls = 0;
   const poisonDb = { prepare() { poisonPrepareCalls += 1; throw new Error("POISON_DB_TOUCHED"); } };
   await assert.rejects(workerModule.__test.runAlertEngine({
@@ -2739,7 +3140,7 @@ async function validateAlertBehavior(workerModule) {
   await assert.rejects(workerModule.__test.runAlertEngine({
     OPS_DB: poisonDb,
     OPS_ENVIRONMENT: "sandbox",
-    OPS_SCHEMA_VERSION: "5",
+    OPS_SCHEMA_VERSION: "6",
     OPS_ALERT_FROM_EMAIL: TEST_ALERT_FROM,
   }, base), /OPS_ALERT_BINDING_NOT_CONFIGURED/);
   assert.equal(poisonPrepareCalls, 0, "Missing email bindings must fail before a D1 operation");
@@ -2747,7 +3148,7 @@ async function validateAlertBehavior(workerModule) {
   await assert.rejects(workerModule.__test.runAlertEngine({
     OPS_DB: poisonDb,
     OPS_ENVIRONMENT: "sandbox",
-    OPS_SCHEMA_VERSION: "5",
+    OPS_SCHEMA_VERSION: "6",
     OPS_ALERT_FROM_EMAIL: TEST_ALERT_FROM,
     OPS_OWNER_EMAIL: sharedBinding,
     OPS_BACKUP_OWNER_EMAIL: sharedBinding,
@@ -2756,7 +3157,7 @@ async function validateAlertBehavior(workerModule) {
   await assert.rejects(workerModule.__test.runAlertEngine({
     OPS_DB: poisonDb,
     OPS_ENVIRONMENT: "unknown",
-    OPS_SCHEMA_VERSION: "5",
+    OPS_SCHEMA_VERSION: "6",
   }, base), /OPS_ENVIRONMENT_INVALID/);
   assert.equal(poisonPrepareCalls, 0, "An invalid alert environment must fail before D1 is touched");
 
@@ -3228,7 +3629,7 @@ function validateCapturedOpsStatements(executed) {
   }
   assert.equal(sqlite(databasePath, "SELECT COUNT(*) FROM monitor_runs;").trim(), "1",
     "Captured monitor SQL must write one run against the real operations schema");
-  assert.equal(sqlite(databasePath, "SELECT COUNT(*) FROM alert_incidents WHERE incident_state='OPEN';").trim(), "6",
+  assert.equal(sqlite(databasePath, "SELECT COUNT(*) FROM alert_incidents WHERE incident_state='OPEN';").trim(), "10",
     "Captured incident SQL must write each fixed signal against the real operations schema");
   assert.equal(sqlite(databasePath, "PRAGMA integrity_check;").trim(), "ok");
   assert.equal(sqlite(databasePath, "PRAGMA foreign_key_check;").trim(), "");
@@ -3273,6 +3674,7 @@ function applyOpsMigrations(databasePath) {
     "square-ops/migrations/0003_queue_monitoring_alerts.sql",
     "square-ops/migrations/0004_apps_script_health_alerts.sql",
     "square-ops/migrations/0005_provider_monitoring_alerts.sql",
+    "square-ops/migrations/0006_connector_control_alerts.sql",
   ]) {
     applyOpsMigrationAtomically(databasePath, migrationPath);
   }
@@ -3329,6 +3731,7 @@ try {
   validateAlertMigrationUpgrade();
   validateQueueAlertMigrationUpgrade();
   validateAppsHealthAlertMigrationUpgrade();
+  validateConnectorControlAlertMigrationUpgrade();
   await validateSourceContract();
   await validateWorkerBoundary();
   validateDryRuns();

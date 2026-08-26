@@ -125,6 +125,17 @@ class SourceStatement {
     }
     const results = this.operation === "ops_source_connector_state"
       ? [{}]
+      : this.operation === "ops_source_retry_attempt_three"
+        ? [{ attempt_threshold: 3, row_count: 0, oldest_observed_at: null, invalid_time_count: 0,
+            future_time_count: 0, invalid_attempt_count: 0 }]
+      : this.operation === "ops_source_stale_lease_survivors"
+        ? [{ recovery_cycle_seconds: 300, row_count: 0, oldest_observed_at: null,
+            invalid_time_count: 0, future_time_count: 0 }]
+      : this.operation === "ops_source_staff_lookup_threshold"
+        ? [{ total_offer_count: 0, staff_lookup_count: 0, oldest_observed_at: null,
+            invalid_time_count: 0, future_time_count: 0 }]
+      : this.operation === "ops_source_discount_policy_rejections"
+        ? [{ row_count: 0, oldest_observed_at: null, invalid_time_count: 0, future_time_count: 0 }]
       : this.operation === "ops_source_provider_outcomes"
         ? this.database.providerRows.length > 0
           ? this.database.providerRows
@@ -215,7 +226,7 @@ function appsEnvironment(database, overrides = {}) {
 function operationsEnvironment(opsDatabase, connectorDatabase, overrides = {}) {
   return {
     OPS_ENVIRONMENT: "sandbox",
-    OPS_SCHEMA_VERSION: "5",
+    OPS_SCHEMA_VERSION: "6",
     OPS_MONITORING_ENABLED: "true",
     OPS_PROVIDER_MONITORING_ENABLED: "true",
     OPS_EXPECT_RECONCILIATION: "false",
@@ -564,7 +575,7 @@ async function validateOperationsSource(connectorDatabasePath) {
   const exactCutoff = new Date(now.getTime() - 15 * 60 * 1000).toISOString();
   const justInside = new Date(now.getTime() - 15 * 60 * 1000 + 1).toISOString();
   const database = new SqliteReadDatabase(connectorDatabasePath);
-  const environment = { OPS_SCHEMA_VERSION: "5", CONNECTOR_DB: database };
+  const environment = { OPS_SCHEMA_VERSION: "6", CONNECTOR_DB: database };
 
   sqlite(connectorDatabasePath, "DELETE FROM square_provider_outcomes;");
   sqlite(connectorDatabasePath, "DELETE FROM square_provider_outcome_source;");
@@ -688,7 +699,7 @@ async function validateOperationsSource(connectorDatabasePath) {
     "An aged 401/403 incident must never auto-resolve when its rolling-window row expires");
 
   const unavailable = await operationsTest.readProviderSignals({
-    OPS_SCHEMA_VERSION: "5",
+    OPS_SCHEMA_VERSION: "6",
     CONNECTOR_DB: { prepare() { throw new Error("private source failure"); } },
   }, now);
   assert.deepEqual(unavailable.resolvableKeys, [],
@@ -740,7 +751,7 @@ async function validateOperationsSource(connectorDatabasePath) {
     }],
   });
   const fencedResult = await operationsTest.readProviderSignals({
-    OPS_SCHEMA_VERSION: "5",
+    OPS_SCHEMA_VERSION: "6",
     CONNECTOR_DB: fencedSource,
   }, now);
   assert.equal(fencedResult.sourceState, "UNAVAILABLE",
@@ -830,7 +841,7 @@ function validateMigrations() {
   }
   for (const configPath of ["square-ops/wrangler.toml", "square-ops/wrangler.sandbox.toml"]) {
     const config = read(configPath);
-    assert.match(config, /^OPS_SCHEMA_VERSION = "5"$/m);
+    assert.match(config, /^OPS_SCHEMA_VERSION = "6"$/m);
     assert.match(config, /^OPS_PROVIDER_MONITORING_ENABLED = "false"$/m,
       `${configPath} must keep provider monitoring default-off`);
   }
@@ -915,7 +926,10 @@ function validateMigrations() {
   `);
   const retainedBefore = sqlite(operationsDatabasePath,
     "SELECT * FROM alert_deliveries WHERE alert_delivery_id='retained-v4-delivery';");
-  applyMigrations(operationsDatabasePath, ["square-ops/migrations/0005_provider_monitoring_alerts.sql"]);
+  applyMigrations(operationsDatabasePath, [
+    "square-ops/migrations/0005_provider_monitoring_alerts.sql",
+    "square-ops/migrations/0006_connector_control_alerts.sql",
+  ]);
   const retainedAfter = sqlite(operationsDatabasePath,
     "SELECT * FROM alert_deliveries WHERE alert_delivery_id='retained-v4-delivery';");
   assert.equal(retainedAfter, retainedBefore,

@@ -288,12 +288,12 @@ const REQUIRED_ROLLOUT_CONTRACTS = Object.freeze([
   /The proposed recovery design uses Workers Paid/,
   /Its proposed storage lane exports D1 privately to R2 nightly with a 90-day lifecycle/,
   /R2 enablement, bucket\/account custody, lifecycle application and recurring export authority are \*\*not approved\*\* and remain unimplemented\./,
-  /The current one-case sandbox decision record requires these lanes to remain unchanged; a separate operations owner decision must approve them before implementation\./,
+  /The current one-case sandbox decision record requires these lanes to remain unchanged; a completed private copy of the default-NO-GO .*PROJECT-2-OPERATIONS-ACTIVATION-DECISION-RECORD\.md.* must select and approve exactly one operations lane before implementation or live acceptance\./,
 ]);
 const REQUIRED_F02_GOVERNANCE_CONTRACTS = Object.freeze({
   faultHooks: Object.freeze([
     /previously reviewed default-off controller build is deployed only as the current all-off sandbox baseline/,
-    /newer F-02 and P-02 observer repairs in this draft are not deployed/,
+    /newer F-02 and P-02 observer repairs in the reviewed repository source are not deployed/,
     /F02_ZERO_REQUEST_SAFE_STOP_CLOSURE_CONFIRMED/,
     /HTTP `000` and requests `0`/,
     /before candidate traffic or any request/,
@@ -421,7 +421,7 @@ const REQUIRED_F02_GOVERNANCE_CONTRACTS = Object.freeze({
   acceptance: Object.freeze([
     /F-02 coordinator instead pins the reviewed public sandbox origin in code, never prints it/,
     /one-time baseline migration deployed the then-reviewed default-off controller build only as the current all-off sandbox baseline/,
-    /newer F-02 and P-02 observer repairs in this draft are reviewed code only and are not deployed/,
+    /newer F-02 and P-02 observer repairs in the reviewed repository source are code-only and are not deployed/,
     /No live-case candidate, control profile, canary or temporary control is active or armed/,
     /F02_ZERO_REQUEST_SAFE_STOP_CLOSURE_CONFIRMED/,
     /HTTP `000`/,
@@ -537,7 +537,7 @@ const REQUIRED_F02_GOVERNANCE_CONTRACTS = Object.freeze({
     /entire PTY process group and temporary state/,
     /signals both the top-level validator/,
     /nested terminal parent/,
-    /runs all 26 local validators/,
+    /runs all 29 local validators/,
     /bounded POSIX process-group and request-cancellation boundary/,
     /per-action exact-`0600` lock file containing only a nonsecret `MAIN:<pid>:ACTION:<128-bit nonce>` marker/,
     /<OS-account-home>\/Library\/Application Support\/com\.spartan\.project2\.f02\/namespace-operation-locks-v2/,
@@ -1422,7 +1422,7 @@ function assertUnsafeF02GovernanceMutationsFail(
     }],
     ["F02_ROOT_README_GOVERNANCE_CONTRACT_MISSING", {
       faultHooks, acceptance, ownerGuide,
-      rootReadme: rootReadme.replace("runs all 26 local validators", "runs the local validators"),
+      rootReadme: rootReadme.replace("runs all 29 local validators", "runs the local validators"),
       squareWorkerReadme,
     }],
     ["F02_ROOT_README_GOVERNANCE_CONTRACT_MISSING", {

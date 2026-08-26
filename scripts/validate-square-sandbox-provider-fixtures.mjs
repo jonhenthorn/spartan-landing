@@ -8,6 +8,7 @@ import {
   PROVIDER_FIXTURE_ACK,
   PROVIDER_FIXTURE_BOUNDARIES,
   PROVIDER_FIXTURE_CASES,
+  PROVIDER_FIXTURE_EXACT_OUTCOMES,
   PROVIDER_FIXTURE_RESERVED_F03,
   PROVIDER_READ_ONLY_ACK,
   PROVIDER_READ_ONLY_CASES,
@@ -601,6 +602,10 @@ async function runCase(caseName, mock = makeMock(), runKey = RUN_KEY, token = TO
 const source = fs.readFileSync(new URL("prepare-square-sandbox-provider-fixtures.mjs", import.meta.url), "utf8");
 assert.deepEqual([...PROVIDER_FIXTURE_CASES].sort(), [...EXPECTED_CASES].sort());
 assert.deepEqual([...PROVIDER_READ_ONLY_CASES].sort(), [...READ_ONLY_CASES].sort());
+assert.deepEqual(Object.keys(PROVIDER_FIXTURE_EXACT_OUTCOMES).sort(),
+  [...EXPECTED_CASES, ...READ_ONLY_CASES].sort());
+assert.equal(Object.isFrozen(PROVIDER_FIXTURE_EXACT_OUTCOMES), true);
+assert.equal(Object.values(PROVIDER_FIXTURE_EXACT_OUTCOMES).every(Object.isFrozen), true);
 assert.match(source, /https:\/\/connect\.squareupsandbox\.com/);
 assert.match(source, /https:\/\/provider-fixture\.invalid/);
 assert.doesNotMatch(source, /https:\/\/connect\.squareup\.com/);
@@ -708,19 +713,14 @@ assert.equal(rejectedPrompts, 0);
 assert.equal(rejectedFetches, 0);
 assert.match(rejectedOutput[0], /STATUS=FAILED CASE=F-03 RESULT=INPUT_REJECTED REQUESTS=0 MUTATION_REQUESTS=0/);
 
-const expected = new Map([
-  ["F-03", "F03_CUSTOMERS_READY"],
-  ["O-01", "O01_TRANSACTION_READY"],
-  ["P-02", "P02_TRANSACTION_READY"],
-  ["Q-01", "UNLINKED_PAYMENT_READY"],
-  ["Q-02", "UNLINKED_PAYMENT_READY"],
-]);
-for (const [caseName, expectedResult] of expected) {
+for (const caseName of EXPECTED_CASES) {
+  const expected = PROVIDER_FIXTURE_EXACT_OUTCOMES[caseName];
   const run = await runCase(caseName);
   assert.equal(run.result.status, "COMPLETE", `${caseName} must complete against mocked Square transport`);
-  assert.equal(run.result.result, expectedResult);
-  assert.ok(run.result.requests > 0 && run.result.requests <= 16);
-  assert.ok(run.result.mutationRequests >= 2 && run.result.mutationRequests <= 3);
+  assert.equal(run.result.result, expected.result, `${caseName} exact result`);
+  assert.equal(run.result.requests, expected.requests, `${caseName} exact request count`);
+  assert.equal(run.result.mutationRequests, expected.mutationRequests,
+    `${caseName} exact mutation count`);
   assert.equal(run.checkpoints.at(-1).status, "READY");
   assert.ok(run.mock.calls.every((call) =>
     call.url.startsWith(`${MOCK_VALIDATION_ORIGIN}/v2/`) ||
@@ -779,7 +779,7 @@ for (const [caseName, expectedResult] of expected) {
   };
   const repeated = await runCase(caseName, run.mock, RUN_KEY);
   assert.equal(repeated.result.status, "COMPLETE");
-  assert.equal(repeated.result.result, expectedResult);
+  assert.equal(repeated.result.result, expected.result);
   assert.deepEqual({
     customers: run.mock.customers.size,
     orders: run.mock.orders.size,
@@ -1352,12 +1352,13 @@ try {
   })).directory;
 
   for (const caseName of ["F-04", "P-01"]) {
+    const expected = PROVIDER_FIXTURE_EXACT_OUTCOMES[caseName];
     const run = await runReadOnlyCase(caseName);
     assert.equal(run.result.status, "COMPLETE");
-    assert.equal(run.result.result, caseName === "F-04"
-      ? "F04_NEW_CUSTOMER_SLOT_CLEAR" : "P01_NEW_CUSTOMER_SLOT_CLEAR");
-    assert.equal(run.result.requests, 5);
-    assert.equal(run.result.mutationRequests, 0);
+    assert.equal(run.result.result, expected.result, `${caseName} exact result`);
+    assert.equal(run.result.requests, expected.requests, `${caseName} exact request count`);
+    assert.equal(run.result.mutationRequests, expected.mutationRequests,
+      `${caseName} exact mutation count`);
     assert.equal(run.mock.writeRequests, 0);
     assert.deepEqual(run.mock.calls.map(({ method, path: pathName }) => `${method} ${pathName}`), [
       "POST /oauth2/token/status",
@@ -1433,10 +1434,11 @@ try {
       return inspectWebhookFixturePackage(candidate);
     },
   });
+  const expectedReplay = PROVIDER_FIXTURE_EXACT_OUTCOMES["REPLAY-4XX"];
   assert.equal(replay.result.status, "COMPLETE");
-  assert.equal(replay.result.result, "REPLAY_PERMANENT_SQUARE_REJECTION_READY");
-  assert.equal(replay.result.requests, 4);
-  assert.equal(replay.result.mutationRequests, 0);
+  assert.equal(replay.result.result, expectedReplay.result);
+  assert.equal(replay.result.requests, expectedReplay.requests);
+  assert.equal(replay.result.mutationRequests, expectedReplay.mutationRequests);
   assert.equal(replayMock.writeRequests, 0);
   assert.equal(replayInspections, 3);
   assert.deepEqual(replayMock.calls.map(({ method, path: pathName }) => `${method} ${pathName}`), [
