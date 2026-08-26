@@ -243,7 +243,7 @@ export async function executeFilteredFormSandboxCase({
   let identity;
   try {
     identity = await opsTest.fetchAppsScriptHealth({
-      OPS_SCHEMA_VERSION: "5",
+      OPS_SCHEMA_VERSION: "6",
       OPS_ENVIRONMENT: "sandbox",
       OPS_APPS_SOURCE_ENVIRONMENT: "sandbox",
       OPS_APPS_SCRIPT_HEALTH_URL: targetUrl,

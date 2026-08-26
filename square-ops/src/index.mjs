@@ -4,6 +4,7 @@ export const OPS_FLAG_NAMES = Object.freeze([
   "OPS_QUEUE_MONITORING_ENABLED",
   "OPS_APPS_SCRIPT_MONITORING_ENABLED",
   "OPS_ALERTS_ENABLED",
+  "OPS_ALERT_PATH_TEST_ENABLED",
   "OPS_BACKUPS_ENABLED",
   "OPS_RESTORE_TESTS_ENABLED",
 ]);
@@ -14,6 +15,17 @@ const CRITICAL_REJECTION_CODES = Object.freeze([
   "TARGET_DISCOUNT_UNLINKED_CUSTOMER",
 ]);
 const CRITICAL_REJECTION_SQL = CRITICAL_REJECTION_CODES.map((code) => `'${code}'`).join(", ");
+const DISCOUNT_POLICY_REJECTION_CODES = Object.freeze([
+  "ORDER_DISCOUNT_NOT_EXACT",
+  "ORDER_DISCOUNT_STACKING_NOT_ALLOWED",
+  "ORDER_DISCOUNT_CONFIGURATION_MISMATCH",
+  "QUALIFYING_CATALOG_NOT_CONFIGURED",
+  "ORDER_DISCOUNT_APPLICATION_COUNT_INVALID",
+  "ORDER_ITEM_NOT_QUALIFYING",
+  "ORDER_ITEM_QUANTITY_NOT_ONE",
+  "ORDER_DISCOUNT_AMOUNT_INVALID",
+]);
+const DISCOUNT_POLICY_REJECTION_SQL = DISCOUNT_POLICY_REJECTION_CODES.map((code) => `'${code}'`).join(", ");
 
 export const CONNECTOR_SOURCE_QUERIES = Object.freeze({
   webhookNonterminal: `/*op:ops_source_webhook_nonterminal*/
@@ -51,11 +63,109 @@ export const CONNECTOR_SOURCE_QUERIES = Object.freeze({
   rejectedRecent: `/*op:ops_source_rejected_recent*/
     SELECT CASE WHEN last_error_code IN (${CRITICAL_REJECTION_SQL}) THEN 'CRITICAL' ELSE 'WARNING' END AS rejection_class,
            COUNT(*) AS row_count,
-           SUM(CASE WHEN strftime('%s', updated_at) IS NULL THEN 1 ELSE 0 END) AS invalid_time_count
+           SUM(CASE WHEN strftime('%s', updated_at) IS NULL THEN 1 ELSE 0 END) AS invalid_time_count,
+           SUM(CASE WHEN updated_at > ?2 THEN 1 ELSE 0 END) AS future_time_count
       FROM webhook_events
      WHERE state = 'REJECTED'
-       AND (updated_at >= ?1 OR strftime('%s', updated_at) IS NULL)
+       AND (updated_at > ?1 OR strftime('%s', updated_at) IS NULL OR updated_at > ?2)
      GROUP BY rejection_class`,
+  retryAttemptThree: `/*op:ops_source_retry_attempt_three*/
+    WITH nonterminal AS (
+      SELECT attempts, updated_at
+        FROM webhook_events
+       WHERE state IN ('PENDING', 'ENQUEUED', 'PROCESSING', 'RETRY')
+      UNION ALL
+      SELECT attempts, updated_at
+        FROM square_outbox
+       WHERE state IN ('PENDING', 'PROCESSING', 'RETRY')
+    )
+    SELECT 3 AS attempt_threshold,
+           SUM(CASE WHEN attempts >= 3 THEN 1 ELSE 0 END) AS row_count,
+           MIN(CASE WHEN attempts >= 3 THEN updated_at END) AS oldest_observed_at,
+           SUM(CASE
+                 WHEN strftime('%Y-%m-%dT%H:%M:%fZ', updated_at) IS NULL
+                   OR strftime('%Y-%m-%dT%H:%M:%fZ', updated_at) <> updated_at THEN 1
+                 ELSE 0
+               END) AS invalid_time_count,
+           SUM(CASE WHEN julianday(updated_at) > julianday(?1) THEN 1 ELSE 0 END) AS future_time_count,
+           SUM(CASE WHEN typeof(attempts) <> 'integer' OR attempts < 0 THEN 1 ELSE 0 END)
+             AS invalid_attempt_count
+      FROM nonterminal`,
+  staleLeaseSurvivors: `/*op:ops_source_stale_lease_survivors*/
+    WITH processing AS (
+      SELECT updated_at, COALESCE(lease_expires_at, updated_at) AS effective_lease_at
+        FROM webhook_events
+       WHERE state = 'PROCESSING'
+      UNION ALL
+      SELECT updated_at, COALESCE(lease_expires_at, updated_at) AS effective_lease_at
+        FROM square_outbox
+       WHERE state = 'PROCESSING'
+    )
+    SELECT 300 AS recovery_cycle_seconds,
+           SUM(CASE
+                 WHEN strftime('%s', effective_lease_at) IS NOT NULL
+                   AND julianday(effective_lease_at) <= julianday(?1) THEN 1
+                 ELSE 0
+               END) AS row_count,
+           MIN(CASE
+                 WHEN strftime('%s', effective_lease_at) IS NOT NULL
+                   AND julianday(effective_lease_at) <= julianday(?1)
+                 THEN effective_lease_at
+               END) AS oldest_observed_at,
+           SUM(CASE
+                 WHEN strftime('%Y-%m-%dT%H:%M:%fZ', effective_lease_at) IS NULL
+                   OR strftime('%Y-%m-%dT%H:%M:%fZ', effective_lease_at) <> effective_lease_at
+                   OR strftime('%Y-%m-%dT%H:%M:%fZ', updated_at) IS NULL
+                   OR strftime('%Y-%m-%dT%H:%M:%fZ', updated_at) <> updated_at THEN 1
+                 ELSE 0
+               END) AS invalid_time_count,
+           SUM(CASE WHEN julianday(updated_at) > julianday(?2) THEN 1 ELSE 0 END) AS future_time_count
+      FROM processing`,
+  staffLookupThreshold: `/*op:ops_source_staff_lookup_threshold*/
+    SELECT SUM(CASE
+                 WHEN julianday(created_at) >= julianday(?1) AND julianday(created_at) <= julianday(?2) THEN 1
+                 ELSE 0
+               END) AS total_offer_count,
+           SUM(CASE
+                 WHEN status = 'STAFF_LOOKUP_REQUIRED'
+                   AND julianday(created_at) >= julianday(?1) AND julianday(created_at) <= julianday(?2) THEN 1
+                 ELSE 0
+               END) AS staff_lookup_count,
+           MIN(CASE
+                 WHEN status = 'STAFF_LOOKUP_REQUIRED'
+                   AND julianday(created_at) >= julianday(?1) AND julianday(created_at) <= julianday(?2)
+                 THEN created_at
+               END) AS oldest_observed_at,
+           SUM(CASE
+                 WHEN strftime('%Y-%m-%dT%H:%M:%fZ', created_at) IS NULL
+                   OR strftime('%Y-%m-%dT%H:%M:%fZ', created_at) <> created_at
+                   OR strftime('%Y-%m-%dT%H:%M:%fZ', updated_at) IS NULL
+                   OR strftime('%Y-%m-%dT%H:%M:%fZ', updated_at) <> updated_at THEN 1
+                 ELSE 0
+               END) AS invalid_time_count,
+           SUM(CASE
+                 WHEN julianday(created_at) > julianday(?2) OR julianday(updated_at) > julianday(?2) THEN 1
+                 ELSE 0
+               END) AS future_time_count
+      FROM offer_claims`,
+  discountPolicyRejections: `/*op:ops_source_discount_policy_rejections*/
+    SELECT SUM(CASE
+                 WHEN julianday(updated_at) > julianday(?1) AND julianday(updated_at) <= julianday(?2) THEN 1
+                 ELSE 0
+               END) AS row_count,
+           MIN(CASE
+                 WHEN julianday(updated_at) > julianday(?1) AND julianday(updated_at) <= julianday(?2)
+                 THEN updated_at
+               END) AS oldest_observed_at,
+           SUM(CASE
+                 WHEN strftime('%Y-%m-%dT%H:%M:%fZ', updated_at) IS NULL
+                   OR strftime('%Y-%m-%dT%H:%M:%fZ', updated_at) <> updated_at THEN 1
+                 ELSE 0
+               END) AS invalid_time_count,
+           SUM(CASE WHEN julianday(updated_at) > julianday(?2) THEN 1 ELSE 0 END) AS future_time_count
+      FROM webhook_events
+     WHERE state = 'REJECTED'
+       AND last_error_code IN (${DISCOUNT_POLICY_REJECTION_SQL})`,
   connectorState: `/*op:ops_source_connector_state*/
     SELECT MAX(CASE WHEN state_key = 'last_reconciliation' THEN updated_at END) AS last_reconciliation_at,
            SUM(CASE
@@ -114,6 +224,12 @@ const DEFAULT_WARNING_AGE_SECONDS = 600;
 const DEFAULT_CRITICAL_AGE_SECONDS = 1800;
 const DEFAULT_RECONCILIATION_MAX_AGE_SECONDS = 1800;
 const DEFAULT_REJECTION_LOOKBACK_HOURS = 24;
+const DELIVERY_RETRY_ATTEMPT_THRESHOLD = 3;
+const RECOVERY_CYCLE_SECONDS = 5 * 60;
+const STAFF_LOOKUP_DAILY_COUNT_THRESHOLD = 3;
+const STAFF_LOOKUP_MINIMUM_RATE_DENOMINATOR = 10;
+const STAFF_LOOKUP_RATE_MULTIPLIER = 10;
+const DISCOUNT_POLICY_REJECTION_THRESHOLD = 2;
 const PROVIDER_OUTCOME_LOOKBACK_SECONDS = 15 * 60;
 const PROVIDER_OUTCOME_HEARTBEAT_MAX_AGE_SECONDS = 10 * 60;
 const PROVIDER_RATE_WARNING_COUNT = 3;
@@ -221,7 +337,7 @@ const APPS_HEALTH_ALLOWED_STATES = Object.freeze({
   owner_notification_state: Object.freeze(["READY", "DISABLED", "MISCONFIGURED", "NOT_CHECKED"]),
   square_journey_state: Object.freeze(["READY", "DISABLED", "MISCONFIGURED", "NOT_CHECKED"]),
 });
-const ALERT_SCHEMA_VERSION = "5";
+const ALERT_SCHEMA_VERSION = "6";
 const ALERT_MESSAGE_VERSION = "OPS_ALERT_V1";
 const ALERT_MAX_ATTEMPTS = 3;
 const ALERT_LEASE_SECONDS = 240;
@@ -264,6 +380,10 @@ const CONNECTOR_ALERT_KEYS = Object.freeze([
   "OUTBOX_DEAD",
   "WEBHOOK_REJECTED_CRITICAL",
   "WEBHOOK_REJECTED_WARNING",
+  "DELIVERY_RETRY_ATTEMPT_3",
+  "STALE_LEASE_SURVIVED_RECOVERY",
+  "STAFF_LOOKUP_THRESHOLD",
+  "DISCOUNT_POLICY_DISABLE_REQUIRED",
   "RECONCILIATION_OVERFLOW",
   "RECONCILIATION_STALE",
 ]);
@@ -291,6 +411,7 @@ const FIXED_ALERT_KEYS = Object.freeze([
   ...QUEUE_SOURCE_ALERT_KEYS,
   ...APPS_SCRIPT_ALERT_KEYS,
   ...PROVIDER_ALERT_KEYS,
+  "ALERT_PATH_TEST",
 ]);
 const ALERT_REASON_BY_KEY = Object.freeze({
   SOURCE_UNAVAILABLE: "CONNECTOR_SIGNAL_SOURCE_UNAVAILABLE",
@@ -299,6 +420,10 @@ const ALERT_REASON_BY_KEY = Object.freeze({
   OUTBOX_DEAD: "OUTBOX_DELIVERY_DEAD",
   WEBHOOK_REJECTED_CRITICAL: "DISCOUNT_OR_CUSTOMER_POLICY_REJECTED",
   WEBHOOK_REJECTED_WARNING: "WEBHOOK_POLICY_REJECTED",
+  DELIVERY_RETRY_ATTEMPT_3: "DELIVERY_RETRY_ATTEMPT_THRESHOLD_REACHED",
+  STALE_LEASE_SURVIVED_RECOVERY: "PROCESSING_LEASE_SURVIVED_RECOVERY_CYCLE",
+  STAFF_LOOKUP_THRESHOLD: "STAFF_LOOKUP_RATE_OR_COUNT_ELEVATED",
+  DISCOUNT_POLICY_DISABLE_REQUIRED: "OFFER_PASS_DISABLE_REQUIRED",
   RECONCILIATION_OVERFLOW: "RECONCILIATION_PAGE_LIMIT",
   RECONCILIATION_STALE: "RECONCILIATION_HEARTBEAT_STALE",
   QUEUE_METRICS_UNAVAILABLE: "QUEUE_METRICS_SOURCE_UNAVAILABLE",
@@ -320,7 +445,7 @@ export default {
 
     const unsupported = enabledFlags.filter((flagName) =>
       !new Set(["OPS_MONITORING_ENABLED", "OPS_PROVIDER_MONITORING_ENABLED", "OPS_QUEUE_MONITORING_ENABLED",
-        "OPS_APPS_SCRIPT_MONITORING_ENABLED", "OPS_ALERTS_ENABLED"])
+        "OPS_APPS_SCRIPT_MONITORING_ENABLED", "OPS_ALERTS_ENABLED", "OPS_ALERT_PATH_TEST_ENABLED"])
         .has(flagName));
     if (unsupported.length > 0) throw new Error("SQUARE_OPS_SCAFFOLD_NOT_ACTIVATION_READY");
 
@@ -330,6 +455,7 @@ export default {
     const queueMonitoringEnabled = flag(env?.OPS_QUEUE_MONITORING_ENABLED);
     const appsScriptMonitoringEnabled = flag(env?.OPS_APPS_SCRIPT_MONITORING_ENABLED);
     const alertsEnabled = flag(env?.OPS_ALERTS_ENABLED);
+    const alertPathTestEnabled = flag(env?.OPS_ALERT_PATH_TEST_ENABLED);
     if (queueMonitoringEnabled && !monitoringEnabled) throw new Error("OPS_QUEUE_MONITORING_REQUIRES_MONITORING");
     if (providerMonitoringEnabled && !monitoringEnabled) {
       throw new Error("OPS_PROVIDER_MONITORING_REQUIRES_MONITORING");
@@ -338,6 +464,7 @@ export default {
       throw new Error("OPS_APPS_SCRIPT_MONITORING_REQUIRES_MONITORING");
     }
     if (alertsEnabled && !monitoringEnabled) throw new Error("OPS_ALERTS_REQUIRE_MONITORING");
+    if (alertPathTestEnabled && !alertsEnabled) throw new Error("OPS_ALERT_PATH_TEST_REQUIRES_ALERTS");
     const alertConfig = alertsEnabled ? await validateAlertConfiguration(env) : null;
     const scheduledAt = finiteDate(controller?.scheduledTime) || new Date();
     if (monitoringEnabled) await runMonitor(env, scheduledAt, new Date());
@@ -502,11 +629,15 @@ async function runAlertEngine(env, observedAt = new Date(), providedConfig = nul
   const alertDedupeSeconds = clampInt(env.OPS_ALERT_DEDUPE_SECONDS,
     DEFAULT_ALERT_DEDUPE_SECONDS, 60, 86400);
   const reminderCutoff = new Date(now.getTime() - alertDedupeSeconds * 1000).toISOString();
+  const alertPathTestEnabled = flag(env?.OPS_ALERT_PATH_TEST_ENABLED);
   const staleResult = await recoverExpiredAlertAttempts(env.OPS_DB, nowIso, config.environment);
   await cancelResolvedAlertDeliveries(env.OPS_DB, nowIso, config.environment);
   await cancelSupersededRecoveries(env.OPS_DB, nowIso, config.environment);
   await planAlertDeliveries(env.OPS_DB, nowIso, alertDedupeSeconds, config.senderFingerprint,
     config.environment);
+  if (alertPathTestEnabled) {
+    await planMonthlyAlertPathTest(env.OPS_DB, nowIso, config.senderFingerprint, config.environment);
+  }
   await cancelSupersededWarningDeliveries(env.OPS_DB, nowIso, config.environment);
 
   const candidates = await opsAll(env.OPS_DB, "ops_alert_candidates", `
@@ -521,6 +652,7 @@ async function runAlertEngine(env, observedAt = new Date(), providedConfig = nul
      WHERE delivery.delivery_state IN ('PENDING', 'RETRY')
        AND delivery.available_at <= ?1
        AND delivery.environment_code = ?2
+       AND (delivery.delivery_kind <> 'TEST' OR ?4 = 1)
      ORDER BY CASE delivery.delivery_kind
                 WHEN 'ESCALATION' THEN 1
                 WHEN 'OPEN' THEN 2
@@ -531,7 +663,7 @@ async function runAlertEngine(env, observedAt = new Date(), providedConfig = nul
               delivery.queued_at,
               CASE delivery.target_role_code WHEN 'OWNER' THEN 1 ELSE 2 END
      LIMIT ?3
-  `, [nowIso, config.environment, ALERT_BATCH_LIMIT]);
+  `, [nowIso, config.environment, ALERT_BATCH_LIMIT, alertPathTestEnabled ? 1 : 0]);
 
   let claimedCount = 0;
   let sentCount = 0;
@@ -554,7 +686,7 @@ async function runAlertEngine(env, observedAt = new Date(), providedConfig = nul
          AND attempt_count = ?6
          AND environment_code = ?8
          AND (
-           delivery_kind = 'TEST' OR
+           (delivery_kind = 'TEST' AND ?9 = 1) OR
            (delivery_kind IN ('OPEN', 'ESCALATION', 'REMINDER') AND EXISTS (
              SELECT 1 FROM alert_incidents AS incident
               WHERE incident.alert_incident_id = alert_deliveries.alert_incident_id
@@ -596,7 +728,8 @@ async function runAlertEngine(env, observedAt = new Date(), providedConfig = nul
            ) <= ?7
          )
     `, [leaseToken, leaseExpiresAt, nowIso, candidate.alert_delivery_id, ALERT_MAX_ATTEMPTS,
-      boundedAlertAttempt(candidate.attempt_count), reminderCutoff, config.environment]);
+      boundedAlertAttempt(candidate.attempt_count), reminderCutoff, config.environment,
+      alertPathTestEnabled ? 1 : 0]);
     if (changedCount(claim) !== 1) continue;
     claimedCount += 1;
 
@@ -893,6 +1026,123 @@ async function planAlertDeliveries(db, nowIso, dedupeSeconds = DEFAULT_ALERT_DED
   }
 }
 
+async function planMonthlyAlertPathTest(db, nowIso,
+  senderFingerprint = "0000000000000000000000000000000000000000000000000000000000000000",
+  environment = "sandbox") {
+  if (!/^[0-9a-f]{64}$/.test(senderFingerprint)) throw new Error("OPS_ALERT_SENDER_FINGERPRINT_INVALID");
+  if (!new Set(["production", "sandbox"]).has(environment)) throw new Error("OPS_ENVIRONMENT_INVALID");
+  const now = requiredDate(nowIso);
+  if (now.toISOString() !== nowIso) throw new Error("OPS_TIMESTAMP_INVALID");
+  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const monthEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+  const monthStartIso = monthStart.toISOString();
+  const monthEndIso = monthEnd.toISOString();
+  const monthKey = monthStartIso.slice(0, 7);
+  const incidentId = `alert-path-test-${environment}-${monthKey}`;
+  const deliveryIds = Object.freeze(ALERT_ROLE_BINDINGS.map((role) =>
+    `alert-path-test-${environment}-${monthKey}-${role.roleCode.toLowerCase()}`));
+
+  const preflightRows = await opsAll(db, "ops_alert_test_preflight", `
+    SELECT (SELECT COUNT(*) FROM alert_incidents WHERE alert_incident_id = ?1) AS incident_id_count,
+           (SELECT COUNT(*) FROM alert_incidents
+             WHERE environment_code = ?2 AND alert_key = 'ALERT_PATH_TEST'
+               AND first_seen_at >= ?5 AND first_seen_at < ?6) AS monthly_incident_count,
+           (SELECT COUNT(*) FROM alert_deliveries
+             WHERE alert_delivery_id IN (?3, ?4)) AS delivery_id_count,
+           (SELECT COUNT(*) FROM alert_deliveries
+             WHERE alert_incident_id = ?1) AS incident_delivery_count
+  `, [incidentId, environment, deliveryIds[0], deliveryIds[1], monthStartIso, monthEndIso]);
+  if (preflightRows.length !== 1) throw new Error("OPS_ALERT_TEST_SOURCE_AMBIGUOUS");
+  const preflight = preflightRows[0];
+  const counts = ["incident_id_count", "monthly_incident_count", "delivery_id_count", "incident_delivery_count"]
+    .map((field) => boundedCount(preflight[field]));
+  const isAbsent = counts.every((count) => count === 0);
+  const isComplete = counts[0] === 1 && counts[1] === 1 && counts[2] === 2 && counts[3] === 2;
+  if (!isAbsent && !isComplete) throw new Error("OPS_ALERT_TEST_SOURCE_AMBIGUOUS");
+
+  if (isAbsent) {
+    if (typeof db?.batch !== "function") throw new Error("OPS_DB_BATCH_NOT_CONFIGURED");
+    const statements = [opsStatement(db, "ops_alert_test_incident", `
+      INSERT OR IGNORE INTO alert_incidents (
+        alert_incident_id, environment_code, alert_key, severity_code, incident_state,
+        occurrence_count, latest_signal_count, reason_code, first_seen_at, last_seen_at,
+        dedupe_until, resolved_at, recovery_notified_at, created_at, updated_at
+      ) VALUES (?1, ?2, 'ALERT_PATH_TEST', 'WARNING', 'RESOLVED', 1, 1,
+        'MONTHLY_ALERT_PATH_TEST', ?3, ?3, ?4, ?3, ?3, ?3, ?3)
+    `, [incidentId, environment, nowIso, monthEndIso])];
+    for (const [index, role] of ALERT_ROLE_BINDINGS.entries()) {
+      statements.push(opsStatement(db, "ops_alert_test_delivery", `
+        INSERT OR IGNORE INTO alert_deliveries (
+          alert_delivery_id, alert_incident_id, delivery_kind, channel_code, target_role_code,
+          environment_code, alert_key, severity_code, signal_count, reason_code, sender_fingerprint,
+          message_version, delivery_state, attempt_count, queued_at, available_at,
+          first_observed_at, latest_observed_at, recovery_observed_at, created_at, updated_at
+        ) VALUES (?1, ?2, 'TEST', ?3, ?4, ?5, 'ALERT_PATH_TEST', 'WARNING', 1,
+          'MONTHLY_ALERT_PATH_TEST', ?6, 'OPS_ALERT_V1', 'PENDING', 0, ?7, ?7, ?7, ?7, NULL, ?7, ?7)
+      `, [deliveryIds[index], incidentId, role.channelCode, role.roleCode, environment,
+        senderFingerprint, nowIso]));
+    }
+    const results = await db.batch(statements);
+    if (!Array.isArray(results) || results.length !== statements.length || results.some((result) =>
+      !result || result.success === false)) throw new Error("OPS_ALERT_TEST_WRITE_FAILED");
+  }
+
+  const verificationRows = await opsAll(db, "ops_alert_test_verify", `
+    SELECT incident.environment_code, incident.alert_key, incident.severity_code,
+           incident.incident_state, incident.occurrence_count, incident.latest_signal_count,
+           incident.reason_code, incident.first_seen_at, incident.last_seen_at,
+           incident.dedupe_until, incident.resolved_at, incident.recovery_notified_at,
+           delivery.delivery_kind, delivery.channel_code, delivery.target_role_code,
+           delivery.alert_key AS delivery_alert_key, delivery.severity_code AS delivery_severity_code,
+           delivery.signal_count, delivery.reason_code AS delivery_reason_code,
+           delivery.sender_fingerprint, delivery.message_version, delivery.delivery_state,
+           delivery.queued_at, delivery.available_at, delivery.first_observed_at,
+           delivery.latest_observed_at, delivery.recovery_observed_at
+      FROM alert_incidents AS incident
+      JOIN alert_deliveries AS delivery
+        ON delivery.alert_incident_id = incident.alert_incident_id
+     WHERE incident.alert_incident_id = ?1
+     ORDER BY delivery.target_role_code
+  `, [incidentId]);
+  if (verificationRows.length !== ALERT_ROLE_BINDINGS.length) {
+    throw new Error("OPS_ALERT_TEST_SOURCE_AMBIGUOUS");
+  }
+  const expectedRoles = new Map(ALERT_ROLE_BINDINGS.map((role) => [role.roleCode, role.channelCode]));
+  const queuedTimes = new Set();
+  for (const row of verificationRows) {
+    if (row.environment_code !== environment || row.alert_key !== "ALERT_PATH_TEST" ||
+        row.severity_code !== "WARNING" || row.incident_state !== "RESOLVED" ||
+        boundedCount(row.occurrence_count) !== 1 || boundedCount(row.latest_signal_count) !== 1 ||
+        row.reason_code !== "MONTHLY_ALERT_PATH_TEST" || row.delivery_kind !== "TEST" ||
+        expectedRoles.get(row.target_role_code) !== row.channel_code ||
+        row.delivery_alert_key !== "ALERT_PATH_TEST" || row.delivery_severity_code !== "WARNING" ||
+        boundedCount(row.signal_count) !== 1 || row.delivery_reason_code !== "MONTHLY_ALERT_PATH_TEST" ||
+        !/^[0-9a-f]{64}$/.test(row.sender_fingerprint) || row.message_version !== ALERT_MESSAGE_VERSION ||
+        !new Set(["PENDING", "ATTEMPTING", "RETRY", "SENT", "DEAD", "CANCELLED"])
+          .has(row.delivery_state) || row.recovery_observed_at !== null) {
+      throw new Error("OPS_ALERT_TEST_SOURCE_AMBIGUOUS");
+    }
+    for (const field of ["first_seen_at", "last_seen_at", "resolved_at", "recovery_notified_at",
+      "queued_at", "available_at", "first_observed_at", "latest_observed_at"]) {
+      const observed = requiredDate(row[field]);
+      if (observed.toISOString() !== row[field] || observed < monthStart || observed >= monthEnd) {
+        throw new Error("OPS_ALERT_TEST_SOURCE_AMBIGUOUS");
+      }
+    }
+    if (requiredDate(row.dedupe_until).toISOString() !== monthEndIso ||
+        row.first_seen_at !== row.last_seen_at || row.first_seen_at !== row.resolved_at ||
+        row.first_seen_at !== row.recovery_notified_at || row.queued_at !== row.available_at ||
+        row.queued_at !== row.first_observed_at || row.queued_at !== row.latest_observed_at ||
+        row.first_seen_at !== row.queued_at) {
+      throw new Error("OPS_ALERT_TEST_SOURCE_AMBIGUOUS");
+    }
+    queuedTimes.add(row.queued_at);
+    expectedRoles.delete(row.target_role_code);
+  }
+  if (expectedRoles.size !== 0 || queuedTimes.size !== 1) throw new Error("OPS_ALERT_TEST_SOURCE_AMBIGUOUS");
+  return Object.freeze({ monthKey, planned: isAbsent, deliveryCount: verificationRows.length });
+}
+
 async function markRecoveryNotified(db, nowIso, environment) {
   return opsRun(db, "ops_alert_mark_recovery", `
     UPDATE alert_incidents AS incident
@@ -1079,9 +1329,20 @@ async function readConnectorSignals(env, now) {
     DEFAULT_REJECTION_LOOKBACK_HOURS, 1, 168) * 3600 * 1000).toISOString();
   const futureTimestampCutoff = new Date(now.getTime() + 5 * 60 * 1000).toISOString();
   const observationIso = now.toISOString();
+  const staffDayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
+  const recoveryCycleCutoff = new Date(now.getTime() - RECOVERY_CYCLE_SECONDS * 1000).toISOString();
   const webhookRows = await sourceAll(env.CONNECTOR_DB, CONNECTOR_SOURCE_QUERIES.webhookNonterminal, [observationIso]);
   const outboxRows = await sourceAll(env.CONNECTOR_DB, CONNECTOR_SOURCE_QUERIES.outboxOpen, [observationIso]);
-  const rejectedRows = await sourceAll(env.CONNECTOR_DB, CONNECTOR_SOURCE_QUERIES.rejectedRecent, [rejectedSince]);
+  const rejectedRows = await sourceAll(env.CONNECTOR_DB, CONNECTOR_SOURCE_QUERIES.rejectedRecent,
+    [rejectedSince, observationIso]);
+  const retryAttemptRows = await sourceAll(env.CONNECTOR_DB, CONNECTOR_SOURCE_QUERIES.retryAttemptThree,
+    [observationIso]);
+  const staleLeaseRows = await sourceAll(env.CONNECTOR_DB, CONNECTOR_SOURCE_QUERIES.staleLeaseSurvivors,
+    [recoveryCycleCutoff, observationIso]);
+  const staffLookupRows = await sourceAll(env.CONNECTOR_DB, CONNECTOR_SOURCE_QUERIES.staffLookupThreshold,
+    [staffDayStart, observationIso]);
+  const discountPolicyRows = await sourceAll(env.CONNECTOR_DB, CONNECTOR_SOURCE_QUERIES.discountPolicyRejections,
+    [rejectedSince, observationIso]);
   const stateRows = await sourceAll(env.CONNECTOR_DB, CONNECTOR_SOURCE_QUERIES.connectorState,
     [futureTimestampCutoff]);
   const signals = [];
@@ -1105,7 +1366,9 @@ async function readConnectorSignals(env, now) {
   let rejectedCritical = 0;
   let rejectedWarning = 0;
   for (const row of rejectedRows) {
-    if (boundedCount(row.invalid_time_count) > 0) throw new Error("OPS_TIMESTAMP_INVALID");
+    if (boundedCount(row.invalid_time_count) > 0 || boundedCount(row.future_time_count) > 0) {
+      throw new Error("OPS_TIMESTAMP_INVALID");
+    }
     const count = boundedCount(row.row_count);
     if (row.rejection_class === "CRITICAL") rejectedCritical += count;
     else if (row.rejection_class === "WARNING") rejectedWarning += count;
@@ -1116,7 +1379,51 @@ async function readConnectorSignals(env, now) {
   if (rejectedWarning > 0) signals.push(makeSignal("WEBHOOK_REJECTED_WARNING", "WARNING", rejectedWarning,
     "WEBHOOK_POLICY_REJECTED"));
 
-  const connectorState = stateRows[0] || {};
+  const retryAttempt = summarizeThresholdRows(retryAttemptRows, now, {
+    invalidFields: ["invalid_time_count", "future_time_count", "invalid_attempt_count"],
+  });
+  if (boundedCount(retryAttemptRows[0].attempt_threshold) !== DELIVERY_RETRY_ATTEMPT_THRESHOLD) {
+    throw new Error("OPS_RETRY_THRESHOLD_INVALID");
+  }
+  if (retryAttempt.count > 0) {
+    signals.push(makeSignal("DELIVERY_RETRY_ATTEMPT_3", "WARNING", retryAttempt.count,
+      "DELIVERY_RETRY_ATTEMPT_THRESHOLD_REACHED", retryAttempt.oldestAt));
+  }
+
+  const staleLease = summarizeThresholdRows(staleLeaseRows, now, {
+    invalidFields: ["invalid_time_count", "future_time_count"],
+  });
+  if (boundedCount(staleLeaseRows[0].recovery_cycle_seconds) !== RECOVERY_CYCLE_SECONDS) {
+    throw new Error("OPS_RECOVERY_CYCLE_INVALID");
+  }
+  if (staleLease.count > 0) {
+    signals.push(makeSignal("STALE_LEASE_SURVIVED_RECOVERY", "WARNING", staleLease.count,
+      "PROCESSING_LEASE_SURVIVED_RECOVERY_CYCLE", staleLease.oldestAt));
+  }
+
+  const staffLookup = summarizeThresholdRows(staffLookupRows, now, {
+    countField: "staff_lookup_count",
+    invalidFields: ["invalid_time_count", "future_time_count"],
+  });
+  const totalOffers = boundedCount(staffLookupRows[0].total_offer_count);
+  if (staffLookup.count > totalOffers) throw new Error("OPS_STAFF_LOOKUP_SOURCE_INVALID");
+  if (staffLookup.count >= STAFF_LOOKUP_DAILY_COUNT_THRESHOLD ||
+      (totalOffers >= STAFF_LOOKUP_MINIMUM_RATE_DENOMINATOR &&
+       staffLookup.count * STAFF_LOOKUP_RATE_MULTIPLIER > totalOffers)) {
+    signals.push(makeSignal("STAFF_LOOKUP_THRESHOLD", "CRITICAL", staffLookup.count,
+      "STAFF_LOOKUP_RATE_OR_COUNT_ELEVATED", staffLookup.oldestAt));
+  }
+
+  const discountPolicy = summarizeThresholdRows(discountPolicyRows, now, {
+    invalidFields: ["invalid_time_count", "future_time_count"],
+  });
+  if (discountPolicy.count >= DISCOUNT_POLICY_REJECTION_THRESHOLD) {
+    signals.push(makeSignal("DISCOUNT_POLICY_DISABLE_REQUIRED", "CRITICAL", discountPolicy.count,
+      "OFFER_PASS_DISABLE_REQUIRED", discountPolicy.oldestAt));
+  }
+
+  if (stateRows.length !== 1) throw new Error("OPS_CONNECTOR_STATE_AMBIGUOUS");
+  const connectorState = stateRows[0];
   if (boundedCount(connectorState.invalid_time_count) > 0 || boundedCount(connectorState.future_time_count) > 0) {
     throw new Error("OPS_TIMESTAMP_INVALID");
   }
@@ -1829,6 +2136,7 @@ function summarizeAgeRows(rows, now) {
     if (boundedCount(row.invalid_time_count) > 0) throw new Error("OPS_TIMESTAMP_INVALID");
     count += boundedCount(row.row_count);
     const date = requiredDate(row.oldest_due_at);
+    if (date > now || date.toISOString() !== row.oldest_due_at) throw new Error("OPS_TIMESTAMP_INVALID");
     if (!oldest || date < oldest) oldest = date;
   }
   return {
@@ -1836,6 +2144,30 @@ function summarizeAgeRows(rows, now) {
     oldestAt: oldest?.toISOString() || null,
     ageSeconds: oldest ? Math.max(0, Math.floor((now.getTime() - oldest.getTime()) / 1000)) : 0,
   };
+}
+
+function summarizeThresholdRows(rows, now, {
+  countField = "row_count",
+  oldestField = "oldest_observed_at",
+  invalidFields = [],
+} = {}) {
+  if (!Array.isArray(rows) || rows.length !== 1) throw new Error("OPS_SOURCE_AGGREGATE_AMBIGUOUS");
+  const row = rows[0];
+  for (const field of invalidFields) {
+    if (boundedCount(row[field]) > 0) throw new Error("OPS_SOURCE_AGGREGATE_INVALID");
+  }
+  const count = boundedCount(row[countField]);
+  if (count === 0) {
+    if (row[oldestField] !== null && row[oldestField] !== undefined && row[oldestField] !== "") {
+      throw new Error("OPS_SOURCE_AGGREGATE_INVALID");
+    }
+    return Object.freeze({ count: 0, oldestAt: null });
+  }
+  const oldest = requiredDate(row[oldestField]);
+  if (oldest > now || oldest.toISOString() !== row[oldestField]) {
+    throw new Error("OPS_TIMESTAMP_INVALID");
+  }
+  return Object.freeze({ count, oldestAt: oldest.toISOString() });
 }
 
 function makeSignal(alertKey, severity, count, reasonCode, oldestAt = null) {
@@ -1913,6 +2245,7 @@ export const __test = Object.freeze({
   hmacSha256Hex,
   runAlertEngine,
   planAlertDeliveries,
+  planMonthlyAlertPathTest,
   buildAlertMessage,
   classifyEmailError,
   FIXED_ALERT_KEYS,

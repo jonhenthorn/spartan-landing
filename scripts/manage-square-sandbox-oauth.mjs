@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 
 const SQUARE_SANDBOX_ORIGIN = "https://connect.squareupsandbox.com";
 const VALIDATION_ORIGIN = "https://square-oauth.invalid";
+const VALIDATION_AUTHORIZED_CASE_ORIGIN = "https://provider-fixture.invalid";
 const SQUARE_API_VERSION = "2026-07-15";
 const SQUARE_SANDBOX_MERCHANT_ID = "ML8W3CSGD2B71";
 const CALLBACK_URI = "http://localhost:8765/project2-square-oauth-callback";
@@ -166,6 +167,7 @@ const TERMINAL_PRIORITY = Object.freeze([
 const RUNTIME_BRAND = Symbol("project2-square-oauth-runtime");
 const SHARED_STATE_BRAND = Symbol("project2-square-oauth-shared-state");
 const TOKEN_HANDLE = Symbol("project2-square-oauth-token-handle");
+const VALIDATION_CASE_ADAPTER_BRAND = Symbol("project2-square-oauth-validation-case-adapter");
 
 class OauthLifecycleError extends Error {
   constructor(code) {
@@ -1144,11 +1146,26 @@ function createValidationSharedState() {
   });
 }
 
+function brandValidationCaseAdapter(adapter) {
+  if (!isPlainObject(adapter) || !exactKeys(adapter, ["runAuthorizedCase"]) ||
+      typeof adapter.runAuthorizedCase !== "function") fail("INPUT_REJECTED");
+  const branded = Object.create(null);
+  Object.defineProperty(branded, VALIDATION_CASE_ADAPTER_BRAND, {
+    enumerable: false,
+    value: true,
+  });
+  branded.runAuthorizedCase = adapter.runAuthorizedCase;
+  return Object.freeze(branded);
+}
+
 const DEFAULT_VALIDATION_SHARED_STATE = createValidationSharedState();
 
-function createValidationRuntime(rawScenario = {}, sharedState = createValidationSharedState()) {
+function createValidationRuntime(rawScenario = {}, sharedState = createValidationSharedState(),
+  authorizedCaseAdapter = null) {
   const scenario = normalizeValidationScenario(rawScenario);
   if (sharedState?.[SHARED_STATE_BRAND] !== true) fail("INPUT_REJECTED");
+  if (authorizedCaseAdapter !== null &&
+      authorizedCaseAdapter?.[VALIDATION_CASE_ADAPTER_BRAND] !== true) fail("INPUT_REJECTED");
   const { records, custody, telemetry, temporaryBuffers, privateInputs } = sharedState;
   let recoveryActive = false;
   let callbackAccepted = false;
@@ -1529,12 +1546,69 @@ function createValidationRuntime(rawScenario = {}, sharedState = createValidatio
       }
       throw new Error("unexpected validation operation");
     },
-    async runAuthorizedCase({ tokenHandle }, signal) {
+    async runAuthorizedCase({ caseName, role, scopes, tokenHandle }, signal) {
       telemetry.cases += 1;
       if (signal.aborted || tokenHandle?.[TOKEN_HANDLE] === undefined ||
           !custody.get(tokenHandle[TOKEN_HANDLE])?.accessToken) fail("AUTHORIZED_CASE_REJECTED");
       await applyTimingScenario("AUTHORIZED_CASE", signal, tokenHandle[TOKEN_HANDLE]);
       if (signal.aborted) fail("AUTHORIZED_CASE_REJECTED");
+      if (authorizedCaseAdapter) {
+        const attemptId = tokenHandle[TOKEN_HANDLE];
+        const caseBinding = records.get(attemptId)?.binding;
+        if (!caseBinding) fail("AUTHORIZED_CASE_REJECTED");
+        const credentialBroker = Object.freeze({
+          async request(handle, transport, rawUrl, init = {}) {
+            if (handle !== tokenHandle || typeof transport !== "function" || signal.aborted ||
+                !isPlainObject(init) || init.redirect !== "error" || init.signal !== signal) {
+              fail("AUTHORIZED_CASE_REJECTED");
+            }
+            const current = runtime.trustedNowMs();
+            if (!Number.isFinite(current) || current < Date.parse(caseBinding.windowStartUtc) ||
+                current >= Date.parse(caseBinding.windowEndUtc)) fail("AUTHORIZED_CASE_REJECTED");
+            let url;
+            try { url = new URL(rawUrl); } catch { fail("AUTHORIZED_CASE_REJECTED"); }
+            if (url.origin !== VALIDATION_AUTHORIZED_CASE_ORIGIN || url.username || url.password ||
+                url.port || url.hash ||
+                !(url.pathname === "/oauth2/token/status" || url.pathname.startsWith("/v2/"))) {
+              fail("AUTHORIZED_CASE_REJECTED");
+            }
+            const providedHeaders = isPlainObject(init.headers) ? init.headers : null;
+            if (!providedHeaders || Object.keys(providedHeaders).some((name) =>
+              name.toLowerCase() === "authorization")) fail("AUTHORIZED_CASE_REJECTED");
+            const token = custody.get(attemptId)?.accessToken;
+            if (!Buffer.isBuffer(token) || token.byteLength < 20) fail("AUTHORIZED_CASE_REJECTED");
+            const tokenCopy = Buffer.from(token);
+            temporaryBuffers.push(tokenCopy);
+            let abortHandler;
+            try {
+              const headers = { ...providedHeaders, Authorization: `Bearer ${tokenCopy.toString("utf8")}` };
+              const request = Promise.resolve().then(() => transport(url.toString(), { ...init, headers }));
+              const aborted = new Promise((_resolve, reject) => {
+                abortHandler = () => reject(new OauthLifecycleError("AUTHORIZED_CASE_REJECTED"));
+                if (signal.aborted) abortHandler();
+                else signal.addEventListener("abort", abortHandler, { once: true });
+              });
+              const response = await Promise.race([request, aborted]);
+              const settledAt = runtime.trustedNowMs();
+              if (signal.aborted || !Number.isFinite(settledAt) ||
+                  settledAt < Date.parse(caseBinding.windowStartUtc) ||
+                  settledAt >= Date.parse(caseBinding.windowEndUtc)) fail("AUTHORIZED_CASE_REJECTED");
+              return response;
+            } finally {
+              if (abortHandler) signal.removeEventListener("abort", abortHandler);
+              tokenCopy.fill(0);
+            }
+          },
+        });
+        return authorizedCaseAdapter.runAuthorizedCase(Object.freeze({
+          caseName,
+          clientId: caseBinding.clientId,
+          credentialBroker,
+          role,
+          scopes: Object.freeze([...scopes]),
+          tokenHandle,
+        }), signal);
+      }
       return scenario.caseMode === "OK"
         ? { status: "COMPLETE", result: "AUTHORIZED_CASE_COMPLETE" }
         : { status: "STOPPED", result: "AUTHORIZED_CASE_COMPLETE" };
@@ -1677,13 +1751,16 @@ export const __test = Object.freeze({
   VALIDATION_CLIENT_SECRET_SHA256,
   VALIDATION_STANDING_CONNECTOR_IDENTITY,
   VALIDATION_ORIGIN,
+  VALIDATION_AUTHORIZED_CASE_ORIGIN,
   MAX_PROVIDER_REQUESTS,
   PROVIDER_CONTRACT,
   buildAuthorizationUrl,
+  brandValidationCaseAdapter,
   createAuthorizationMaterial,
   createValidationSharedState,
-  createValidationController(scenario = {}, sharedState = createValidationSharedState()) {
-    const runtime = createValidationRuntime(scenario, sharedState);
+  createValidationController(scenario = {}, sharedState = createValidationSharedState(),
+    authorizedCaseAdapter = null) {
+    const runtime = createValidationRuntime(scenario, sharedState, authorizedCaseAdapter);
     return Object.freeze({
       execute: (rawInput) => executeAtBoundary(rawInput, runtime, VALIDATION_BOUNDARY),
       recover: (rawInput) => recoverAtBoundary(rawInput, runtime, VALIDATION_BOUNDARY),

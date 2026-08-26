@@ -1,6 +1,6 @@
 # Project 2 — activation decision record
 
-Last reviewed: August 25, 2026
+Last reviewed: August 26, 2026
 
 Decision status: **NOT APPROVED**
 
@@ -257,4 +257,4 @@ Complete this table only for F-02. Each row records a fixed code or fixed catego
 | Independent reviewer decision | `[REVIEW/FILL]` |
 | Owner closure signature and date | `[REVIEW/FILL]` |
 
-A completed sandbox record does not authorize production, a second case, real-customer use, alert delivery, backups, a staff pilot or broader activation. Each requires its own explicit decision and gates.
+A completed sandbox record does not authorize production, a second case, real-customer use, alert delivery, backups, a staff pilot or broader activation. Each requires its own explicit decision and gates. Use a fresh private copy of the blank [operations activation decision record](PROJECT-2-OPERATIONS-ACTIVATION-DECISION-RECORD.md) for exactly one later operations lane and the blank [production activation decision record](PROJECT-2-PRODUCTION-ACTIVATION-DECISION-RECORD.md) for one production owner-canary attempt; neither template authorizes itself.

@@ -118,6 +118,20 @@ export const PROVIDER_FIXTURE_ACK = EXECUTION_ACK;
 export const PROVIDER_FIXTURE_CASES = Object.freeze([...CASES]);
 export const PROVIDER_READ_ONLY_ACK = READ_ONLY_EXECUTION_ACK;
 export const PROVIDER_READ_ONLY_CASES = Object.freeze([...READ_ONLY_CASES]);
+export const PROVIDER_FIXTURE_EXACT_OUTCOMES = Object.freeze({
+  "F-03": Object.freeze({ result: "F03_CUSTOMERS_READY", requests: 9, mutationRequests: 2 }),
+  "F-04": Object.freeze({ result: "F04_NEW_CUSTOMER_SLOT_CLEAR", requests: 5, mutationRequests: 0 }),
+  "O-01": Object.freeze({ result: "O01_TRANSACTION_READY", requests: 15, mutationRequests: 3 }),
+  "P-01": Object.freeze({ result: "P01_NEW_CUSTOMER_SLOT_CLEAR", requests: 5, mutationRequests: 0 }),
+  "P-02": Object.freeze({ result: "P02_TRANSACTION_READY", requests: 13, mutationRequests: 2 }),
+  "Q-01": Object.freeze({ result: "UNLINKED_PAYMENT_READY", requests: 7, mutationRequests: 2 }),
+  "Q-02": Object.freeze({ result: "UNLINKED_PAYMENT_READY", requests: 7, mutationRequests: 2 }),
+  "REPLAY-4XX": Object.freeze({
+    result: "REPLAY_PERMANENT_SQUARE_REJECTION_READY",
+    requests: 4,
+    mutationRequests: 0,
+  }),
+});
 export const PROVIDER_FIXTURE_BOUNDARIES = Object.freeze({
   origin: SQUARE_SANDBOX_ORIGIN,
   apiVersion: SQUARE_API_VERSION,
@@ -165,21 +179,38 @@ function privateReference(caseName, runKey, action, maxLength = 40) {
   return `${prefix}-${digest(`${caseName}:${action}:reference:${runKey}`).slice(0, 20)}`.slice(0, maxLength);
 }
 
-function validatePrivateInput(input) {
+function validatePrivateFields(input) {
   if (!input || typeof input !== "object" || !CASES.has(input.caseName) || input.ack !== EXECUTION_ACK) {
     fail("INPUT_REJECTED");
   }
-  const token = String(input.token || "");
   const runKey = String(input.runKey || "");
   const customerId = String(input.customerId || "");
-  if (token.length < 20 || token.length > 1024 || /\s|[\u0000-\u001f\u007f]/.test(token)) fail("INPUT_REJECTED");
   if (runKey.length < 16 || runKey.length > 160 || /[\u0000-\u001f\u007f]/.test(runKey)) fail("INPUT_REJECTED");
   if (QUALIFYING_CASES.has(input.caseName)) {
     if (!/^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/.test(customerId)) fail("INPUT_REJECTED");
   } else if (customerId !== "") {
     fail("INPUT_REJECTED");
   }
-  return { caseName: input.caseName, token, runKey, customerId, ack: input.ack };
+  return { caseName: input.caseName, runKey, customerId, ack: input.ack };
+}
+
+function validatePrivateInput(input) {
+  const fields = validatePrivateFields(input);
+  const token = String(input.token || "");
+  if (token.length < 20 || token.length > 1024 || /\s|[\u0000-\u001f\u007f]/.test(token)) fail("INPUT_REJECTED");
+  return { ...fields, token };
+}
+
+function validOpaqueTokenHandle(value) {
+  const keys = value && typeof value === "object" ? Reflect.ownKeys(value) : [];
+  return Boolean(value && typeof value === "object" && Object.isFrozen(value) && Object.keys(value).length === 0 &&
+    keys.length === 1 && typeof keys[0] === "symbol");
+}
+
+function validatePrivateHandleInput(input) {
+  if (!exactKeys(input, ["ack", "caseName", "customerId", "runKey", "tokenHandle"]) ||
+      !validOpaqueTokenHandle(input.tokenHandle)) fail("INPUT_REJECTED");
+  return { ...validatePrivateFields(input), tokenHandle: input.tokenHandle };
 }
 
 function initialPrivateRecord(input, now) {
@@ -253,6 +284,36 @@ function validateReadOnlyInput(input) {
     fail("INPUT_REJECTED");
   }
   return { caseName: input.caseName, token, canary: "", name: "", phone: "", ack: input.ack, packagePath };
+}
+
+function validateReadOnlyHandleInput(input) {
+  if (!input || typeof input !== "object" || !READ_ONLY_CASES.has(input.caseName) ||
+      input.ack !== READ_ONLY_EXECUTION_ACK || !validOpaqueTokenHandle(input.tokenHandle)) {
+    fail("INPUT_REJECTED");
+  }
+  const newCustomerCase = input.caseName === "F-04" || input.caseName === "P-01";
+  const expectedKeys = newCustomerCase
+    ? ["ack", "canary", "canaryConfirmation", "caseName", "name", "nameConfirmation", "phone",
+        "phoneConfirmation", "tokenHandle"]
+    : ["ack", "caseName", "packagePath", "tokenHandle"];
+  if (!exactKeys(input, expectedKeys)) fail("INPUT_REJECTED");
+  if (newCustomerCase) {
+    const canary = String(input.canary || "");
+    const name = String(input.name || "");
+    const phone = String(input.phone || "");
+    if (!READ_ONLY_CANARY_PATTERN.test(canary) || !READ_ONLY_NAME_PATTERN.test(name) ||
+        name.trim() !== name || !NEW_CUSTOMER_PHONE_PATTERN.test(phone) ||
+        input.canaryConfirmation !== canary || input.nameConfirmation !== name ||
+        input.phoneConfirmation !== phone) fail("INPUT_REJECTED");
+    return { caseName: input.caseName, tokenHandle: input.tokenHandle, canary, name, phone,
+      ack: input.ack, packagePath: "" };
+  }
+  const packagePath = String(input.packagePath || "");
+  if (packagePath.length < 1 || packagePath.length > 4096 || /[\u0000-\u001f\u007f]/.test(packagePath)) {
+    fail("INPUT_REJECTED");
+  }
+  return { caseName: input.caseName, tokenHandle: input.tokenHandle, canary: "", name: "", phone: "",
+    ack: input.ack, packagePath };
 }
 
 function initialReadOnlyPrivateRecord(input, now) {
@@ -405,6 +466,19 @@ function providerFailure(status) {
   return "PROVIDER_REJECTED";
 }
 
+async function authenticatedProviderFetch(context, requestUrl, init) {
+  if (context.tokenHandle) {
+    if (!validOpaqueTokenHandle(context.tokenHandle) || !Object.isFrozen(context.credentialBroker) ||
+        !exactKeys(context.credentialBroker, ["request"]) ||
+        typeof context.credentialBroker.request !== "function" ||
+        Object.keys(init.headers || {}).some((name) => name.toLowerCase() === "authorization")) {
+      fail("BOUNDARY_REJECTED");
+    }
+    return context.credentialBroker.request(context.tokenHandle, context.fetchImpl, requestUrl.href, init);
+  }
+  return context.fetchImpl(requestUrl.href, init);
+}
+
 async function squareJson(context, pathName, { method = "GET", body, mutation = false } = {}) {
   const apiPath = typeof pathName === "string" && pathName.startsWith("/v2/") && !pathName.startsWith("//");
   const tokenStatusPath = pathName === "/oauth2/token/status";
@@ -422,9 +496,9 @@ async function squareJson(context, pathName, { method = "GET", body, mutation = 
   if (mutation) context.mutationRequests += 1;
   const headers = {
     Accept: "application/json",
-    Authorization: `Bearer ${context.token}`,
     "Square-Version": SQUARE_API_VERSION,
   };
+  if (!context.tokenHandle) headers.Authorization = `Bearer ${context.token}`;
   const init = { method, headers, redirect: "error", signal: context.signal };
   if (tokenStatusPath) headers["Content-Type"] = "application/json";
   if (body !== undefined) {
@@ -433,7 +507,7 @@ async function squareJson(context, pathName, { method = "GET", body, mutation = 
   }
   let response;
   try {
-    response = await context.fetchImpl(requestUrl.href, init);
+    response = await authenticatedProviderFetch(context, requestUrl, init);
   } catch {
     fail(mutation ? "MUTATION_RESULT_AMBIGUOUS" : "NETWORK_UNAVAILABLE");
   }
@@ -478,9 +552,9 @@ async function readOnlySquareJson(context, request, { permanentClientRejection =
   context.requests += 1;
   const headers = {
     Accept: "application/json",
-    Authorization: `Bearer ${context.token}`,
     "Square-Version": SQUARE_API_VERSION,
   };
+  if (!context.tokenHandle) headers.Authorization = `Bearer ${context.token}`;
   const init = { method: request.method, headers, redirect: "error", signal: context.signal };
   if (tokenStatusPath) headers["Content-Type"] = "application/json";
   if (request.body !== undefined) {
@@ -489,7 +563,7 @@ async function readOnlySquareJson(context, request, { permanentClientRejection =
   }
   let response;
   try {
-    response = await context.fetchImpl(requestUrl.href, init);
+    response = await authenticatedProviderFetch(context, requestUrl, init);
   } catch {
     fail("NETWORK_UNAVAILABLE");
   }
@@ -1087,24 +1161,32 @@ function fixedResult(status, result, context, record) {
   });
 }
 
-async function executeProviderFixtureAtBoundary(rawInput, dependencies, executionBoundary) {
+async function executeProviderFixtureAtBoundary(rawInput, dependencies, executionBoundary,
+  oauthHandleMode = false) {
   let input;
-  try { input = validatePrivateInput(rawInput); } catch (error) {
+  try { input = oauthHandleMode ? validatePrivateHandleInput(rawInput) : validatePrivateInput(rawInput); }
+  catch (error) {
     return fixedResult("FAILED", safeErrorCode(error), null, null);
   }
+  const effectiveBoundary = oauthHandleMode
+    ? Object.freeze({ ...executionBoundary, approvedClientId: dependencies.authorizedClientId })
+    : executionBoundary;
   if ((executionBoundary !== LIVE_EXECUTION_BOUNDARY && executionBoundary !== MOCK_VALIDATION_BOUNDARY) ||
-      !validOauthClientId(executionBoundary.approvedClientId)) {
+      !validOauthClientId(effectiveBoundary.approvedClientId) ||
+      (oauthHandleMode && executionBoundary !== MOCK_VALIDATION_BOUNDARY)) {
     return fixedResult("FAILED", "CREDENTIAL_GATE_BLOCKED", null, null);
   }
   const clock = dependencies.clock || (() => new Date().toISOString());
   const record = initialPrivateRecord(input, clock());
   const checkpoint = dependencies.checkpoint || (async () => {});
   const context = {
-    token: input.token,
+    token: oauthHandleMode ? "" : input.token,
+    tokenHandle: oauthHandleMode ? input.tokenHandle : null,
+    credentialBroker: oauthHandleMode ? dependencies.credentialBroker : null,
     fetchImpl: dependencies.fetchImpl || globalThis.fetch,
     signal: (dependencies.timeoutFactory || AbortSignal.timeout)(TOTAL_TIMEOUT_MS),
     nowMs: dependencies.nowMs || (() => Date.now()),
-    approvedClientId: executionBoundary.approvedClientId,
+    approvedClientId: effectiveBoundary.approvedClientId,
     executionBoundary,
     requests: 0,
     mutationRequests: 0,
@@ -1129,9 +1211,12 @@ async function executeProviderFixtureAtBoundary(rawInput, dependencies, executio
     return fixedResult("FAILED", code, context, record);
   } finally {
     input.token = "";
+    input.tokenHandle = null;
     input.runKey = "";
     input.customerId = "";
     context.token = "";
+    context.tokenHandle = null;
+    context.credentialBroker = null;
   }
 }
 
@@ -1145,6 +1230,10 @@ export async function executeProviderFixtureForValidation(rawInput, dependencies
   return executeProviderFixtureAtBoundary(rawInput, dependencies, MOCK_VALIDATION_BOUNDARY);
 }
 
+export async function executeProviderFixtureWithOauthHandleForValidation(rawInput, dependencies = {}) {
+  return executeProviderFixtureAtBoundary(rawInput, dependencies, MOCK_VALIDATION_BOUNDARY, true);
+}
+
 function fixedReadOnlyResult(status, result, context, record) {
   return Object.freeze({
     status,
@@ -1155,14 +1244,20 @@ function fixedReadOnlyResult(status, result, context, record) {
   });
 }
 
-async function executeProviderReadOnlyAtBoundary(rawInput, dependencies, executionBoundary) {
+async function executeProviderReadOnlyAtBoundary(rawInput, dependencies, executionBoundary,
+  oauthHandleMode = false) {
   let input;
-  try { input = validateReadOnlyInput(rawInput); } catch (error) {
+  try { input = oauthHandleMode ? validateReadOnlyHandleInput(rawInput) : validateReadOnlyInput(rawInput); }
+  catch (error) {
     return fixedReadOnlyResult("FAILED", safeReadOnlyErrorCode(error), null, null);
   }
+  const effectiveBoundary = oauthHandleMode
+    ? Object.freeze({ ...executionBoundary, approvedClientId: dependencies.authorizedClientId })
+    : executionBoundary;
   if ((executionBoundary !== READ_ONLY_LIVE_EXECUTION_BOUNDARY &&
        executionBoundary !== READ_ONLY_MOCK_VALIDATION_BOUNDARY) ||
-      !validOauthClientId(executionBoundary.approvedClientId)) {
+      (oauthHandleMode && executionBoundary !== READ_ONLY_MOCK_VALIDATION_BOUNDARY) ||
+      !validOauthClientId(effectiveBoundary.approvedClientId)) {
     return fixedReadOnlyResult("FAILED", "CREDENTIAL_GATE_BLOCKED", null, null);
   }
 
@@ -1170,12 +1265,14 @@ async function executeProviderReadOnlyAtBoundary(rawInput, dependencies, executi
   const record = initialReadOnlyPrivateRecord(input, clock());
   const checkpoint = dependencies.checkpoint || (async () => {});
   const context = {
-    token: input.token,
+    token: oauthHandleMode ? "" : input.token,
+    tokenHandle: oauthHandleMode ? input.tokenHandle : null,
+    credentialBroker: oauthHandleMode ? dependencies.credentialBroker : null,
     fetchImpl: dependencies.fetchImpl || globalThis.fetch,
     signal: (dependencies.timeoutFactory || AbortSignal.timeout)(TOTAL_TIMEOUT_MS),
     nowMs: dependencies.nowMs || (() => Date.now()),
     clock,
-    approvedClientId: executionBoundary.approvedClientId,
+    approvedClientId: effectiveBoundary.approvedClientId,
     executionBoundary,
     requestPlan: Object.freeze([]),
     requests: 0,
@@ -1237,11 +1334,14 @@ async function executeProviderReadOnlyAtBoundary(rawInput, dependencies, executi
     return fixedReadOnlyResult("FAILED", code, context, record);
   } finally {
     input.token = "";
+    input.tokenHandle = null;
     input.canary = "";
     input.name = "";
     input.phone = "";
     input.packagePath = "";
     context.token = "";
+    context.tokenHandle = null;
+    context.credentialBroker = null;
     context.requestPlan = Object.freeze([]);
     replayBinding = null;
   }
@@ -1254,6 +1354,10 @@ export async function executeProviderReadOnlyPreflight(rawInput, dependencies = 
 // This validation-only entry point is bound to the non-routable `.invalid` origin and a synthetic client ID.
 export async function executeProviderReadOnlyPreflightForValidation(rawInput, dependencies = {}) {
   return executeProviderReadOnlyAtBoundary(rawInput, dependencies, READ_ONLY_MOCK_VALIDATION_BOUNDARY);
+}
+
+export async function executeProviderReadOnlyWithOauthHandleForValidation(rawInput, dependencies = {}) {
+  return executeProviderReadOnlyAtBoundary(rawInput, dependencies, READ_ONLY_MOCK_VALIDATION_BOUNDARY, true);
 }
 
 function packagePathAllowed(directory) {

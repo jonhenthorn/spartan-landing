@@ -1,8 +1,8 @@
 # Spartan Square journey-measurement pilot
 
-Last reviewed: August 19, 2026
+Last reviewed: August 26, 2026
 
-Status: **Project 2 — active.** The ledger foundation and isolated sandbox connector are live but disabled. An owner-controlled QR/customer-attachment and paid-transaction proof is complete, and the sandbox connector later proved one qualifying redemption plus a full-refund review without restoring eligibility or issuing another offer. Those proofs were synthetic and not linked to a genuine website submission. A later return purchase, genuine website redemption and 30-day baseline remain open.
+Status: **Project 2 planning and controlled proof are active; production connector automation is inactive.** The ledger foundation and isolated sandbox connector exist only in the disabled sandbox boundary. An owner-controlled QR/customer-attachment and paid-transaction proof is complete, and the sandbox connector later proved one qualifying redemption plus a full-refund review without restoring eligibility or issuing another offer. Those proofs were synthetic and not linked to a genuine website submission. A later return purchase, genuine website redemption and 30-day baseline remain open. This status is not production approval, a staff-pilot start or broader customer launch.
 
 ## Outcome
 
