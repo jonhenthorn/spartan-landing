@@ -2271,11 +2271,18 @@ async function prepareCandidate(run, prompt, print, {
           : "SANDBOX ONLY - unpublished one-case fault candidate",
     );
     const baseVersion = await getVersion(run, inputs.accountId, baseVersionId);
-    assertVersionMetadata(baseVersion, {
+    const baseMetadata = assertVersionMetadata(baseVersion, {
       expectedId: baseVersionId,
       expectedVars: candidateVars,
       expectedSecrets: STANDING_SECRET_NAMES,
+      allowFaultSubset: !fixedKind,
     });
+    if (!fixedKind) {
+      const allowedInheritedNames = new Set([...STANDING_SECRET_NAMES, ...Object.keys(secrets)]);
+      if (baseMetadata.secretNames.some((name) => !allowedInheritedNames.has(name))) {
+        fail("SECRET_NAME_SET_REJECTED");
+      }
+    }
     let candidateVersionId = baseVersionId;
     if (!fixedKind) {
       if (beforeMutation) await beforeMutation(inputs);

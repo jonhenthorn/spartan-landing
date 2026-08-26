@@ -1795,6 +1795,60 @@ check("prepare stages one unpublished exact-target candidate and keeps baseline 
   assert.ok(runner.state.calls.every((call) => !call.args.some((arg) => String(arg).includes("wrangler.toml") && !String(arg).includes("wrangler.sandbox.toml"))));
 });
 
+check("offer preparation safely replaces inherited same-mode temporary secrets", async () => {
+  const runner = makeRunner({
+    uploadIds: [UPLOAD],
+    secretIds: [CANDIDATE],
+    nextUploadSecrets: [...driverTest.STANDING_SECRET_NAMES, ...COMMON_FAULT_NAMES],
+  });
+  const prompt = promptFrom([
+    ...commonPrompt(), CANARY, TARGET_DIGEST, RUN_TOKEN,
+    APPS_DIGEST, FORBIDDEN_DIGEST, HASH_SECRET,
+  ]);
+  const result = await invokeMain(driverTest.PREPARE_OFFER_ISOLATION_ARGS, prompt, runner);
+  assert.equal(result.status, 0);
+  assert.deepEqual(result.output,
+    [`STATUS=PREPARED RESULT=SANDBOX_OFFER_ISOLATION_CANDIDATE_READY CANDIDATE_VERSION=${CANDIDATE}`]);
+  prompt.assertDone();
+  assert.equal(runner.state.trafficId, BASELINE);
+  assert.equal(runner.state.calls.filter((call) => call.args.includes("upload")).length, 1);
+  assert.equal(runner.state.calls.filter((call) => call.args.includes("bulk")).length, 1);
+  assert.equal(runner.state.calls.filter((call) => call.args.includes("deploy")).length, 0);
+  assert.deepEqual(
+    runner.state.versions.get(CANDIDATE).resources.bindings
+      .filter((binding) => binding.type === "secret_text")
+      .map((binding) => binding.name).sort(),
+    [...driverTest.STANDING_SECRET_NAMES, ...COMMON_FAULT_NAMES].sort(),
+  );
+});
+
+check("offer preparation rejects missing-standing, cross-mode, or unknown inherited secrets before bulk staging", async () => {
+  for (const [inherited, expectedCode] of [
+    [[...driverTest.STANDING_SECRET_NAMES.slice(0, -1), ...COMMON_FAULT_NAMES],
+      "STANDING_SECRET_SET_REJECTED"],
+    [[...driverTest.STANDING_SECRET_NAMES, ...COMMON_FAULT_NAMES,
+      "SQUARE_SANDBOX_FAULT_SOURCE_DIGEST"], "SECRET_NAME_SET_REJECTED"],
+    [[...driverTest.STANDING_SECRET_NAMES, ...COMMON_FAULT_NAMES, "UNEXPECTED_PRIVATE_BINDING"],
+      "UNEXPECTED_SECRET_NAME_REJECTED"],
+  ]) {
+    const runner = makeRunner({
+      uploadIds: [UPLOAD],
+      secretIds: [CANDIDATE],
+      nextUploadSecrets: inherited,
+    });
+    const result = await invokeMain(driverTest.PREPARE_OFFER_ISOLATION_ARGS, promptFrom([
+      ...commonPrompt(), CANARY, TARGET_DIGEST, RUN_TOKEN,
+      APPS_DIGEST, FORBIDDEN_DIGEST, HASH_SECRET,
+    ]), runner);
+    assert.equal(result.status, 2);
+    assert.deepEqual(result.output, [`STATUS=REJECTED RESULT=${expectedCode}`]);
+    assert.equal(runner.state.trafficId, BASELINE);
+    assert.equal(runner.state.calls.filter((call) => call.args.includes("upload")).length, 1);
+    assert.equal(runner.state.calls.filter((call) => call.args.includes("bulk")).length, 0);
+    assert.equal(runner.state.calls.filter((call) => call.args.includes("deploy")).length, 0);
+  }
+});
+
 check("offer candidates use the complete runnable matrix and the exact 8-to-80-character Worker canary contract", async () => {
   const offerVars = driverTest.expectedCandidateVars(BASE_VARS, "SQUARE_SEARCH_OUTAGE", CANARY);
   for (const name of [
@@ -2281,6 +2335,7 @@ check("F-02 Keychain candidate mode recomputes controls, confines W to exact Wra
   const fixture = makeRunner({
     uploadIds: [UPLOAD, CLEANUP],
     secretIds: [CANDIDATE, ...cleanupIds],
+    nextUploadSecrets: [...driverTest.STANDING_SECRET_NAMES, ...COMMON_FAULT_NAMES],
   });
   const runner = {
     state: fixture.state,
