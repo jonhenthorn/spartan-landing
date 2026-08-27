@@ -785,7 +785,7 @@ function makeMemoryKeychain(initial = {}) {
 const memory = makeMemoryKeychain();
 const output = [];
 const ackPrompt = async (promptText) => {
-  const match = /^Type ([A-Z0-9_]+) \(not secret\): $/.exec(promptText);
+  const match = /^Type ([A-Z0-9_]+) \(not secret(?:; input visible)?\): $/.exec(promptText);
   if (!match) throw new Error("unexpected prompt");
   return match[1];
 };
@@ -1024,7 +1024,7 @@ for (const clearCase of [
     clearCase.name);
 }
 
-function makeHiddenLineTty({ onResume, onPrompt } = {}) {
+function makeHiddenLineTty({ onResume, onPrompt, onVisibleWrite } = {}) {
   const input = new EventEmitter();
   input.isTTY = true;
   input.isRaw = false;
@@ -1034,6 +1034,10 @@ function makeHiddenLineTty({ onResume, onPrompt } = {}) {
   input.resume = () => {
     assert.equal(input.listenerCount("data"), 1,
       "the input listener is armed before the TTY resumes");
+    assert.equal(input.listenerCount("end"), 1,
+      "the end listener is armed before the TTY resumes");
+    assert.equal(input.listenerCount("error"), 1,
+      "the error listener is armed before the TTY resumes");
     assert.equal(outputWrites.length, 1,
       "the prompt is exposed before the TTY resumes");
     input.paused = false;
@@ -1047,9 +1051,16 @@ function makeHiddenLineTty({ onResume, onPrompt } = {}) {
       outputWrites.push(value);
       if (value !== "\n") {
         assert.equal(input.listenerCount("data"), 1);
+        assert.equal(input.listenerCount("end"), 1);
+        assert.equal(input.listenerCount("error"), 1);
         assert.equal(input.isRaw, true);
-        assert.equal(input.paused, true);
-        onPrompt?.(input, value);
+        if (outputWrites.length === 1) {
+          assert.equal(input.paused, true);
+          onPrompt?.(input, value);
+        } else {
+          assert.equal(input.paused, false);
+          onVisibleWrite?.(input, value);
+        }
       }
       return true;
     },
@@ -1066,7 +1077,7 @@ function assertHiddenLineTtyRestored(input) {
 }
 
 {
-  const acknowledgement = managerTest.ACK.initialize;
+  const acknowledgement = managerTest.ACK.store;
   const promptText = `Type ${acknowledgement} (not secret): `;
   const { input, output, outputWrites } = makeHiddenLineTty({
     onPrompt: (_promptInput, value) => assert.equal(value, promptText),
@@ -1076,6 +1087,132 @@ function assertHiddenLineTtyRestored(input) {
     input, output,
   }), acknowledgement);
   assert.deepEqual(outputWrites, [promptText, "\n"]);
+  assertHiddenLineTtyRestored(input);
+}
+
+for (const acknowledgement of [
+  managerTest.ACK.startPreflightMacosPasteboard,
+  managerTest.ACK.verifyPreflightMacosPasteboard,
+  managerTest.ACK.initialize,
+]) {
+  const promptText = `Type ${acknowledgement} (not secret; input visible): `;
+  const splitAt = Math.max(1, Math.floor(acknowledgement.length / 2));
+  const { input, output, outputWrites } = makeHiddenLineTty({
+    onPrompt: (_promptInput, value) => assert.equal(value, promptText),
+    onResume: (resumedInput) => {
+      resumedInput.emit("data", acknowledgement.slice(0, splitAt));
+      resumedInput.emit("data", `${acknowledgement.slice(splitAt)}\r`);
+    },
+  });
+  assert.equal(await managerTest.readVisibleAcknowledgementLine(
+    promptText, acknowledgement.length, { input, output },
+  ), acknowledgement);
+  assert.equal(outputWrites.join(""), `${promptText}${acknowledgement}\n`);
+  assertHiddenLineTtyRestored(input);
+}
+
+{
+  const acknowledgement = managerTest.ACK.startPreflightMacosPasteboard;
+  const promptText = `Type ${acknowledgement} (not secret; input visible): `;
+  const prefixLength = 8;
+  const { input, output, outputWrites } = makeHiddenLineTty({
+    onResume: (resumedInput) => {
+      resumedInput.emit("data", acknowledgement.slice(0, prefixLength));
+      resumedInput.emit("data", "\u007f");
+      resumedInput.emit("data", `${acknowledgement.slice(prefixLength - 1)}\n`);
+    },
+  });
+  assert.equal(await managerTest.readVisibleAcknowledgementLine(
+    promptText, acknowledgement.length, { input, output },
+  ), acknowledgement);
+  assert.equal(outputWrites.join(""),
+    `${promptText}${acknowledgement.slice(0, prefixLength)}\b \b` +
+    `${acknowledgement.slice(prefixLength - 1)}\n`);
+  assertHiddenLineTtyRestored(input);
+}
+
+const visibleRejectionPrefix = managerTest.ACK.initialize.slice(0, 12);
+for (const rejectionCase of [
+  { name: "wrong-prefix", data: "X", echoed: "" },
+  { name: "wrong-middle", data: `${visibleRejectionPrefix}X`, echoed: visibleRejectionPrefix },
+  { name: "control", data: "\u0003", echoed: "" },
+  { name: "ctrl-d", data: "\u0004", echoed: "" },
+  { name: "escape", data: `${visibleRejectionPrefix}\u001b`, echoed: visibleRejectionPrefix },
+  { name: "nul", data: `${visibleRejectionPrefix}\u0000`, echoed: visibleRejectionPrefix },
+  { name: "tab", data: `${visibleRejectionPrefix}\t`, echoed: visibleRejectionPrefix },
+  { name: "unicode", data: `${visibleRejectionPrefix}\u00e9`, echoed: visibleRejectionPrefix },
+  { name: "incomplete-newline", data: `${managerTest.ACK.initialize.slice(0, -1)}\n`,
+    echoed: managerTest.ACK.initialize.slice(0, -1) },
+  { name: "extra-character", data: `${managerTest.ACK.initialize}X`,
+    echoed: managerTest.ACK.initialize },
+]) {
+  const acknowledgement = managerTest.ACK.initialize;
+  const promptText = `Type ${acknowledgement} (not secret; input visible): `;
+  const { input, output, outputWrites } = makeHiddenLineTty({
+    onResume: (resumedInput) => resumedInput.emit("data", rejectionCase.data),
+  });
+  await assert.rejects(managerTest.readVisibleAcknowledgementLine(
+    promptText, acknowledgement.length, { input, output },
+  ), /INPUT_REJECTED/, rejectionCase.name);
+  assert.equal(outputWrites.join(""), `${promptText}${rejectionCase.echoed}\n`,
+    `${rejectionCase.name} never renders the rejected byte`);
+  assertHiddenLineTtyRestored(input);
+}
+
+for (const terminalEvent of ["end", "error"]) {
+  const acknowledgement = managerTest.ACK.initialize;
+  const promptText = `Type ${acknowledgement} (not secret; input visible): `;
+  const { input, output, outputWrites } = makeHiddenLineTty({
+    onResume: (resumedInput) => resumedInput.emit(
+      terminalEvent,
+      ...(terminalEvent === "error" ? [new Error("simulated TTY error")] : []),
+    ),
+  });
+  await assert.rejects(managerTest.readVisibleAcknowledgementLine(
+    promptText, acknowledgement.length, { input, output },
+  ), /INPUT_REJECTED/, `${terminalEvent} rejects a visible acknowledgement`);
+  assert.equal(outputWrites.join(""), `${promptText}\n`);
+  assertHiddenLineTtyRestored(input);
+}
+
+{
+  const acknowledgement = managerTest.ACK.initialize;
+  const promptText = `Type ${acknowledgement} (not secret; input visible): `;
+  const { input, output, outputWrites } = makeHiddenLineTty();
+  await assert.rejects(managerTest.readVisibleAcknowledgementLine(
+    promptText, acknowledgement.length, { input, output, timeoutMs: 10 },
+  ), /INPUT_REJECTED/, "a visible acknowledgement cannot hold the namespace lock indefinitely");
+  assert.equal(outputWrites.join(""), `${promptText}\n`);
+  assertHiddenLineTtyRestored(input);
+}
+
+{
+  const acknowledgement = managerTest.ACK.initialize;
+  const promptText = `Type ${acknowledgement} (not secret; input visible): `;
+  const { input, output, outputWrites } = makeHiddenLineTty({
+    onResume: (resumedInput) => resumedInput.emit("data", acknowledgement[0]),
+  });
+  const originalWrite = output.write.bind(output);
+  let writeCount = 0;
+  output.write = (value) => {
+    writeCount += 1;
+    if (writeCount === 2) throw new Error("simulated output failure");
+    return originalWrite(value);
+  };
+  await assert.rejects(managerTest.readVisibleAcknowledgementLine(
+    promptText, acknowledgement.length, { input, output },
+  ), /INPUT_REJECTED/, "visible acknowledgement output failure rejects safely");
+  assert.equal(outputWrites.join(""), `${promptText}\n`);
+  assertHiddenLineTtyRestored(input);
+}
+
+{
+  const acknowledgement = managerTest.ACK.store;
+  const promptText = `Type ${acknowledgement} (not secret; input visible): `;
+  const { input, output } = makeHiddenLineTty();
+  await assert.rejects(managerTest.readVisibleAcknowledgementLine(
+    promptText, acknowledgement.length, { input, output },
+  ), /INPUT_REJECTED/, "private-value staging acknowledgements remain on the hidden reader");
   assertHiddenLineTtyRestored(input);
 }
 
@@ -1156,7 +1293,7 @@ async function runNodeProbe(source, args) {
   const managerPtyDriver = [
     "import errno,os,select,signal,sys,time",
     "node,source,manager_url,keychain_url,namespace,window_end,lock_root,now_text=sys.argv[1:]",
-    "prompt=b'Type INITIALIZE_F02_KEYCHAIN_NAMESPACE_ONCE (not secret): '",
+    "prompt=b'Type INITIALIZE_F02_KEYCHAIN_NAMESPACE_ONCE (not secret; input visible): '",
     "ack=b'INITIALIZE_F02_KEYCHAIN_NAMESPACE_ONCE\\n'",
     "pid,fd=os.forkpty()",
     "if pid==0:",
@@ -1224,14 +1361,15 @@ async function runNodeProbe(source, args) {
       NAMESPACE, WINDOW_END, managerLockRoot, String(NOW),
     ]);
     assert.deepEqual(probe.result, { code: 0, signal: null },
-      "the full initializer succeeds through its default hidden reader in a real PTY");
+      "the full initializer succeeds through its default visible acknowledgement reader in a real PTY");
     assert.equal(probe.stderr.length, 0);
     const transcript = probe.stdout.toString("utf8").replaceAll("\r\n", "\n");
     assert.equal(transcript,
-      "Type INITIALIZE_F02_KEYCHAIN_NAMESPACE_ONCE (not secret): \n" +
+      "Type INITIALIZE_F02_KEYCHAIN_NAMESPACE_ONCE (not secret; input visible): " +
+      "INITIALIZE_F02_KEYCHAIN_NAMESPACE_ONCE\n" +
       "STATUS=COMPLETE RESULT=F02_KEYCHAIN_NAMESPACE_INITIALIZED\n");
-    assert.equal(transcript.split(managerTest.ACK.initialize).length - 1, 1,
-      "the nonsecret acknowledgement is not echoed by the raw terminal");
+    assert.equal(transcript.split(managerTest.ACK.initialize).length - 1, 2,
+      "the fixed nonsecret acknowledgement is safely echoed by the manager");
     assert.deepEqual(await readdir(managerLockRoot), [],
       "the integrated initializer releases its advisory lock cleanly");
   } finally {
@@ -3101,5 +3239,5 @@ try {
 }
 
 process.stdout.write(
-  "Project 2 F-02 Keychain validation passed: zero-secret two-acknowledgement native macOS pasteboard preflight with initial/final verified clearing and isolated signal cleanup, namespace freshness, pre-lock canonical approved-window admission with state/end/start fencing, managed native-prompt PTY with an exact CRLF-delimited two-prompt/retype same-value handshake, copy-minimized input and failure-path wiping, prompt/separator drift rejection and descendant reaping, a full default-reader PTY initialization, bounded hidden input with its listener armed before prompt exposure and resume, stage-specific initialization diagnostics, durable helper-death fencing, advisory-lock serialization and last-child reap, fixed labels, stdin-only writes, exact absence handling, buffer clearing, clipboard custody, one-use claims, redacted helper output, READY-time final GO, retirement-proof-guarded namespace deletion, and verified cleanup.\n",
+  "Project 2 F-02 Keychain validation passed: zero-secret two-acknowledgement native macOS pasteboard preflight with initial/final verified clearing and isolated signal cleanup, namespace freshness, pre-lock canonical approved-window admission with state/end/start fencing, canonical-only visible preflight and initializer acknowledgements that reject untrusted bytes before rendering, hidden private-value and later acknowledgement paths, managed native-prompt PTY with an exact CRLF-delimited two-prompt/retype same-value handshake, copy-minimized input and failure-path wiping, prompt/separator drift rejection and descendant reaping, a full default-reader PTY initialization, bounded input with listeners armed before prompt exposure and resume, stage-specific initialization diagnostics, durable helper-death fencing, advisory-lock serialization and last-child reap, fixed labels, stdin-only writes, exact absence handling, buffer clearing, clipboard custody, one-use claims, redacted helper output, READY-time final GO, retirement-proof-guarded namespace deletion, and verified cleanup.\n",
 );

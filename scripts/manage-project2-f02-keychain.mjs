@@ -59,6 +59,11 @@ const ACK = Object.freeze({
   generate: "GENERATE_F02_PRIVATE_BINDING_ONCE",
   cleanup: "DELETE_F02_KEYCHAIN_NAMESPACE_ONCE",
 });
+const VISIBLE_ACKNOWLEDGEMENTS = Object.freeze([
+  ACK.startPreflightMacosPasteboard,
+  ACK.verifyPreflightMacosPasteboard,
+  ACK.initialize,
+]);
 const INITIALIZE_STAGE_RESULT = Object.freeze({
   WINDOW: "F02_KEYCHAIN_INITIALIZE_WINDOW_REJECTED",
   ACK: "F02_KEYCHAIN_INITIALIZE_ACK_REJECTED",
@@ -221,6 +226,104 @@ async function readHiddenLine(promptText, maxLength, dependencies = {}) {
     });
   } finally {
     value = "";
+    restoreTerminal(input);
+  }
+}
+
+async function readVisibleAcknowledgementLine(promptText, maxLength, dependencies = {}) {
+  const input = dependencies.input || process.stdin;
+  const output = dependencies.output || process.stdout;
+  const timeoutMs = dependencies.timeoutMs ?? HIDDEN_INPUT_TIMEOUT_MS;
+  const promptMatch = /^Type ([A-Z0-9_]+) \(not secret; input visible\): $/.exec(
+    String(promptText),
+  );
+  const phrase = String(promptMatch?.[1] || "");
+  if (!input.isTTY || !output.isTTY || typeof input.setRawMode !== "function") {
+    throw new Error("INPUT_REJECTED");
+  }
+  if (!VISIBLE_ACKNOWLEDGEMENTS.includes(phrase) || maxLength !== phrase.length ||
+      !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 ||
+      timeoutMs > HIDDEN_INPUT_TIMEOUT_MS) {
+    throw new Error("INPUT_REJECTED");
+  }
+  let acceptedLength = 0;
+  try {
+    input.setEncoding("utf8");
+    input.setRawMode(true);
+    return await new Promise((resolvePromise, rejectPromise) => {
+      let settled = false;
+      let promptExposed = false;
+      let timeout;
+      const cleanup = () => {
+        input.off("data", onData);
+        input.off("end", onEnd);
+        input.off("error", onError);
+        clearTimeout(timeout);
+        restoreTerminal(input);
+        if (promptExposed) {
+          try { output.write("\n"); } catch {}
+        }
+      };
+      const finish = (error, result) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (error) rejectPromise(new Error("INPUT_REJECTED"));
+        else resolvePromise(result);
+      };
+      const writeCanonical = (value) => {
+        try {
+          output.write(value);
+          return true;
+        } catch {
+          finish(new Error("INPUT_REJECTED"));
+          return false;
+        }
+      };
+      const onData = (chunk) => {
+        for (const character of chunk) {
+          if (character === "\u0003" || character === "\u0004") {
+            finish(new Error("INPUT_REJECTED"));
+            return;
+          }
+          if (character === "\r" || character === "\n") {
+            if (acceptedLength !== phrase.length) finish(new Error("INPUT_REJECTED"));
+            else finish(null, phrase);
+            return;
+          }
+          if (character === "\u007f" || character === "\b") {
+            if (acceptedLength > 0) {
+              acceptedLength -= 1;
+              if (!writeCanonical("\b \b")) return;
+            }
+            continue;
+          }
+          if (acceptedLength >= phrase.length || character !== phrase[acceptedLength]) {
+            finish(new Error("INPUT_REJECTED"));
+            return;
+          }
+          const canonicalCharacter = phrase[acceptedLength];
+          acceptedLength += 1;
+          if (!writeCanonical(canonicalCharacter)) return;
+        }
+      };
+      const onEnd = () => finish(new Error("INPUT_REJECTED"));
+      const onError = () => finish(new Error("INPUT_REJECTED"));
+      input.on("data", onData);
+      input.once("end", onEnd);
+      input.once("error", onError);
+      timeout = setTimeout(() => finish(new Error("INPUT_REJECTED")), timeoutMs);
+      try {
+        promptExposed = true;
+        output.write(promptText);
+        if (settled) return;
+        input.resume();
+      } catch {
+        finish(new Error("INPUT_REJECTED"));
+      }
+    });
+  } finally {
+    acceptedLength = 0;
     restoreTerminal(input);
   }
 }
@@ -401,10 +504,11 @@ async function defaultClipboardClear() {
   }
 }
 
-async function requireAck(prompt, phrase) {
+async function requireAck(prompt, phrase, visible = false) {
   let supplied = "";
   try {
-    supplied = await prompt(`Type ${phrase} (not secret): `, phrase.length);
+    supplied = await prompt(`Type ${phrase} (not secret${visible ? "; input visible" : ""}): `,
+      phrase.length);
     if (supplied !== phrase) throw new Error("INPUT_REJECTED");
   } finally {
     supplied = "";
@@ -440,6 +544,8 @@ export async function manageF02KeychainMain(argv = process.argv.slice(2), depend
     }
   };
   const prompt = dependencies.readHiddenLine || readHiddenLine;
+  const visibleAcknowledgementPrompt = dependencies.readVisibleAcknowledgementLine ||
+    dependencies.readHiddenLine || readVisibleAcknowledgementLine;
   const randomBytesImpl = dependencies.randomBytesImpl || randomBytes;
   const clipboardRead = dependencies.clipboardRead || defaultClipboardRead;
   const clipboardClear = dependencies.clipboardClear || defaultClipboardClear;
@@ -504,7 +610,7 @@ export async function manageF02KeychainMain(argv = process.argv.slice(2), depend
         throw new Error("INPUT_REJECTED");
       }
       requireFreshNamespace(preflightNamespace);
-      await requireAck(prompt, ACK.startPreflightMacosPasteboard);
+      await requireAck(visibleAcknowledgementPrompt, ACK.startPreflightMacosPasteboard, true);
       requirePreflightActive();
       signalState.preflightPasteboardIntent = true;
       try {
@@ -522,7 +628,7 @@ export async function manageF02KeychainMain(argv = process.argv.slice(2), depend
       print(`NONSECRET_F02_MACOS_PASTEBOARD_CHALLENGE=${challenge}`);
       print("ACTION=COPY_CHALLENGE_WITH_NATIVE_MACOS_COPY");
       routeStage = true;
-      await requireAck(prompt, ACK.verifyPreflightMacosPasteboard);
+      await requireAck(visibleAcknowledgementPrompt, ACK.verifyPreflightMacosPasteboard, true);
       requirePreflightActive();
       observed = await clipboardRead();
       requirePreflightActive();
@@ -715,7 +821,7 @@ export async function manageF02KeychainMain(argv = process.argv.slice(2), depend
     if (initializationBoundary !== null) {
       let initializeStage = "ACK";
       try {
-        await requireAck(prompt, ACK.initialize);
+        await requireAck(visibleAcknowledgementPrompt, ACK.initialize, true);
         initializeStage = "DEPENDENCY";
         if (typeof keychain.assertNamespaceEmpty !== "function" ||
             typeof keychain.storeNew !== "function") {
@@ -1024,6 +1130,7 @@ export const __test = Object.freeze({
   cleanupF02KeychainCliForExit,
   isLocalProcessAlive,
   readHiddenLine,
+  readVisibleAcknowledgementLine,
   stopF02KeychainCliForSignal,
 });
 
