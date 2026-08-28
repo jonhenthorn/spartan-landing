@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { writeSync } from "node:fs";
 import { TextDecoder } from "node:util";
@@ -41,7 +41,7 @@ const MAX_CLIPBOARD_BYTES = 4096;
 const CLIPBOARD_TIMEOUT_MS = 5_000;
 const INITIALIZE_MAX_SKEW_MS = 5 * 60 * 1_000;
 const HIDDEN_INPUT_TIMEOUT_MS = 5 * 60 * 1_000;
-const MACOS_PASTEBOARD_PREFLIGHT_PREFIX = "F02_MACOS_PASTEBOARD_PREFLIGHT_V1:";
+const MACOS_PASTEBOARD_PREFLIGHT_PREFIX = "F02P1:";
 const ACTIVE_CLIPBOARD_CHILDREN = new Set();
 const CLOSED_CLIPBOARD_CHILDREN = new WeakSet();
 const CLI_SIGNAL_STATE = {
@@ -52,8 +52,8 @@ const CLI_SIGNAL_STATE = {
   handling: false,
 };
 const ACK = Object.freeze({
-  startPreflightMacosPasteboard: "START_F02_MACOS_PASTEBOARD_PREFLIGHT_ONCE",
-  verifyPreflightMacosPasteboard: "VERIFY_F02_MACOS_PASTEBOARD_PREFLIGHT_ONCE",
+  startPreflightMacosPasteboard: "START_F02_COPY_TEST_ONCE",
+  verifyPreflightMacosPasteboard: "VERIFY_F02_COPY_TEST_ONCE",
   initialize: "INITIALIZE_F02_KEYCHAIN_NAMESPACE_ONCE",
   store: "STORE_F02_MACOS_PASTEBOARD_ITEM_ONCE",
   generate: "GENERATE_F02_PRIVATE_BINDING_ONCE",
@@ -83,6 +83,12 @@ const MACOS_PASTEBOARD_PREFLIGHT_RESULT = Object.freeze({
   INTERRUPTED: "F02_MACOS_PASTEBOARD_PREFLIGHT_INTERRUPTED",
   SHUTDOWN_AMBIGUOUS: "F02_MACOS_PASTEBOARD_PREFLIGHT_SHUTDOWN_AMBIGUOUS",
 });
+const MACOS_PASTEBOARD_PREFLIGHT_EXIT_CODE = Object.freeze({
+  COMPLETE: 0,
+  INPUT_REJECTED: 20,
+  ROUTE_REJECTED: 21,
+  CLEAR_REJECTED: 22,
+});
 
 const INPUT_VALIDATION = Object.freeze({
   [F02_KEYCHAIN_ITEMS.accountId]: Object.freeze({ maxBytes: 32, pattern: /^[a-f0-9]{32}$/ }),
@@ -107,6 +113,19 @@ const INPUT_VALIDATION = Object.freeze({
 
 function exactArgs(argv, expected) {
   return argv.length === expected.length && argv.every((value, index) => value === expected[index]);
+}
+
+function makeMacosPasteboardPreflightChallenge(namespace, nonce) {
+  if (!F02_KEYCHAIN_NAMESPACE.test(namespace) || !Buffer.isBuffer(nonce) || nonce.length !== 16) {
+    throw new Error("INPUT_REJECTED");
+  }
+  const digest = createHash("sha256")
+    .update("SPARTAN_PROJECT2_F02_MACOS_PASTEBOARD_PREFLIGHT_V1\0", "utf8")
+    .update(namespace, "utf8")
+    .update("\0", "utf8")
+    .update(nonce)
+    .digest("hex");
+  return `${MACOS_PASTEBOARD_PREFLIGHT_PREFIX}${digest.slice(0, 32)}`;
 }
 
 const isLocalProcessAlive = isF02LocalProcessAlive;
@@ -584,7 +603,7 @@ export async function manageF02KeychainMain(argv = process.argv.slice(2), depend
   if (argv[0] === "--preflight-macos-pasteboard") {
     signalState.preflightTerminalEmitted = false;
     let line = `STATUS=STOPPED RESULT=${MACOS_PASTEBOARD_PREFLIGHT_RESULT.INPUT_REJECTED}`;
-    let status = 1;
+    let status = MACOS_PASTEBOARD_PREFLIGHT_EXIT_CODE.INPUT_REJECTED;
     let challenge = "";
     let observed = "";
     let nonce;
@@ -610,6 +629,7 @@ export async function manageF02KeychainMain(argv = process.argv.slice(2), depend
         throw new Error("INPUT_REJECTED");
       }
       requireFreshNamespace(preflightNamespace);
+      print("ACTION=TYPE_START_ACKNOWLEDGEMENT_MANUALLY_DO_NOT_PASTE");
       await requireAck(visibleAcknowledgementPrompt, ACK.startPreflightMacosPasteboard, true);
       requirePreflightActive();
       signalState.preflightPasteboardIntent = true;
@@ -624,9 +644,10 @@ export async function manageF02KeychainMain(argv = process.argv.slice(2), depend
       if (!Buffer.isBuffer(nonce) || nonce.length !== 16) {
         throw new Error("INPUT_REJECTED");
       }
-      challenge = `${MACOS_PASTEBOARD_PREFLIGHT_PREFIX}${preflightNamespace}:${nonce.toString("hex")}`;
-      print(`NONSECRET_F02_MACOS_PASTEBOARD_CHALLENGE=${challenge}`);
-      print("ACTION=COPY_CHALLENGE_WITH_NATIVE_MACOS_COPY");
+      challenge = makeMacosPasteboardPreflightChallenge(preflightNamespace, nonce);
+      print("ACTION=DRAG_SELECT_ONLY_THE_COMPLETE_NEXT_LINE_WITHOUT_LINE_BREAK");
+      print(challenge);
+      print("ACTION=PRESS_COMMAND_C_THEN_TYPE_VERIFY_ACKNOWLEDGEMENT_MANUALLY_DO_NOT_PASTE");
       routeStage = true;
       await requireAck(visibleAcknowledgementPrompt, ACK.verifyPreflightMacosPasteboard, true);
       requirePreflightActive();
@@ -636,14 +657,18 @@ export async function manageF02KeychainMain(argv = process.argv.slice(2), depend
       if (observed !== challenge) throw new Error("INPUT_REJECTED");
       requirePreflightActive();
       line = `STATUS=COMPLETE RESULT=${MACOS_PASTEBOARD_PREFLIGHT_RESULT.COMPLETE}`;
-      status = 0;
+      status = MACOS_PASTEBOARD_PREFLIGHT_EXIT_CODE.COMPLETE;
     } catch {
-      line = `STATUS=STOPPED RESULT=${clearRejected
-        ? MACOS_PASTEBOARD_PREFLIGHT_RESULT.CLEAR_REJECTED
-        : routeStage
-          ? MACOS_PASTEBOARD_PREFLIGHT_RESULT.ROUTE_REJECTED
-          : MACOS_PASTEBOARD_PREFLIGHT_RESULT.INPUT_REJECTED}`;
-      status = 1;
+      if (clearRejected) {
+        line = `STATUS=STOPPED RESULT=${MACOS_PASTEBOARD_PREFLIGHT_RESULT.CLEAR_REJECTED}`;
+        status = MACOS_PASTEBOARD_PREFLIGHT_EXIT_CODE.CLEAR_REJECTED;
+      } else if (routeStage) {
+        line = `STATUS=STOPPED RESULT=${MACOS_PASTEBOARD_PREFLIGHT_RESULT.ROUTE_REJECTED}`;
+        status = MACOS_PASTEBOARD_PREFLIGHT_EXIT_CODE.ROUTE_REJECTED;
+      } else {
+        line = `STATUS=STOPPED RESULT=${MACOS_PASTEBOARD_PREFLIGHT_RESULT.INPUT_REJECTED}`;
+        status = MACOS_PASTEBOARD_PREFLIGHT_EXIT_CODE.INPUT_REJECTED;
+      }
     } finally {
       challenge = "";
       observed = "";
@@ -656,17 +681,16 @@ export async function manageF02KeychainMain(argv = process.argv.slice(2), depend
             clearRejected = true;
           }
         }
-        if (signalState.handling || signalState.preflightTerminalEmitted) {
-          status = 1;
-        } else {
-          signalState.preflightPasteboardIntent = false;
-        }
-      } else {
-        status = 1;
       }
-      if (clearRejected) {
-        line = `STATUS=STOPPED RESULT=${MACOS_PASTEBOARD_PREFLIGHT_RESULT.CLEAR_REJECTED}`;
+      const terminalOwned = signalState.handling || signalState.preflightTerminalEmitted;
+      if (terminalOwned) {
         status = 1;
+      } else if (clearRejected) {
+        line = `STATUS=STOPPED RESULT=${MACOS_PASTEBOARD_PREFLIGHT_RESULT.CLEAR_REJECTED}`;
+        status = MACOS_PASTEBOARD_PREFLIGHT_EXIT_CODE.CLEAR_REJECTED;
+        signalState.preflightPasteboardIntent = false;
+      } else {
+        signalState.preflightPasteboardIntent = false;
       }
       restoreTerminal();
     }
@@ -1121,6 +1145,7 @@ export const __test = Object.freeze({
   INITIALIZE_STAGE_RESULT,
   INPUT_VALIDATION,
   MACOS_PASTEBOARD_PREFLIGHT_PREFIX,
+  MACOS_PASTEBOARD_PREFLIGHT_EXIT_CODE,
   MACOS_PASTEBOARD_PREFLIGHT_RESULT,
   PBCOPY,
   PBPASTE,
@@ -1129,6 +1154,7 @@ export const __test = Object.freeze({
   abortClipboardProcesses,
   cleanupF02KeychainCliForExit,
   isLocalProcessAlive,
+  makeMacosPasteboardPreflightChallenge,
   readHiddenLine,
   readVisibleAcknowledgementLine,
   stopF02KeychainCliForSignal,
