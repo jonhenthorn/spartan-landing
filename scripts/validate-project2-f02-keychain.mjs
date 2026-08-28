@@ -805,16 +805,22 @@ assert.equal(
 );
 assert.equal(
   managerTest.ACK.startPreflightMacosPasteboard,
-  "START_F02_MACOS_PASTEBOARD_PREFLIGHT_ONCE",
+  "START_F02_COPY_TEST_ONCE",
 );
 assert.equal(
   managerTest.ACK.verifyPreflightMacosPasteboard,
-  "VERIFY_F02_MACOS_PASTEBOARD_PREFLIGHT_ONCE",
+  "VERIFY_F02_COPY_TEST_ONCE",
 );
 assert.equal(
   managerTest.MACOS_PASTEBOARD_PREFLIGHT_PREFIX,
-  "F02_MACOS_PASTEBOARD_PREFLIGHT_V1:",
+  "F02P1:",
 );
+assert.deepEqual(managerTest.MACOS_PASTEBOARD_PREFLIGHT_EXIT_CODE, {
+  COMPLETE: 0,
+  INPUT_REJECTED: 20,
+  ROUTE_REJECTED: 21,
+  CLEAR_REJECTED: 22,
+});
 assert.deepEqual(managerTest.MACOS_PASTEBOARD_PREFLIGHT_RESULT, {
   COMPLETE: "F02_MACOS_PASTEBOARD_PREFLIGHT_VERIFIED_AND_CLEARED",
   INPUT_REJECTED: "F02_MACOS_PASTEBOARD_PREFLIGHT_INPUT_REJECTED",
@@ -827,8 +833,35 @@ assert.equal(managerTest.PBCOPY, "/usr/bin/pbcopy");
 assert.equal(managerTest.PBPASTE, "/usr/bin/pbpaste");
 
 const preflightNonce = Buffer.alloc(16, 0xab);
-const preflightChallenge =
-  `${managerTest.MACOS_PASTEBOARD_PREFLIGHT_PREFIX}${NAMESPACE}:${"ab".repeat(16)}`;
+const preflightChallenge = managerTest.makeMacosPasteboardPreflightChallenge(
+  NAMESPACE, preflightNonce,
+);
+assert.match(preflightChallenge, /^F02P1:[a-f0-9]{32}$/);
+assert.equal(preflightChallenge, "F02P1:aa7269773f227cdf859fba16f37e9cb6",
+  "the compact challenge matches its independent fixed SHA-256 known-answer vector");
+assert.equal(preflightChallenge.includes(NAMESPACE), false,
+  "the rendered copy challenge does not disclose its private namespace");
+assert.equal(
+  managerTest.makeMacosPasteboardPreflightChallenge(NAMESPACE, Buffer.alloc(16, 0xab)),
+  preflightChallenge,
+  "the compact challenge is deterministic for one namespace and nonce",
+);
+assert.notEqual(
+  managerTest.makeMacosPasteboardPreflightChallenge(DRIFT_NAMESPACE, Buffer.alloc(16, 0xab)),
+  preflightChallenge,
+  "the compact challenge remains bound to its private namespace",
+);
+assert.notEqual(
+  managerTest.makeMacosPasteboardPreflightChallenge(NAMESPACE, Buffer.alloc(16, 0xac)),
+  preflightChallenge,
+  "the compact challenge remains bound to its fresh random nonce",
+);
+assert.throws(() => managerTest.makeMacosPasteboardPreflightChallenge(
+  "not-a-namespace", Buffer.alloc(16, 0xab),
+), /INPUT_REJECTED/);
+assert.throws(() => managerTest.makeMacosPasteboardPreflightChallenge(
+  NAMESPACE, Buffer.alloc(15, 0xab),
+), /INPUT_REJECTED/);
 const successfulPreflightOutput = [];
 const successfulPreflightCalls = [];
 assert.equal(await manageF02KeychainMain([
@@ -857,15 +890,17 @@ assert.equal(await manageF02KeychainMain([
   },
 }), 0);
 assert.deepEqual(successfulPreflightCalls, [
-  "now", "ack-start", "clear", "random",
-  "print:NONSECRET_F02_MACOS_PASTEBOARD_CHALLENGE", "print:ACTION",
+  "now", "print:ACTION", "ack-start", "clear", "random",
+  "print:ACTION", `print:${preflightChallenge}`, "print:ACTION",
   "ack-verify", "read", "now", "clear", "print:STATUS",
 ]);
 assert.equal(preflightNonce.equals(Buffer.alloc(16)), true,
   "the preflight wipes its mutable random nonce");
 assert.deepEqual(successfulPreflightOutput, [
-  `NONSECRET_F02_MACOS_PASTEBOARD_CHALLENGE=${preflightChallenge}`,
-  "ACTION=COPY_CHALLENGE_WITH_NATIVE_MACOS_COPY",
+  "ACTION=TYPE_START_ACKNOWLEDGEMENT_MANUALLY_DO_NOT_PASTE",
+  "ACTION=DRAG_SELECT_ONLY_THE_COMPLETE_NEXT_LINE_WITHOUT_LINE_BREAK",
+  preflightChallenge,
+  "ACTION=PRESS_COMMAND_C_THEN_TYPE_VERIFY_ACKNOWLEDGEMENT_MANUALLY_DO_NOT_PASTE",
   "STATUS=COMPLETE RESULT=F02_MACOS_PASTEBOARD_PREFLIGHT_VERIFIED_AND_CLEARED",
 ]);
 
@@ -912,7 +947,8 @@ for (const preflightCase of [
     clipboardRead: async () => { reads += 1; return "must-not-read"; },
     clipboardClear: async () => { clears += 1; },
     print: (line) => lines.push(line),
-  }), 1, preflightCase.name);
+  }), managerTest.MACOS_PASTEBOARD_PREFLIGHT_EXIT_CODE.INPUT_REJECTED,
+  preflightCase.name);
   assert.equal(prompts, preflightCase.expectedPrompts, preflightCase.name);
   assert.equal(randomCalls, 0, preflightCase.name);
   assert.equal(reads, 0, preflightCase.name);
@@ -938,10 +974,12 @@ for (const dependencyCase of [
     clipboardRead: async () => { reads += 1; return "must-not-read"; },
     clipboardClear: async () => { clears += 1; },
     print: (line) => lines.push(line),
-  }), 1, dependencyCase.name);
+  }), managerTest.MACOS_PASTEBOARD_PREFLIGHT_EXIT_CODE.INPUT_REJECTED,
+  dependencyCase.name);
   assert.equal(reads, 0, dependencyCase.name);
   assert.equal(clears, 2, dependencyCase.name);
   assert.deepEqual(lines, [
+    "ACTION=TYPE_START_ACKNOWLEDGEMENT_MANUALLY_DO_NOT_PASTE",
     "STATUS=STOPPED RESULT=F02_MACOS_PASTEBOARD_PREFLIGHT_INPUT_REJECTED",
   ], dependencyCase.name);
 }
@@ -950,8 +988,10 @@ for (const routeCase of [
   { name: "second-ack", wrongSecondAck: true, expectedReads: 0 },
   { name: "read", readThrows: true, expectedReads: 1 },
   { name: "browser-only-dummy", observed: "BROWSER_CONTROLLER_CLIPBOARD_DUMMY", expectedReads: 1 },
+  { name: "leading-space", observed: ` ${preflightChallenge}`, expectedReads: 1 },
+  { name: "trailing-line-break", observed: `${preflightChallenge}\n`, expectedReads: 1 },
   { name: "old-nonce", observed:
-      `${managerTest.MACOS_PASTEBOARD_PREFLIGHT_PREFIX}${NAMESPACE}:${"00".repeat(16)}`,
+      `${managerTest.MACOS_PASTEBOARD_PREFLIGHT_PREFIX}${"00".repeat(16)}`,
     expectedReads: 1 },
   { name: "final-freshness", observed: preflightChallenge, finalNow: NOW + (10 * 60 * 1_000),
     expectedReads: 1 },
@@ -979,7 +1019,8 @@ for (const routeCase of [
     },
     clipboardClear: async () => { clears += 1; },
     print: (line) => lines.push(line),
-  }), 1, routeCase.name);
+  }), managerTest.MACOS_PASTEBOARD_PREFLIGHT_EXIT_CODE.ROUTE_REJECTED,
+  routeCase.name);
   assert.equal(prompts, 2, routeCase.name);
   assert.equal(reads, routeCase.expectedReads, routeCase.name);
   assert.equal(clears, 2, routeCase.name);
@@ -1008,14 +1049,17 @@ for (const clearCase of [
     clipboardRead: async () => {
       reads += 1;
       return clearCase.observed ??
-        `${managerTest.MACOS_PASTEBOARD_PREFLIGHT_PREFIX}${NAMESPACE}:${"af".repeat(16)}`;
+        managerTest.makeMacosPasteboardPreflightChallenge(
+          NAMESPACE, Buffer.alloc(16, 0xaf),
+        );
     },
     clipboardClear: async () => {
       clears += 1;
       if (clears === clearCase.failedClearCall) throw new Error("simulated clear failure");
     },
     print: (line) => lines.push(line),
-  }), 1, clearCase.name);
+  }), managerTest.MACOS_PASTEBOARD_PREFLIGHT_EXIT_CODE.CLEAR_REJECTED,
+  clearCase.name);
   assert.equal(clears, 2, clearCase.name);
   assert.equal(randomCalls, clearCase.expectedRandom, clearCase.name);
   assert.equal(reads, clearCase.expectedReads, clearCase.name);
@@ -1265,6 +1309,157 @@ async function runProcessProbe(command, args) {
 
 async function runNodeProbe(source, args) {
   return runProcessProbe(process.execPath, ["--input-type=module", "--eval", source, ...args]);
+}
+
+{
+  const managerModuleUrl = new URL("./manage-project2-f02-keychain.mjs", import.meta.url).href;
+  const failureExitProbeSource = [
+    "const [managerUrl,namespace,nowText,mode]=process.argv.slice(1)",
+    "const {manageF02KeychainMain,__test}=await import(managerUrl)",
+    "const nonce=Buffer.alloc(16,0xab)",
+    "const challenge=__test.makeMacosPasteboardPreflightChallenge(namespace,nonce)",
+    "let clears=0",
+    "const code=await manageF02KeychainMain(['--preflight-macos-pasteboard',namespace],{",
+    " randomBytesImpl:()=>nonce,now:()=>Number(nowText),",
+    " readHiddenLine:async(prompt)=>mode==='input'?'WRONG_ACK':prompt.match(/^Type ([A-Z0-9_]+)/)[1],",
+    " clipboardRead:async()=>mode==='route'?'F02P1:00000000000000000000000000000000':challenge,",
+    " clipboardClear:async()=>{clears+=1;if(mode==='clear')throw new Error('clear rejected')},",
+    "})",
+    "process.exitCode=code",
+  ].join("\n");
+  for (const failureCase of [
+    { mode: "input", code: 20, result: "F02_MACOS_PASTEBOARD_PREFLIGHT_INPUT_REJECTED" },
+    { mode: "route", code: 21, result: "F02_MACOS_PASTEBOARD_PREFLIGHT_ROUTE_REJECTED" },
+    { mode: "clear", code: 22, result: "F02_MACOS_PASTEBOARD_PREFLIGHT_CLEAR_REJECTED" },
+  ]) {
+    const probe = await runNodeProbe(failureExitProbeSource, [
+      managerModuleUrl, NAMESPACE, String(NOW), failureCase.mode,
+    ]);
+    assert.deepEqual(probe.result, { code: failureCase.code, signal: null },
+      `${failureCase.mode} rejection survives as its distinct OS process exit`);
+    assert.equal(probe.stderr.length, 0);
+    const transcript = probe.stdout.toString("utf8");
+    assert.equal(transcript.trimEnd().endsWith(
+      `STATUS=STOPPED RESULT=${failureCase.result}`,
+    ), true);
+    assert.equal(transcript.includes(NAMESPACE), false,
+      `${failureCase.mode} process output excludes the private namespace`);
+  }
+}
+
+{
+  const pythonPath = keychainTest.selectSecurityPtyPython();
+  const managerModuleUrl = new URL("./manage-project2-f02-keychain.mjs", import.meta.url).href;
+  const preflightPtyChild = [
+    "const [managerUrl,namespace,nowText]=process.argv.slice(1)",
+    "const {manageF02KeychainMain,__test}=await import(managerUrl)",
+    "const nonce=Buffer.alloc(16,0xab)",
+    "const challenge=__test.makeMacosPasteboardPreflightChallenge(namespace,nonce)",
+    "let clears=0",
+    "const code=await manageF02KeychainMain(['--preflight-macos-pasteboard',namespace],{",
+    " randomBytesImpl:()=>nonce,now:()=>Number(nowText),",
+    " clipboardRead:async()=>challenge,clipboardClear:async()=>{clears+=1},",
+    "})",
+    "if(code!==__test.MACOS_PASTEBOARD_PREFLIGHT_EXIT_CODE.COMPLETE||clears!==2)process.exitCode=3",
+  ].join("\n");
+  const preflightPtyDriver = [
+    "import errno,os,select,signal,sys,time",
+    "node,source,manager_url,namespace,now_text,challenge=sys.argv[1:]",
+    "intro=b'ACTION=TYPE_START_ACKNOWLEDGEMENT_MANUALLY_DO_NOT_PASTE\\r\\n'",
+    "start_prompt=b'Type START_F02_COPY_TEST_ONCE (not secret; input visible): '",
+    "start_ack=b'START_F02_COPY_TEST_ONCE\\n'",
+    "copy_action=b'ACTION=DRAG_SELECT_ONLY_THE_COMPLETE_NEXT_LINE_WITHOUT_LINE_BREAK\\r\\n'",
+    "verify_action=b'ACTION=PRESS_COMMAND_C_THEN_TYPE_VERIFY_ACKNOWLEDGEMENT_MANUALLY_DO_NOT_PASTE\\r\\n'",
+    "verify_prompt=b'Type VERIFY_F02_COPY_TEST_ONCE (not secret; input visible): '",
+    "verify_ack=b'VERIFY_F02_COPY_TEST_ONCE\\n'",
+    "start_ready=intro+start_prompt",
+    "verify_ready=start_ready+start_ack.replace(b'\\n',b'\\r\\n')+copy_action+challenge.encode()+b'\\r\\n'+verify_action+verify_prompt",
+    "pid,fd=os.forkpty()",
+    "if pid==0:",
+    " env={'PATH':os.environ.get('PATH',''),'LANG':'C','LC_ALL':'C'}",
+    " os.execve(node,[node,'--input-type=module','--eval',source,manager_url,namespace,now_text],env)",
+    "output=bytearray()",
+    "sent_start=False",
+    "sent_verify=False",
+    "status=None",
+    "child_reaped=False",
+    "fd_closed=False",
+    "try:",
+    " deadline=time.monotonic()+5.0",
+    " while True:",
+    "  if time.monotonic()>=deadline: raise SystemExit(80)",
+    "  if status is None:",
+    "   waited,current=os.waitpid(pid,os.WNOHANG)",
+    "   if waited==pid:",
+    "    status=current",
+    "    child_reaped=True",
+    "  try: ready,_,_=select.select([fd],[],[],0.05)",
+    "  except InterruptedError: continue",
+    "  if fd not in ready:",
+    "   if status is not None: break",
+    "   continue",
+    "  try: chunk=os.read(fd,512)",
+    "  except OSError as exc:",
+    "   if exc.errno==errno.EIO: break",
+    "   raise",
+    "  if not chunk: break",
+    "  output.extend(chunk)",
+    "  if len(output)>2048: raise SystemExit(81)",
+    "  if not sent_start:",
+    "   if not start_ready.startswith(output): raise SystemExit(82)",
+    "   if output==start_ready:",
+    "    os.write(fd,start_ack)",
+    "    sent_start=True",
+    "  elif not sent_verify:",
+    "   if not verify_ready.startswith(output): raise SystemExit(83)",
+    "   if output==verify_ready:",
+    "    os.write(fd,verify_ack)",
+    "    sent_verify=True",
+    " if status is None:",
+    "  _,status=os.waitpid(pid,0)",
+    "  child_reaped=True",
+    " os.close(fd)",
+    " fd_closed=True",
+    " if not sent_start or not sent_verify: raise SystemExit(84)",
+    " offset=0",
+    " while offset<len(output):",
+    "  count=os.write(1,output[offset:])",
+    "  if count<=0: raise SystemExit(85)",
+    "  offset+=count",
+    " code=os.WEXITSTATUS(status) if os.WIFEXITED(status) else 128+os.WTERMSIG(status)",
+    " raise SystemExit(code)",
+    "finally:",
+    " if not child_reaped:",
+    "  try: os.killpg(pid,signal.SIGKILL)",
+    "  except (ProcessLookupError,PermissionError): pass",
+    "  try: os.waitpid(pid,0)",
+    "  except (ChildProcessError,InterruptedError): pass",
+    " if not fd_closed:",
+    "  try: os.close(fd)",
+    "  except OSError: pass",
+    " for index in range(len(output)): output[index]=0",
+  ].join("\n");
+  const probe = await runProcessProbe(pythonPath, [
+    "-I", "-S", "-c", preflightPtyDriver,
+    process.execPath, preflightPtyChild, managerModuleUrl,
+    NAMESPACE, String(NOW), preflightChallenge,
+  ]);
+  assert.deepEqual(probe.result, { code: 0, signal: null },
+    "the full preflight succeeds through both default visible readers in a real PTY");
+  assert.equal(probe.stderr.length, 0);
+  const transcript = probe.stdout.toString("utf8").replaceAll("\r\n", "\n");
+  assert.equal(transcript,
+    "ACTION=TYPE_START_ACKNOWLEDGEMENT_MANUALLY_DO_NOT_PASTE\n" +
+    "Type START_F02_COPY_TEST_ONCE (not secret; input visible): " +
+    "START_F02_COPY_TEST_ONCE\n" +
+    "ACTION=DRAG_SELECT_ONLY_THE_COMPLETE_NEXT_LINE_WITHOUT_LINE_BREAK\n" +
+    `${preflightChallenge}\n` +
+    "ACTION=PRESS_COMMAND_C_THEN_TYPE_VERIFY_ACKNOWLEDGEMENT_MANUALLY_DO_NOT_PASTE\n" +
+    "Type VERIFY_F02_COPY_TEST_ONCE (not secret; input visible): " +
+    "VERIFY_F02_COPY_TEST_ONCE\n" +
+    "STATUS=COMPLETE RESULT=F02_MACOS_PASTEBOARD_PREFLIGHT_VERIFIED_AND_CLEARED\n");
+  assert.equal(transcript.includes(NAMESPACE), false,
+    "the real-PTY public transcript excludes the private namespace");
 }
 
 {
@@ -2355,8 +2550,10 @@ for (const preflightSignalCase of [
   assert.equal(nowCalls, 1,
     "terminal ambiguity prevents the post-read freshness check");
   assert.deepEqual(output, [
-    `NONSECRET_F02_MACOS_PASTEBOARD_CHALLENGE=${preflightChallenge}`,
-    "ACTION=COPY_CHALLENGE_WITH_NATIVE_MACOS_COPY",
+    "ACTION=TYPE_START_ACKNOWLEDGEMENT_MANUALLY_DO_NOT_PASTE",
+    "ACTION=DRAG_SELECT_ONLY_THE_COMPLETE_NEXT_LINE_WITHOUT_LINE_BREAK",
+    preflightChallenge,
+    "ACTION=PRESS_COMMAND_C_THEN_TYPE_VERIFY_ACKNOWLEDGEMENT_MANUALLY_DO_NOT_PASTE",
   ]);
   assert.deepEqual(signalOutput, [
     "STATUS=STOPPED RESULT=F02_MACOS_PASTEBOARD_PREFLIGHT_SHUTDOWN_AMBIGUOUS",
@@ -2394,6 +2591,7 @@ for (const preflightSignalCase of [
       if (clearCalls === 2) {
         markFinalClearStarted();
         await finalClearGate;
+        throw new Error("simulated final clear rejection after shutdown ambiguity");
       }
     },
     clipboardRead: async () => preflightChallenge,
@@ -2413,8 +2611,10 @@ for (const preflightSignalCase of [
     "an in-flight final clear resolving after terminal ambiguity cannot return success");
   assert.equal(clearCalls, 2);
   assert.deepEqual(output, [
-    `NONSECRET_F02_MACOS_PASTEBOARD_CHALLENGE=${preflightChallenge}`,
-    "ACTION=COPY_CHALLENGE_WITH_NATIVE_MACOS_COPY",
+    "ACTION=TYPE_START_ACKNOWLEDGEMENT_MANUALLY_DO_NOT_PASTE",
+    "ACTION=DRAG_SELECT_ONLY_THE_COMPLETE_NEXT_LINE_WITHOUT_LINE_BREAK",
+    preflightChallenge,
+    "ACTION=PRESS_COMMAND_C_THEN_TYPE_VERIFY_ACKNOWLEDGEMENT_MANUALLY_DO_NOT_PASTE",
   ]);
   assert.deepEqual(signalOutput, [
     "STATUS=STOPPED RESULT=F02_MACOS_PASTEBOARD_PREFLIGHT_SHUTDOWN_AMBIGUOUS",
@@ -3239,5 +3439,5 @@ try {
 }
 
 process.stdout.write(
-  "Project 2 F-02 Keychain validation passed: zero-secret two-acknowledgement native macOS pasteboard preflight with initial/final verified clearing and isolated signal cleanup, namespace freshness, pre-lock canonical approved-window admission with state/end/start fencing, canonical-only visible preflight and initializer acknowledgements that reject untrusted bytes before rendering, hidden private-value and later acknowledgement paths, managed native-prompt PTY with an exact CRLF-delimited two-prompt/retype same-value handshake, copy-minimized input and failure-path wiping, prompt/separator drift rejection and descendant reaping, a full default-reader PTY initialization, bounded input with listeners armed before prompt exposure and resume, stage-specific initialization diagnostics, durable helper-death fencing, advisory-lock serialization and last-child reap, fixed labels, stdin-only writes, exact absence handling, buffer clearing, clipboard custody, one-use claims, redacted helper output, READY-time final GO, retirement-proof-guarded namespace deletion, and verified cleanup.\n",
+  "Project 2 F-02 Keychain validation passed: zero-secret two-acknowledgement native macOS pasteboard preflight with compact namespace-hiding challenge, exact-copy custody, distinct fail-closed public rejection exit classes, full default-reader real-PTY coverage, initial/final verified clearing and isolated signal cleanup, namespace freshness, pre-lock canonical approved-window admission with state/end/start fencing, canonical-only visible preflight and initializer acknowledgements that reject untrusted bytes before rendering, hidden private-value and later acknowledgement paths, managed native-prompt PTY with an exact CRLF-delimited two-prompt/retype same-value handshake, copy-minimized input and failure-path wiping, prompt/separator drift rejection and descendant reaping, a full default-reader PTY initialization, bounded input with listeners armed before prompt exposure and resume, stage-specific initialization diagnostics, durable helper-death fencing, advisory-lock serialization and last-child reap, fixed labels, stdin-only writes, exact absence handling, buffer clearing, clipboard custody, one-use claims, redacted helper output, READY-time final GO, retirement-proof-guarded namespace deletion, and verified cleanup.\n",
 );
