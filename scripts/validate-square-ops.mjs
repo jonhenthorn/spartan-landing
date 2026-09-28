@@ -16,6 +16,7 @@ const TEST_APPS_DEPLOYMENT_ID = "AKfycbx" + "a".repeat(48);
 const TEST_APPS_HEALTH_URL = `https://script.google.com/macros/s/${TEST_APPS_DEPLOYMENT_ID}/exec`;
 const TEST_APPS_HEALTH_SECRET = ["apps", "health", "fixture", "separate", "secret", "2026"].join("-");
 const TEST_APPS_REDIRECT_URL = "https://script.googleusercontent.com/macros/echo?user_content_key=fixture&lib=fixture";
+const currentUtcMinute = () => new Date(Math.floor(Date.now() / 60_000) * 60_000);
 
 const expectedFlags = [
   "OPS_MONITORING_ENABLED",
@@ -1854,7 +1855,7 @@ async function validateMonitorBehavior(workerModule) {
 }
 
 async function validateQueueMonitorBehavior(workerModule) {
-  const base = new Date("2026-08-18T12:00:00.000Z");
+  const base = currentUtcMinute();
   const accountId = "a".repeat(32);
   const mainQueueId = "b".repeat(32);
   const dlqQueueId = "c".repeat(32);
@@ -1920,7 +1921,7 @@ async function validateQueueMonitorBehavior(workerModule) {
   );
   assert.deepEqual(
     [exactMetrics.backlogCount, exactMetrics.backlogBytes, exactMetrics.oldestMessageAt.toISOString()],
-    [2, 240, "2026-08-18T11:55:00.000Z"],
+    [2, 240, at(-300).toISOString()],
   );
   assert.equal(contractCalls.length, 1);
   assert.equal(contractCalls[0].url,
@@ -1980,7 +1981,7 @@ async function validateQueueMonitorBehavior(workerModule) {
     base,
     async () => response(payload({ count: 1, oldestMs: base.getTime() + 300000 })),
   );
-  assert.equal(exactFutureBoundary.oldestMessageAt.toISOString(), "2026-08-18T12:05:00.000Z",
+  assert.equal(exactFutureBoundary.oldestMessageAt.toISOString(), at(300).toISOString(),
     "The exact five-minute provider-clock tolerance is accepted; any later value is rejected");
 
   let poisonFetchCalls = 0;
@@ -2169,7 +2170,7 @@ async function validateQueueMonitorBehavior(workerModule) {
 }
 
 async function validateAppsScriptHealthMonitorBehavior(workerModule) {
-  const base = new Date("2026-08-18T12:00:00.000Z");
+  const base = currentUtcMinute();
   const at = (seconds) => new Date(base.getTime() + seconds * 1000);
   const clock = (startedAt, completedAt) => {
     const values = [startedAt, completedAt];
