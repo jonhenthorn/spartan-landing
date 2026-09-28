@@ -94,7 +94,7 @@ npx --no-install wrangler --version
 npx --no-install wrangler queues --help
 ```
 
-Required result: every validator and dry-run succeeds. Record the exact Wrangler version. Version `4.124.0`, inspected on August 19, exposes Queue metadata, consumer configuration, pause/resume and purge commands, but no Queue message-list, message-inspect or message-replay command. Re-check the installed version at execution time; do not infer a DLQ redrive command from a different version or from memory.
+Required result: every validator and dry-run succeeds. Record the exact Wrangler version. Version `4.131.0`, inspected on September 27, 2026, exposes Queue metadata, consumer configuration, pause/resume, purge and event-subscription commands, but no Queue message-list, message-inspect or message-replay command. Re-check the installed version at execution time; do not infer a DLQ redrive command from a different version or from memory.
 
 The current local harnesses are:
 
@@ -662,7 +662,7 @@ Result: `[BLOCKED — LOCAL CAUSAL INTERRUPTION/PRE-EXPIRY-ACK/SCHEDULED-RECLAIM
 
 ### `Q-02` — DLQ inspect and replay
 
-Wrangler `4.124.0` exposes no message-list or replay command. The local `scripts/manage-square-sandbox-dlq.mjs` helper instead uses Cloudflare's official API with a temporary account-scoped Queues Write token. Before peeking, it resolves the supplied IDs and requires the exact names `spartan-square-connector-sandbox` and `spartan-square-connector-sandbox-dlq`. It asks for at most two visible DLQ messages, proceeds only when exactly one is visible and matches the private expected connector body, prints no target/body/ref/token/provider detail, and makes no network request without an explicit mode. See `SQUARE-DLQ-REDRIVE.md`.
+Wrangler `4.131.0` exposes no message-list or replay command. The local `scripts/manage-square-sandbox-dlq.mjs` helper instead uses Cloudflare's official API with a temporary account-scoped Queues Write token. Before peeking, it resolves the supplied IDs and requires the exact names `spartan-square-connector-sandbox` and `spartan-square-connector-sandbox-dlq`. It asks for at most two visible DLQ messages, proceeds only when exactly one is visible and matches the private expected connector body, prints no target/body/ref/token/provider detail, and makes no network request without an explicit mode. See `SQUARE-DLQ-REDRIVE.md`.
 
 The bounded DLQ-producing sequence requires its own reviewed live window:
 

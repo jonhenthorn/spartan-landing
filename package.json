@@ -10,7 +10,7 @@
     "validate": "node scripts/validate-project.mjs"
   },
   "devDependencies": {
-    "miniflare": "5.20260815.0-alpha",
-    "wrangler": "4.124.0"
+    "miniflare": "5.20260910.0-alpha",
+    "wrangler": "4.131.0"
   }
 }

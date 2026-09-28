@@ -37,8 +37,8 @@ const VALIDATORS = Object.freeze([
   "scripts/validate-square-sandbox-webhook-driver.mjs",
 ]);
 const EXPECTED_PACKAGES = Object.freeze({
-  miniflare: "5.20260815.0-alpha",
-  wrangler: "4.124.0",
+  miniflare: "5.20260910.0-alpha",
+  wrangler: "4.131.0",
 });
 const EXPECTED_NPM_VERSION = "10.9.2";
 const CI_WORKFLOW_PATH = ".github/workflows/validate.yml";
